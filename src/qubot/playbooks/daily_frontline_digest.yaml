@@ -1,0 +1,43 @@
+# daily_frontline_digest playbook — runs on schedule (or via `make digest`).
+# Implementation lives in src/qubot/auditor.py::write_daily_digest().
+
+name: daily_frontline_digest
+trigger: schedule  # daily at 09:00 UTC, or `make digest`
+description: |
+  Daily ops brief for the Frontline platform. Aggregates the case funnel,
+  live cluster risk, per-agent performance, and open investigations into a
+  single markdown brief.
+
+steps:
+  - name: case_funnel
+    description: started → completed → cases → advisories notified → escalations → takeovers.
+    impl: src.qubot.retrievers.case_funnel
+
+  - name: live_risk
+    description: Cases grouped by matched cluster, joined to weekly anomalies + backtest lead-time.
+    impl: src.qubot.retrievers.live_risk
+
+  - name: agent_performance
+    description: Per-agent action counts, error rate, p50/p95 duration.
+    impl: src.qubot.retrievers.agent_performance
+
+  - name: investigation_status
+    description: Open investigations with linked cases and days open.
+    impl: src.qubot.retrievers.investigation_status
+
+  - name: narrate
+    description: Build the markdown digest.
+    impl: src.qubot.auditor.write_daily_digest
+
+output:
+  path: reports/qubot/digests/daily_{YYYY-MM-DD}.md
+  sections:
+    - contact_funnel
+    - live_risk
+    - agent_performance
+    - open_investigations
+
+stamps:
+  - pack_id
+  - pack_version
+  - context_version

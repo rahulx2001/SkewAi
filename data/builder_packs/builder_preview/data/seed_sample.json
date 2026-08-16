@@ -1,0 +1,12 @@
+[
+  {
+    "record_id": "1",
+    "entity_1": null,
+    "entity_2": "HONDA",
+    "entity_3": null,
+    "category": "GENERAL",
+    "text": "window rattle",
+    "severity_label": "Medium",
+    "region": null
+  }
+]

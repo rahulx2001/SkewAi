@@ -1,0 +1,107 @@
+# Skew AI — one-command pilot deploy
+#
+# Open / local pilot (API key optional):
+#   docker compose --profile open up --build
+#   → http://127.0.0.1:8000
+#
+# Hardened / SOC2 engineering profile (requires secrets in .env):
+#   docker compose --profile hardened up --build
+#   → http://127.0.0.1:8001  (distinct host port — safe if both profiles are enabled)
+#
+# Prefer a single profile. If both open and hardened are enabled, they no longer
+# collide on the same host port (open:8000, hardened:8001 by default).
+# Hardened uses a separate named volume so it never shares DuckDB state with open.
+#
+# Auth: set FRONTLINE_API_KEY (and SESSION_SECRET for hardened) in a local .env.
+# Never commit secrets.
+
+services:
+  # Default open pilot — only starts with --profile open
+  frontline:
+    profiles: ["open"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: frontline-v2:local
+    # Bind host loopback by default (M12) — not LAN-open on 0.0.0.0.
+    # Override with FRONTLINE_PUBLISH_OPEN=0.0.0.0:8000:8000 only when intentional.
+    ports:
+      - "${FRONTLINE_PUBLISH_OPEN:-127.0.0.1:8000:8000}"
+    environment:
+      DOMAIN_PACK: ${DOMAIN_PACK:-automotive_nhtsa}
+      FRONTLINE_ENABLED: "1"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      FRONTLINE_API_KEY: ${FRONTLINE_API_KEY:-}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - frontline-data-open:/app/data
+      - frontline-reports-open:/app/reports
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.0
+
+  # Hardened single-tenant profile (SOC 2 engineering baseline deploy)
+  frontline-hardened:
+    profiles: ["hardened"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: frontline-v2:hardened
+    # Distinct host port from open (8001) so enabling both profiles cannot clash.
+    # Override with FRONTLINE_PUBLISH_HARDENED=0.0.0.0:8001:8000 only when intentional.
+    ports:
+      - "${FRONTLINE_PUBLISH_HARDENED:-127.0.0.1:8001:8000}"
+    environment:
+      DOMAIN_PACK: ${DOMAIN_PACK:-automotive_nhtsa}
+      FRONTLINE_ENABLED: "1"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      ENV: ${ENV:-production}
+      PILOT_HARDENED: "1"
+      SOC2_MODE: ${SOC2_MODE:-1}
+      FRONTLINE_AUTH_REQUIRED: "1"
+      FRONTLINE_OPEN_MODE: "0"
+      FRONTLINE_API_KEY: ${FRONTLINE_API_KEY:?Set FRONTLINE_API_KEY in .env for hardened profile}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env for hardened profile}
+      SECURITY_AUDIT_LOG_PATH: /app/data/security_audit.jsonl
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-300 per hour}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    volumes:
+      - frontline-data-hardened:/app/data
+      - frontline-reports-hardened:/app/reports
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.0
+
+volumes:
+  frontline-data-open:
+  frontline-reports-open:
+  frontline-data-hardened:
+  frontline-reports-hardened:

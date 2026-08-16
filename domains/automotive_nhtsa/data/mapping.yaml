@@ -1,0 +1,29 @@
+# Mapping: NHTSA complaint CSV columns → canonical records fields.
+# Executed by src.domains.mapping_ingest and scripts.ingest_nhtsa
+# (not the 10-row fixture seed, not ingest_scale clones).
+
+source: NHTSA complaints CSV
+records:
+  record_id: CMPLID
+  received_at: DATEA
+  occurred_at: DATEC
+  entity_1: MODEL_YR
+  entity_2: MAKETXT
+  entity_3: MODELTXT
+  category: CDESC
+  text: CDESC
+  severity_label: NUM_CYLS  # placeholder; NHTSA has no severity label
+  region: STATE
+  source: "NHTSA"
+
+advisories:
+  advisory_id: CAMPNO
+  issued_at: MFR_DATE
+  scope_entity_1: MODEL_YR
+  scope_entity_2: MAKETXT
+  scope_entity_3: MODELTXT
+  scope_category: COMPNAME
+  summary: SUBJECT
+  remedy: SUMMARY
+  url: RCL_URL
+  source: "NHTSA"

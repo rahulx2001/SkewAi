@@ -1,0 +1,134 @@
+# Frontline v2 — unit suite + offline dual-pack eval + dashboard build
+# Local mirror: `make ci`  (requires .venv or system deps from requirements.txt)
+
+name: frontline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: frontline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PY: python
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  test-and-eval:
+    name: seed · lint · pytest · eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-lock.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -c requirements-lock.txt
+
+      - name: Bytecode compile (import-time syntax gate)
+        run: python -m compileall -q src scripts eval
+
+      - name: Build fixture warehouses
+        run: make frontline-db
+
+      - name: Pack lint (real verticals)
+        run: |
+          make pack-lint PACK=automotive_nhtsa
+          make pack-lint PACK=finance_cfpb
+
+      - name: Unit + contract tests
+        # Fail hangs instead of burning the runner (WS contract must not block CI).
+        run: make test
+
+      - name: Offline dual-pack eval
+        run: make eval-frontline
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontline-eval-report
+          path: reports/qubot/eval/
+          if-no-files-found: warn
+          retention-days: 14
+
+  dashboard:
+    name: dashboard production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install + build
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build
+          test -f dist/index.html
+
+  docker-static:
+    name: docker context static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Required build context paths
+        run: |
+          set -euo pipefail
+          for p in \
+            Dockerfile \
+            docker-compose.yml \
+            docker/entrypoint.sh \
+            requirements-docker.txt \
+            requirements.txt \
+            Makefile \
+            dashboard/package.json \
+            domains/automotive_nhtsa/pack.yaml \
+            domains/finance_cfpb/pack.yaml \
+            scripts/seed_frontline_fixtures.py \
+            src/api/main.py
+          do
+            test -e "$p" || { echo "MISSING: $p"; exit 1; }
+          done
+          test -x docker/entrypoint.sh || chmod +x docker/entrypoint.sh
+          # Compose health + Dockerfile HEALTHCHECK must not depend on curl
+          grep -q "urllib.request" docker-compose.yml
+          grep -q "HEALTHCHECK" Dockerfile
+          grep -q "requirements-docker.txt" Dockerfile
+          echo "docker static checks OK"

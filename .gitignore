@@ -1,0 +1,57 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+*.egg
+
+# Node / dashboard
+dashboard/node_modules/
+dashboard/dist/
+
+# Runtime data (DuckDB + connector outbox + reports)
+data/**/*.duckdb
+data/**/*.duckdb.wal
+data/connectors/outbox/
+reports/qubot/contacts/
+reports/qubot/digests/
+# Keep eval report dir but ignore generated dated files if desired:
+# reports/qubot/eval/eval_*.md
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local runtime / machine state
+data/uvicorn-local.pid
+data/security.jsonl
+data/security_audit.jsonl
+data/.pilot_marker_audit
+dashboard/test-results/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+.grok/
+
+# Docker / local tooling
+*.log
+.docker/

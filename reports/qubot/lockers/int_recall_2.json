@@ -1,0 +1,30 @@
+{
+  "schema": "skew.evidence_locker.v1",
+  "interaction_id": "int_recall_2",
+  "exported_at": "2026-08-16T09:00:38.473267Z",
+  "actions": [
+    {
+      "action_id": "01m04wtd57mn294jgy27yd4sv9",
+      "interaction_id": "int_recall_2",
+      "agent": "investigator",
+      "action_type": "cluster_matched",
+      "evidence_ids": "[\"NHTSA-100001\"]",
+      "output_summary": "recall threshold 10 crossed at 12",
+      "row_hash": "1716c11aeec8c37771abc6e81c63ffc55967330dd4ed3ea689a1a7afc0359f9c",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ts": "2026-08-16 09:00:38.439777"
+    }
+  ],
+  "snapshots": [
+    {
+      "snapshot_id": "pin_01m04wtd5vgsxs11trdmfrvghm",
+      "evidence_id": "NHTSA-100001",
+      "pack_id": "automotive_nhtsa",
+      "body_json": "{\"category\":\"SERVICE BRAKES\",\"entity_1\":\"2019\",\"entity_2\":\"HONDA\",\"entity_3\":\"CR-V\",\"occurred_at\":\"2026-07-17 14:30:04.004438\",\"received_at\":\"2026-08-06 14:30:04.004438\",\"record_id\":\"NHTSA-100001\",\"region\":\"CA\",\"severity_label\":\"Medium\",\"source\":\"NHTSA\",\"subcategory\":null,\"text\":\"grinding noise when braking at low speed\"}",
+      "body_hash": "d49ce7deaf5f4fe6fc9d1be0c5deab507d346117bf2f3d9a61d48f98667af917"
+    }
+  ],
+  "content_sha256": "aa067909268b06bb5317260f2ebe6d863b5acd73c3fa902ede46d0e5ebf81bdb",
+  "signature": "99aa349a5d99c43221fb01f7fb69b0e956954efe3a20fdbd9ac6a4c8340e56fd43980c22f2dfb4ca846897097cf4b387ff77dcf1f37cd327cae56207acdabd08",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/5C2j/z+fexB9RdlmSK03GHpXjKG5O+ca21CaSbhe9A=\n-----END PUBLIC KEY-----\n"
+}

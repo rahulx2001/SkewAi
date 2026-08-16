@@ -1,0 +1,536 @@
+"""API surface for features added in the 56-feature completion pass."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+from src.api.auth import require_api_key, require_api_key_strict
+from src.api.limiter import limiter
+from src.api.rbac import get_role, require_perm
+
+router = APIRouter(
+    prefix="/api/frontline",
+    tags=["frontline-platform"],
+    dependencies=[Depends(require_api_key)],
+)
+
+
+@router.get("/analytics/forecast")
+async def analytics_forecast(
+    pack_id: str | None = None,
+    window_days: int = 28,
+    threshold: int = 20,
+) -> dict[str, Any]:
+    from src.frontline.analytics import forecast_cluster_volume
+
+    return forecast_cluster_volume(pack_id=pack_id, window_days=window_days, threshold=threshold)
+
+
+@router.get("/analytics/cross-pack")
+async def analytics_cross_pack() -> dict[str, Any]:
+    from src.frontline.analytics import cross_pack_patterns
+
+    return cross_pack_patterns()
+
+
+@router.get("/analytics/hotspots")
+async def analytics_hotspots(pack_id: str | None = None, window_days: int = 90) -> dict[str, Any]:
+    from src.frontline.analytics import geographic_hotspots
+
+    return geographic_hotspots(pack_id=pack_id, window_days=window_days)
+
+
+@router.get("/analytics/severity-drift")
+async def analytics_severity_drift(pack_id: str | None = None) -> dict[str, Any]:
+    from src.frontline.analytics import severity_drift
+
+    return severity_drift(pack_id=pack_id)
+
+
+@router.get("/analytics/cohorts")
+async def analytics_cohorts(pack_id: str | None = None, group_field: str = "entity_3") -> dict[str, Any]:
+    from src.frontline.analytics import cohort_analysis
+    from src.security.sql_ident import safe_column
+
+    try:
+        field = safe_column(group_field)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return cohort_analysis(pack_id=pack_id, group_field=field)
+
+
+@router.get("/analytics/regulator-watch")
+async def analytics_regulator(pack_id: str | None = None) -> dict[str, Any]:
+    from src.frontline.analytics import regulator_filing_watch
+
+    return regulator_filing_watch(pack_id=pack_id)
+
+
+@router.get("/analytics/financial-impact")
+async def analytics_financial(pack_id: str | None = None) -> dict[str, Any]:
+    from src.frontline.analytics import financial_impact
+
+    return financial_impact(pack_id=pack_id)
+
+
+@router.get("/analytics/fairness")
+async def analytics_fairness(pack_id: str | None = None) -> dict[str, Any]:
+    from src.frontline.analytics import bias_fairness_report
+
+    return bias_fairness_report(pack_id=pack_id)
+
+
+@router.post("/booking/offer")
+async def booking_offer(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.booking import offer_for_advisory
+
+    return offer_for_advisory(
+        advisory_id=body.get("advisory_id"),
+        case_id=body.get("case_id"),
+        pack_id=body.get("pack_id") or "automotive_nhtsa",
+        interaction_id=body.get("interaction_id"),
+    )
+
+
+@router.post("/booking/book")
+async def booking_book(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.booking import book_appointment
+
+    if not body.get("slot_start"):
+        raise HTTPException(400, "slot_start required")
+    return book_appointment(
+        case_id=body.get("case_id"),
+        interaction_id=body.get("interaction_id"),
+        pack_id=body.get("pack_id") or "automotive_nhtsa",
+        slot_start=str(body["slot_start"]),
+        location=str(body.get("location") or "authorized_service"),
+    )
+
+
+@router.post("/callbacks")
+async def callbacks_create(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.callback import schedule_callback
+
+    return schedule_callback(
+        interaction_id=body.get("interaction_id"),
+        pack_id=body.get("pack_id") or "automotive_nhtsa",
+        phone_or_channel=str(body.get("phone_or_channel") or "unknown"),
+        preferred_window=str(body.get("preferred_window") or "next_business_day"),
+        case_id=body.get("case_id"),
+        reason=str(body.get("reason") or "queue_or_supervisor"),
+    )
+
+
+@router.get("/callbacks")
+async def callbacks_list(status: str | None = "scheduled") -> dict[str, Any]:
+    from src.frontline.callback import list_callbacks
+
+    rows = list_callbacks(status=status)
+    return {"callbacks": rows, "count": len(rows)}
+
+
+@router.post("/approvals")
+async def approvals_request(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.four_eyes import request_approval
+
+    return request_approval(
+        str(body.get("action_type") or ""),
+        resource_id=str(body.get("resource_id") or ""),
+        requested_by=str(body.get("requested_by") or "agent"),
+        reason=str(body.get("reason") or ""),
+        payload=body.get("payload") if isinstance(body.get("payload"), dict) else None,
+        interaction_id=body.get("interaction_id"),
+    )
+
+
+@router.post("/approvals/{approval_id}/decide")
+async def approvals_decide(approval_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.four_eyes import decide_approval
+
+    try:
+        return decide_approval(
+            approval_id,
+            reviewer=str(body.get("reviewer") or ""),
+            approve=bool(body.get("approve", True)),
+            interaction_id=body.get("interaction_id"),
+        )
+    except KeyError:
+        raise HTTPException(404, "approval not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/marketplace/packs")
+async def marketplace_list() -> dict[str, Any]:
+    from src.domains.marketplace import list_marketplace
+
+    packs = list_marketplace()
+    return {"packs": packs, "count": len(packs)}
+
+
+@router.post("/marketplace/install")
+@limiter.limit("20 per minute")
+async def marketplace_install(
+    request: Request,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    from src.api.rbac import require_perm
+    from src.domains.marketplace import pack_install
+    from src.security.audit_log import security_event
+
+    # Filesystem source_path is admin-only; registry install stays available.
+    if body.get("source_path"):
+        require_perm(role, "marketplace:install")
+    pid = body.get("pack_id")
+    if not pid:
+        raise HTTPException(400, "pack_id required")
+    try:
+        out = pack_install(str(pid), source_path=body.get("source_path") or None)
+        security_event(
+            "marketplace.install",
+            outcome="success",
+            role=role,
+            resource=str(pid),
+            detail={"has_source_path": bool(body.get("source_path"))},
+            ip=request.client.host if request.client else None,
+        )
+        return out
+    except ValueError as e:
+        security_event(
+            "marketplace.install",
+            outcome="denied",
+            role=role,
+            resource=str(pid),
+            detail={"error": str(e)[:200]},
+            ip=request.client.host if request.client else None,
+        )
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.post(
+    "/packs/{pack_id}/edit",
+    dependencies=[Depends(require_api_key_strict)],
+)
+async def pack_edit(
+    pack_id: str,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Lint/preview pack edits. Disk write requires admin ``pack:edit`` (H2)."""
+    from src.domains.editor import apply_pack_edits
+    from src.security.audit_log import security_event
+
+    dry_run = bool(body.get("dry_run", False))
+    # Default write_disk off — must opt in explicitly (and hold pack:edit).
+    write_disk = bool(body.get("write_disk", False))
+    if write_disk and not dry_run:
+        require_perm(role, "pack:edit")
+    edits = body.get("edits") if isinstance(body.get("edits"), dict) else body
+    try:
+        out = apply_pack_edits(
+            pack_id,
+            {k: v for k, v in edits.items() if k not in {"edits", "dry_run", "write_disk"}},
+            dry_run=dry_run or not write_disk,
+            write_disk=write_disk and not dry_run,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if write_disk and not dry_run:
+        security_event(
+            "pack.edit",
+            outcome="success" if out.get("applied") else "failure",
+            role=role,
+            resource=pack_id,
+            detail={"changed_keys": out.get("changed_keys"), "rolled_back": out.get("rolled_back")},
+        )
+    return out
+
+
+@router.post("/packs/{pack_id}/reload")
+async def pack_reload(pack_id: str) -> dict[str, Any]:
+    from src.domains.editor import hot_reload
+
+    return hot_reload(pack_id)
+
+
+@router.get("/jobs")
+async def jobs_list(status: str | None = None) -> dict[str, Any]:
+    from src.jobs.queue import list_jobs
+
+    rows = list_jobs(status=status)
+    return {"jobs": rows, "count": len(rows)}
+
+
+@router.post("/jobs")
+async def jobs_enqueue(body: dict[str, Any]) -> dict[str, Any]:
+    from src.jobs.queue import enqueue
+
+    jt = body.get("job_type")
+    if not jt:
+        raise HTTPException(400, "job_type required")
+    try:
+        return enqueue(
+            str(jt),
+            body.get("payload") if isinstance(body.get("payload"), dict) else {},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/jobs/run-next",
+    dependencies=[Depends(require_api_key_strict)],
+)
+async def jobs_run_next(role: str = Depends(get_role)) -> dict[str, Any]:
+    """Execute next queued job — admin only (H4)."""
+    from src.jobs.queue import run_next
+    from src.security.audit_log import security_event
+
+    require_perm(role, "jobs:run")
+    result = run_next()
+    security_event(
+        "jobs.run_next",
+        outcome="success",
+        role=role,
+        detail={"status": (result or {}).get("status", "empty")},
+    )
+    return result or {"status": "empty"}
+
+
+@router.get("/metrics/prometheus")
+async def metrics_prometheus() -> Any:
+    from fastapi.responses import PlainTextResponse
+    from src.observability.metrics import prometheus_text
+
+    return PlainTextResponse(prometheus_text(), media_type="text/plain; version=0.0.4")
+
+
+@router.get("/ops/backend")
+async def ops_backend() -> dict[str, Any]:
+    from src.data.postgres_backend import backend_status
+
+    return backend_status()
+
+
+@router.get("/ops/drain")
+async def ops_drain_status() -> dict[str, Any]:
+    from src.ops.drain import DRAIN
+
+    return DRAIN.status()
+
+
+@router.post(
+    "/ops/drain",
+    dependencies=[Depends(require_api_key_strict)],
+)
+async def ops_drain_begin(
+    request: Request,
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Begin call drain — admin only (H3)."""
+    from src.ops.drain import DRAIN
+    from src.security.audit_log import security_event
+
+    require_perm(role, "ops:drain")
+    out = DRAIN.begin_drain()
+    security_event(
+        "ops.drain",
+        outcome="success",
+        role=role,
+        detail=out if isinstance(out, dict) else {},
+        ip=request.client.host if request.client else None,
+    )
+    return out
+
+
+@router.get("/auth/oidc")
+async def auth_oidc() -> dict[str, Any]:
+    from src.api.rbac import oidc_discovery
+
+    return oidc_discovery()
+
+
+@router.post("/auth/session")
+@limiter.limit("20 per minute")
+async def auth_session(
+    request: Request,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Mint a session. Elevated roles need an admin issuer (FIND-002)."""
+    from src.api.rbac import issue_session
+    from src.security.audit_log import security_event
+
+    subject = str(body.get("subject") or "user")
+    requested = str(body.get("role") or "agent")
+    try:
+        out = issue_session(subject, requested, issuer_role=role)
+        security_event(
+            "auth.session_mint",
+            outcome="success",
+            actor=subject,
+            role=out.get("role"),
+            detail={"issuer_role": role, "requested": requested},
+            ip=request.client.host if request.client else None,
+        )
+        return out
+    except Exception as e:
+        security_event(
+            "auth.session_mint",
+            outcome="failure",
+            actor=subject,
+            role=role,
+            detail={"requested": requested, "error": type(e).__name__},
+            ip=request.client.host if request.client else None,
+        )
+        raise
+
+
+@router.post("/coach/suggest")
+async def coach_suggest(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.coach import suggest_replies
+
+    return {
+        "suggestions": suggest_replies(
+            slots=body.get("slots") if isinstance(body.get("slots"), dict) else {},
+            last_customer_text=str(body.get("last_customer_text") or ""),
+            severity=body.get("severity"),
+        )
+    }
+
+
+@router.post("/coach/whisper")
+async def coach_whisper(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.coach import whisper
+
+    iid = body.get("interaction_id")
+    text = body.get("text")
+    if not iid or not text:
+        raise HTTPException(400, "interaction_id and text required")
+    return whisper(str(iid), str(text), from_role=str(body.get("from_role") or "coach"))
+
+
+@router.get("/subscriptions")
+async def subscriptions_list() -> dict[str, Any]:
+    from src.frontline.subscriptions import list_subscriptions
+
+    rows = list_subscriptions()
+    return {"subscriptions": rows, "count": len(rows)}
+
+
+@router.post("/subscriptions")
+async def subscriptions_create(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.subscriptions import subscribe
+
+    try:
+        return subscribe(
+            channel=str(body.get("channel") or "email"),
+            target=str(body.get("target") or ""),
+            report_type=str(body.get("report_type") or "daily_digest"),
+            cron_hint=str(body.get("cron_hint") or "0 8 * * *"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/subscriptions/tick")
+async def subscriptions_tick(force: bool = True) -> dict[str, Any]:
+    from src.frontline.subscriptions import tick_due
+
+    sent = tick_due(force=force)
+    return {"sent": sent, "count": len(sent)}
+
+
+@router.get("/usage")
+async def usage_get() -> dict[str, Any]:
+    """Usage summary for the process tenant (client tenant_id ignored — M8)."""
+    from src.frontline.metering import usage_summary
+    from src.ops.tenant import get_tenant
+
+    return usage_summary(tenant_id=get_tenant())
+
+
+@router.post("/usage")
+async def usage_record(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.metering import record_usage
+    from src.ops.tenant import get_tenant
+
+    return record_usage(
+        str(body.get("metric") or "contacts"),
+        float(body.get("quantity") or 1),
+        tenant_id=get_tenant(),
+        meta=body.get("meta") if isinstance(body.get("meta"), dict) else None,
+    )
+
+
+@router.post(
+    "/channels/email/ingest",
+    dependencies=[Depends(require_api_key_strict)],
+)
+@limiter.limit("60 per minute")
+async def email_ingest(
+    request: Request,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Email intake — always authenticated (H4); needs channel:ingest."""
+    from src.channels.email_intake import EmailIntakeChannel
+
+    require_perm(role, "channel:ingest")
+    ch = EmailIntakeChannel()
+    return ch.process_message(
+        subject=str(body.get("subject") or ""),
+        body=str(body.get("body") or ""),
+        from_addr=str(body.get("from") or ""),
+    )
+
+
+@router.post(
+    "/biometrics/match",
+    dependencies=[Depends(require_api_key_strict)],
+)
+@limiter.limit("60 per minute")
+async def biometrics_match(
+    request: Request,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Biometrics match — always authenticated (H4); pilot integrity only."""
+    from src.frontline.biometrics import fingerprint_from_audio_features, match_caller
+
+    require_perm(role, "biometrics:match")
+    fp = body.get("fingerprint") or fingerprint_from_audio_features(
+        body.get("features") or body.get("ani") or "unknown"
+    )
+    return match_caller(
+        str(body.get("pack_id") or "automotive_nhtsa"),
+        str(fp),
+        entity_1=body.get("entity_1"),
+        entity_2=body.get("entity_2"),
+        entity_3=body.get("entity_3"),
+    )
+
+
+@router.post("/i18n/normalize")
+async def i18n_normalize(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.i18n import normalize_to_english
+
+    return normalize_to_english(str(body.get("text") or ""), lang=body.get("lang"))
+
+
+@router.post("/slots/dynamic-skip")
+async def slots_dynamic_skip(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.dynamic_slots import apply_dynamic_skip
+
+    return apply_dynamic_skip(
+        str(body.get("pack_id") or "automotive_nhtsa"),
+        list(body.get("required_slots") or ["entity_1", "entity_2", "category", "description"]),
+        body.get("current") if isinstance(body.get("current"), dict) else {},
+    )

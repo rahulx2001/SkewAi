@@ -1,0 +1,29 @@
+# Automotive category taxonomy
+# Categories are NHTSA components, normalized to UPPER_SNAKE.
+
+groups:
+  - name: Drivetrain
+    categories:
+      - ENGINE
+      - POWER TRAIN
+      - FUEL SYSTEM
+  - name: Braking & Steering
+    categories:
+      - SERVICE BRAKES
+      - STEERING
+      - SUSPENSION
+  - name: Electrical
+    categories:
+      - ELECTRICAL SYSTEM
+      - EXTERIOR LIGHTING
+  - name: Safety equipment
+    categories:
+      - AIR BAGS
+      - SEAT BELTS
+      - CHILD SEAT
+  - name: Body & Visibility
+    categories:
+      - STRUCTURE
+      - VISIBILITY
+      - WHEELS
+      - TIRES

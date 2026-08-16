@@ -1,0 +1,61 @@
+# post_contact_audit playbook — runs automatically on interaction DONE.
+# This file documents the playbook steps. The implementation lives in
+# src/qubot/auditor.py::audit_interaction() so the logic is testable Python,
+# not YAML. This YAML is the human-readable contract that Qubot reports against.
+
+name: post_contact_audit
+trigger: on_interaction_done
+description: |
+  Verify every agent action in the contact stayed grounded in real data and
+  produce the contact audit report (reports/qubot/contacts/{interaction_id}.md).
+
+steps:
+  - name: contact_audit
+    description: Pull the full ordered trace (turns + actions + case).
+    impl: src.qubot.retrievers.contact_audit
+
+  - name: groundedness_check
+    description: |
+      For every agent_actions row: parse evidence_ids; re-query the domain
+      warehouse to confirm each id exists AND matches the claimed scope;
+      run citation extraction over output_summary + follow-up_draft to catch
+      uncited ids. Verdict per action: grounded | unverifiable | mismatch.
+      Any mismatch → report flagged red, case marked needs_review,
+      groundedness_mismatch alert fires.
+    impl: src.qubot.auditor._audit_single_action
+
+  - name: severity_sanity
+    description: If any safety flag is set, severity MUST be Critical.
+    impl: src.qubot.auditor._check_severity_sanity
+
+  - name: frustration_curve
+    description: Sequence of per-turn frustration scores (customer turns).
+
+  - name: supervised_segment_log
+    description: If supervised=TRUE, extract every supervisor turn verbatim.
+
+  - name: narrate
+    description: Build the markdown report.
+    impl: src.qubot.auditor._write_contact_report
+
+  - name: flags_and_recommendations
+    description: |
+      Flag: groundedness_mismatch, severity_sanity_failure, long_takes.
+      Recommend: review flagged actions, reconcile severity, review supervisor turns.
+
+output:
+  path: reports/qubot/contacts/{interaction_id}.md
+  sections:
+    - summary
+    - timeline_table
+    - agent_actions_with_evidence
+    - groundedness_verdict
+    - frustration_curve
+    - supervised_segment_log
+    - flags
+    - recommendations
+
+stamps:
+  - pack_id
+  - pack_version
+  - context_version

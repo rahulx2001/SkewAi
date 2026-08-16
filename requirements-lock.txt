@@ -1,0 +1,47 @@
+# Pinned lock / constraints for reproducible installs (Python 3.12+).
+# Install (dev/CI):    pip install -r requirements.txt -c requirements-lock.txt
+# Install (Docker):    pip install -r requirements-docker.txt -c requirements-lock.txt
+# Regenerate: install roots into a clean 3.12 venv, then refresh pins from pip freeze.
+
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.120.2
+anyio==4.14.2
+certifi==2026.6.17
+click==8.4.2
+Deprecated==1.3.1
+distro==1.9.0
+docstring_parser==0.18.0
+duckdb==1.5.4
+fastapi==0.139.2
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.18
+iniconfig==2.3.0
+jiter==0.16.0
+limits==5.8.0
+openai==1.109.1
+packaging==26.2
+pluggy==1.6.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+pytest==8.4.2
+pytest-asyncio==0.26.0
+pytest-timeout==2.4.0
+python-dotenv==1.2.2
+python-ulid==3.2.0
+PyYAML==6.0.3
+slowapi==0.1.10
+sniffio==1.3.1
+starlette==1.3.1
+tqdm==4.70.0
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+uvicorn==0.51.0
+uvloop==0.22.1
+vaderSentiment==3.3.2
+watchfiles==1.2.0
+websockets==13.1
+wrapt==2.2.2

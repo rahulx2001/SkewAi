@@ -1,0 +1,126 @@
+# Finance CFPB Domain Pack
+# Built from the public CFPB consumer complaint database.
+# Entity slots: product (entity_1) / sub_product (entity_2) / company (entity_3)
+
+id: finance_cfpb
+display_name: Consumer Finance (CFPB)
+greeting: "Thanks for calling. What issue are you having with your account?"
+goodbye: "Thanks for reaching out. Your case number is {case_id}. A specialist will follow up by email within one business day."
+refusal_topics:
+  - legal advice
+  - investment recommendations
+  - tax advice
+
+entities:
+  entity_1: "Product"
+  entity_2: "Sub-product"
+  entity_3: "Company"
+
+slot_frame:
+  - name: entity_1
+    label: "Product"
+    prompt: "What type of product is affected? For example, checking account, credit card, mortgage."
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: products
+  - name: entity_2
+    label: "Sub-product"
+    prompt: "Which specific sub-product? For example, checking account, credit card, conventional mortgage."
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: sub_products
+  - name: entity_3
+    label: "Company"
+    prompt: "Which company is this about? For example, Chase, Bank of America, Wells Fargo."
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: companies
+  - name: category
+    label: "Issue"
+    prompt: "What's the issue? For example, unauthorized transactions, account management, billing dispute."
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: issues
+  - name: description
+    label: "Complaint description"
+    prompt: "In your own words, what happened?"
+    required: true
+    max_re_asks: 1
+    validation: free-text
+
+safety:
+  escalation_lexicon:
+    - identity theft
+    - fraud
+    - unauthorized
+    - stolen
+    - discrimination
+    - data breach
+    - account takeover
+    - money laundering
+    - scam
+  safety_questions:
+    - "Has money been taken from your account without your permission?"
+    - "Have you contacted your bank's fraud department?"
+  escalation_script: |
+    I want to flag this immediately for our fraud specialist team. Please
+    contact your bank's fraud department right away if you haven't already,
+    and consider placing a fraud alert with the credit bureaus. A specialist
+    will reach out within the hour. If you believe you're in immediate
+    financial danger, please contact your bank's emergency line.
+
+advisory_match:
+  # Read-only, parameterized SQL over the advisories table. Returns matching
+  # CFPB enforcement actions / known issues / consent orders for the
+  # customer's product + company + issue.
+  sql_template: |
+    SELECT advisory_id, issued_at,
+           scope_entity_1 || ' ' || scope_entity_3 || ' ' || scope_category AS scope_summary,
+           summary, remedy, url, source
+    FROM advisories
+    WHERE (scope_entity_1 = $entity_1 OR scope_entity_1 IS NULL)
+      AND (scope_entity_2 = $entity_2 OR scope_entity_2 IS NULL)
+      AND (scope_entity_3 = $entity_3 OR scope_entity_3 IS NULL)
+      AND (scope_category = $category OR scope_category IS NULL)
+    ORDER BY issued_at DESC
+    LIMIT 5
+  readback_fields: [advisory_id, scope_summary, remedy, url]
+
+severity:
+  # Finance pack uses rules-based severity (no ML artifact).
+  rules:
+    - when: safety.any
+      severity: Critical
+      reason: "Safety flag present — escalated to Critical"
+    - when: description_matches_fraud|identity theft|unauthorized|discrimination|scam
+      severity: Critical
+      reason: "Severity-critical language in description"
+    - when: category in [Unauthorized transactions, Identity theft, Fraud or scam]
+      severity: Critical
+      reason: "Fraud-related issue"
+    - when: category in [Managing an account, Closing an account, Problems with fraud alerts]
+      severity: Medium
+      reason: "Account management issue"
+    - when: category in [Billing disputes, Incorrect charges, Late fees, Fees or interest]
+      severity: Medium
+      reason: "Billing / fee dispute"
+    - when: category in [Incorrect information on your report, Information belongs to someone else, Problem with credit reporting]
+      severity: Medium
+      reason: "Credit reporting issue"
+    - when: category in [Communication tactics, Customer service, Trouble using card, Transaction issues]
+      severity: Medium
+      reason: "Service issue"
+    - when: default
+      severity: Low
+      reason: "Default severity"
+  priority_matrix:
+    safety: 1
+    Critical: 1
+    Medium: 2
+    Low: 3
+
+taxonomy_ref: taxonomy.yaml

@@ -1,0 +1,16 @@
+{
+  "default": "Low",
+  "rules": [
+    {"keyword": "fire", "severity": "Critical"},
+    {"keyword": "smoke", "severity": "Critical"},
+    {"keyword": "airbag", "severity": "Critical"},
+    {"keyword": "grinding", "severity": "Medium"},
+    {"keyword": "grind", "severity": "Medium"},
+    {"keyword": "brakes", "severity": "Medium"},
+    {"keyword": "brake", "severity": "Medium"},
+    {"keyword": "electrical", "severity": "Medium"},
+    {"keyword": "window", "severity": "Medium"},
+    {"keyword": "warning", "severity": "Medium"}
+  ],
+  "note": "Inspectable JSON overlay — not XGBoost. Pack may still list a heavier artifact path."
+}

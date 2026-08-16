@@ -1,0 +1,166 @@
+"""Agent base contract.
+
+Every v2 agent (intake, sentiment, triage, sentinel, investigator, case)
+implements `Agent`. The orchestrator constructs agents per-interaction with
+a pack + interaction context; agents run, write to the ledger, and return a
+structured result. They never emit directly to the customer — that's the
+orchestrator's job.
+
+Design (carried from v1's `src/agents/base.py`):
+  - Agents are stateless between turns; per-interaction state lives in the
+    `InteractionContext` passed in.
+  - The ledger is the audit spine; every side-effecting decision goes through
+    `record_action` (via `action_timer`) BEFORE the output is emitted.
+  - No LangChain / agent frameworks — each agent is a small, testable function.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from src.domains.loader import LoadedPack
+from src.ledger import AgentAction
+
+
+def _ctx_utc_now() -> datetime:
+    from src.data.timeutil import utc_now
+
+    return utc_now()
+
+
+@dataclass
+class InteractionContext:
+    """Per-interaction state shared across agents.
+
+    The orchestrator owns this; agents read + extend it. Everything here is
+    persisted to the ops warehouse tables (interactions, interaction_turns,
+    cases, agent_actions).
+    """
+
+    interaction_id: str
+    pack: LoadedPack
+    channel: str = "web_text"                 # web_voice | web_text | simulated
+    started_at: datetime = field(default_factory=lambda: _ctx_utc_now())
+
+    # ── Slot state ────────────────────────────────────────────────────────
+    slots: dict[str, str] = field(default_factory=dict)          # entity_1/2/3, category, description
+    slot_attempts: dict[str, int] = field(default_factory=dict)   # re-ask counters
+
+    # ── Transcript ───────────────────────────────────────────────────────
+    turns: list[dict[str, Any]] = field(default_factory=list)    # {seq, speaker, text, ts, frustration?}
+
+    # ── Enrichment outputs (filled by Triage/Sentinel/Investigator) ──────
+    severity: str = "Low"                                         # Low | Medium | Critical
+    severity_source: str = "rules"                               # model | rules
+    priority: int = 3                                             # 1-4
+    safety_flags: dict[str, bool] = field(default_factory=dict)
+    advisory_match: dict[str, Any] | None = None                  # {advisory_id, scope_summary, remedy, url, source}
+    investigation_brief: dict[str, Any] | None = None             # {cluster_id, similar_count, lead_time_weeks, ...}
+    frustration_score: float = 0.0                                # rolling avg last 3 customer turns
+    peak_frustration: float = 0.0
+    frustration_flagged: bool = False
+    handoff_offered: bool = False
+
+    # ── Case outputs ─────────────────────────────────────────────────────
+    case_id: str | None = None
+    followup_draft: str | None = None
+    investigation_id: str | None = None
+
+    # ── Bookkeeping ──────────────────────────────────────────────────────
+    llm_calls: int = 0
+    supervised: bool = False
+    state: str = "GREETING"
+    # Pre-close self-critique result (set by Orchestrator._move_to_closing).
+    self_critique: dict[str, Any] | None = None
+
+    # ── Slot helpers ────────────────────────────────────────────────────
+    def required_slots_remaining(self) -> list[str]:
+        return [
+            s.name
+            for s in self.pack.required_slots()
+            if not self.slots.get(s.name)
+        ]
+
+    def has_required_slots(self) -> bool:
+        return not self.required_slots_remaining()
+
+    def record_turn(self, speaker: str, text: str, **extra: Any) -> dict[str, Any]:
+        seq = len(self.turns) + 1
+        turn = {
+            "turn_id": f"{self.interaction_id}_t{seq}",
+            "seq": seq,
+            "speaker": speaker,
+            "text": text,
+            "ts": _ctx_utc_now(),
+            **extra,
+        }
+        self.turns.append(turn)
+        # Durable mid-contact write (P1): survive process crash before finalize.
+        try:
+            from src.data.turns import persist_turn
+
+            persist_turn(self.interaction_id, turn)
+        except Exception:
+            pass
+        return turn
+
+
+# ── Agent contract ──────────────────────────────────────────────────────────
+
+
+class Agent(ABC):
+    """Base class for all v2 agents.
+
+    Agents are constructed once per interaction with the interaction context.
+    `run()` is called by the orchestrator when the agent's trigger condition
+    is met. Agents return a structured result dict; they MUST NOT emit directly
+    to the customer.
+    """
+
+    name: str = "agent"              # intake | sentiment | triage | sentinel | investigator | case
+
+    def __init__(self, ctx: InteractionContext) -> None:
+        self.ctx = ctx
+
+    @property
+    def pack(self) -> LoadedPack:
+        return self.ctx.pack
+
+    @abstractmethod
+    async def run(self, **kwargs: Any) -> dict[str, Any]:
+        """Execute the agent's task. Returns a structured result dict.
+
+        Implementations MUST record every action to the ledger before any
+        observable side effect (using `action_timer` or `record_action`).
+        """
+        ...
+
+    def _action(
+        self,
+        action_type: str,
+        input_summary: str = "",
+        output_summary: str = "",
+        evidence_ids: list[str] | None = None,
+        claims: list[Any] | None = None,
+        case_id: str | None = None,
+        ok: bool = True,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> AgentAction:
+        """Build an AgentAction bound to this agent + interaction."""
+        return AgentAction(
+            interaction_id=self.ctx.interaction_id,
+            agent=self.name,
+            action_type=action_type,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            evidence_ids=evidence_ids or [],
+            claims=claims or [],
+            case_id=case_id,
+            ok=ok,
+            error=error,
+            duration_ms=duration_ms,
+        )

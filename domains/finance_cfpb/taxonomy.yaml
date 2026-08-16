@@ -1,0 +1,36 @@
+# CFPB issue taxonomy.
+# The CFPB classifies complaints by Product → Sub-product → Issue.
+# This taxonomy groups Issues into broader categories for the Investigator's
+# cluster analysis.
+
+groups:
+  - name: Fraud & Identity
+    categories:
+      - Unauthorized transactions
+      - Identity theft
+      - Fraud or scam
+      - Problems with fraud alerts
+  - name: Account Management
+    categories:
+      - Managing an account
+      - Closing an account
+      - Opening an account
+      - Account opening or closing
+  - name: Billing & Fees
+    categories:
+      - Billing disputes
+      - Fees or interest
+      - Incorrect charges
+      - Late fees
+  - name: Credit Reporting
+    categories:
+      - Incorrect information on your report
+      - Information belongs to someone else
+      - Old information reappears
+      - Problem with credit reporting
+  - name: Customer Service
+    categories:
+      - Communication tactics
+      - Customer service
+      - Trouble using card
+      - Transaction issues

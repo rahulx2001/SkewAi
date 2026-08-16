@@ -1,0 +1,445 @@
+/* Skew AI UI v2.1 — unmistakable ops polish.
+   Loaded last so every surface reads as refreshed. */
+
+:root {
+  --nav-w: 268px;
+  --glow-line: linear-gradient(
+    90deg,
+    transparent,
+    rgba(46, 196, 167, 0.55),
+    transparent
+  );
+}
+
+/* Build stamp — if you see this, the new UI loaded */
+.build-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(46, 196, 167, 0.35);
+  background: rgba(46, 196, 167, 0.1);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Brand lockup */
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.brand-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 30% 30%, #5eead4, transparent 55%),
+    linear-gradient(145deg, #0f766e 0%, #134e4a 100%);
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+.brand-logo::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: var(--glow-line);
+  animation: brand-scan 2.4s ease-in-out infinite;
+}
+.brand-logo svg {
+  width: 18px;
+  height: 18px;
+  color: #ecfeff;
+}
+@keyframes brand-scan {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateX(-30%);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(30%);
+  }
+}
+.brand-mark {
+  font-size: 18px !important;
+}
+.brand-sub {
+  margin-top: 2px;
+}
+
+.app.collapsed .brand-logo {
+  width: 36px;
+  height: 36px;
+}
+.app.collapsed .brand-row {
+  justify-content: center;
+  width: 100%;
+}
+.app.collapsed .brand-mark,
+.app.collapsed .brand-sub {
+  display: none !important;
+}
+
+/* Stronger shell atmosphere — tokenized so light theme tokens repaint chrome */
+.sidebar {
+  background:
+    radial-gradient(
+      280px 180px at 0% 0%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 70%
+    ),
+    linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-raised) 42%) !important;
+}
+.topbar {
+  backdrop-filter: blur(10px);
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent) !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--edge) 80%, var(--accent) 20%);
+}
+.main {
+  background:
+    radial-gradient(
+      1000px 480px at 6% -12%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 55%
+    ),
+    radial-gradient(
+      780px 420px at 100% 0%,
+      color-mix(in srgb, var(--accent) 8%, transparent),
+      transparent 52%
+    ),
+    linear-gradient(180deg, var(--bg-raised) 0%, var(--bg) 32%) !important;
+}
+
+.nav-item.active {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 18%, transparent),
+    color-mix(in srgb, var(--accent) 5%, transparent)
+  ) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.nav-item.active::before {
+  width: 3px !important;
+  top: 6px !important;
+  bottom: 6px !important;
+  background: linear-gradient(180deg, var(--focus), var(--accent)) !important;
+}
+
+/* Quick jump tiles on Command Center */
+.jump-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 20px;
+}
+@media (max-width: 1100px) {
+  .jump-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .jump-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.jump-tile {
+  text-align: left;
+  padding: 14px 16px;
+  min-height: 88px;
+  border-radius: var(--radius);
+  border: 1px solid var(--edge);
+  background: linear-gradient(160deg, var(--bg-panel), var(--bg-raised));
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color var(--ease), transform var(--ease), background var(--ease);
+}
+.jump-tile:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--edge));
+  background: color-mix(in srgb, var(--bg-hover) 92%, var(--accent) 8%);
+  transform: translateY(-1px);
+}
+.jump-tile .jt-kicker {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.jump-tile .jt-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+.jump-tile .jt-hint {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
+/* Wallboard stats punchier */
+.stat-card {
+  min-height: 118px !important;
+}
+.stat-card .value {
+  font-size: 36px !important;
+}
+.stat-card.accent {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--edge));
+  background: linear-gradient(165deg, var(--accent-muted), var(--bg-panel)) !important;
+}
+.stat-card.danger {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--edge));
+  background: linear-gradient(165deg, var(--danger-soft), var(--bg-panel)) !important;
+}
+
+.cc-hero {
+  padding: 26px 28px !important;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--edge)) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent) inset;
+}
+.cc-hero h1 {
+  font-size: clamp(32px, 4vw, 42px) !important;
+}
+
+/* Skeleton wall while Command Center loads */
+.cc-skel {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.cc-skel .block {
+  height: 110px;
+  border-radius: var(--radius);
+}
+
+/* Live console contact strip cards */
+.contact-strip .interaction-card {
+  border-radius: 12px;
+  border: 1px solid var(--edge);
+  background: linear-gradient(165deg, var(--bg-panel), var(--bg-raised));
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color var(--ease), transform var(--ease), box-shadow var(--ease);
+}
+.contact-strip .interaction-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--edge-strong);
+}
+.contact-strip .interaction-card.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--edge));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.contact-strip .interaction-card.flagged {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--edge));
+  background: linear-gradient(165deg, var(--danger-soft), var(--bg-panel));
+}
+
+.ops-ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--ink) 8%);
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.ops-ribbon .pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.ops-ribbon .pip.live {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+.ops-ribbon .pip.warn {
+  background: var(--warn);
+}
+.ops-ribbon .pip.err {
+  background: var(--danger);
+}
+
+/* Case queue filter bar punch */
+.filter-bar {
+  background:
+    linear-gradient(180deg, rgba(46, 196, 167, 0.05), transparent 60%),
+    var(--bg-panel) !important;
+}
+.filter-chip.active {
+  box-shadow: 0 0 0 1px rgba(46, 196, 167, 0.25);
+}
+
+/* Snapshot / funnel stronger */
+.snapshot-tile {
+  background: linear-gradient(165deg, var(--bg-panel), var(--bg-raised)) !important;
+  min-height: 92px;
+  color: var(--ink);
+}
+.snapshot-tile .v {
+  font-size: 26px !important;
+}
+.funnel-step {
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg-raised)) !important;
+  color: var(--ink);
+}
+.funnel-step .n {
+  color: var(--accent);
+}
+
+.page-enter {
+  animation: page-in-v21 280ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+@keyframes page-in-v21 {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Light mode: explicit high-contrast shell + panels (wins over any residual dark paint) */
+:root[data-theme="light"] .sidebar {
+  background:
+    radial-gradient(280px 180px at 0% 0%, rgba(13, 148, 136, 0.08), transparent 70%),
+    linear-gradient(180deg, #ffffff 0%, #f4f7fb 42%) !important;
+  border-right-color: var(--edge);
+}
+:root[data-theme="light"] .main {
+  background:
+    radial-gradient(1000px 480px at 6% -12%, rgba(13, 148, 136, 0.08), transparent 55%),
+    radial-gradient(780px 420px at 100% 0%, rgba(15, 23, 36, 0.03), transparent 52%),
+    linear-gradient(180deg, #eef2f7 0%, var(--bg) 32%) !important;
+}
+:root[data-theme="light"] .topbar {
+  background: color-mix(in srgb, #ffffff 92%, transparent) !important;
+  border-bottom-color: var(--edge);
+}
+:root[data-theme="light"] .jump-tile {
+  background: linear-gradient(160deg, #ffffff, #f1f5f9);
+  border-color: var(--edge);
+  color: var(--ink);
+}
+:root[data-theme="light"] .jump-tile:hover:not(:disabled) {
+  background: #e8eef6;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--edge));
+}
+:root[data-theme="light"] .stat-card,
+:root[data-theme="light"] .stat-card.accent,
+:root[data-theme="light"] .stat-card.danger {
+  background: linear-gradient(165deg, #ffffff 0%, #f4f7fb 100%) !important;
+  border-color: var(--edge);
+  color: var(--ink);
+}
+:root[data-theme="light"] .stat-card.accent {
+  background: linear-gradient(165deg, rgba(13, 148, 136, 0.1), #ffffff) !important;
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--edge));
+}
+:root[data-theme="light"] .stat-card.danger {
+  background: linear-gradient(165deg, rgba(220, 38, 38, 0.08), #ffffff) !important;
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--edge));
+}
+:root[data-theme="light"] .ops-ribbon {
+  background: #ffffff;
+  border-color: var(--edge);
+  color: var(--ink);
+}
+:root[data-theme="light"] .snapshot-tile,
+:root[data-theme="light"] .funnel-step {
+  background: linear-gradient(165deg, #ffffff, #f4f7fb) !important;
+  color: var(--ink);
+}
+:root[data-theme="light"] .contact-strip .interaction-card {
+  background: linear-gradient(165deg, #ffffff, #f4f7fb);
+  color: var(--ink);
+}
+:root[data-theme="light"] .cc-hero {
+  background:
+    linear-gradient(135deg, rgba(13, 148, 136, 0.1) 0%, transparent 42%),
+    linear-gradient(180deg, #ffffff 0%, #f7fafc 100%) !important;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--edge)) !important;
+  color: var(--ink);
+}
+:root[data-theme="light"] .card,
+:root[data-theme="light"] .panel,
+:root[data-theme="light"] .risk-card {
+  background: #ffffff;
+  border-color: var(--edge);
+  color: var(--ink);
+}
+:root[data-theme="light"] button:not(.primary):not(.danger) {
+  background: var(--bg-hover);
+  color: var(--ink);
+  border-color: var(--edge-strong);
+}
+:root[data-theme="light"] button:not(.primary):not(.danger):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bg-hover) 70%, var(--edge) 30%);
+  border-color: var(--accent-soft);
+}
+:root[data-theme="light"] button.ghost {
+  background: transparent;
+}
+:root[data-theme="light"] button.primary,
+:root[data-theme="light"] button.voice-cta.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #042f2e;
+}
+:root[data-theme="light"] button.voice-cta.primary:hover:not(:disabled) {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #ecfeff;
+}
+:root[data-theme="light"] .health-chip,
+:root[data-theme="light"] .palette-trigger {
+  background: var(--bg-panel);
+  border-color: var(--edge);
+  color: var(--ink);
+}
+:root[data-theme="light"] .nav-item {
+  color: var(--ink-soft);
+}
+:root[data-theme="light"] .nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+:root[data-theme="light"] .nav-item.active {
+  background: linear-gradient(
+    90deg,
+    rgba(13, 148, 136, 0.14),
+    rgba(13, 148, 136, 0.04)
+  ) !important;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-logo::after,
+  .page-enter {
+    animation: none !important;
+  }
+}

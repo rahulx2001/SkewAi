@@ -1,0 +1,39 @@
+# Frontline v2 — runtime requirements.
+# Pinned loosely; mirrors v1 where possible. Stable, current versions.
+
+# ── Core runtime ──────────────────────────────────────────────────────────
+fastapi>=0.110,<1.0
+python-multipart>=0.0.9
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.6,<3.0
+duckdb>=0.10,<2.0
+pyyaml>=6.0,<7.0
+python-ulid>=2.2,<4.0
+python-dotenv>=1.0,<2.0
+websockets>=12.0,<14.0
+
+# ── LLM providers (BYOK; optional — runtime works without them) ──────────
+# Kept optional via try/except so the simulator + offline eval are guaranteed
+# LLM-free.
+anthropic>=0.40,<1.0
+openai>=1.30,<2.0
+
+# ── Slowapi rate-limiting (reused from v1) ─────────────────────────────────
+slowapi>=0.1.9,<1.0
+
+# ── NLP / sentiment (lexicon-based, no transformers) ───────────────────────
+vaderSentiment>=3.3,<4.0
+
+# ── Embeddings (optional; Investigator is ILIKE-only today — L7) ───
+# Install only if you wire real MiniLM similarity later.
+# sentence-transformers>=2.7,<4.0
+
+# ── Dev / test ─────────────────────────────────────────────────────────────
+pytest>=8.0,<9.0
+pytest-asyncio>=0.23,<1.0
+httpx>=0.27,<1.0          # for FastAPI TestClient
+cryptography>=42,<46      # Ed25519 Evidence Locker
+pytest-timeout>=2.3.1
+
+
+# Reproducible pins: pip install -r requirements.txt -c requirements-lock.txt

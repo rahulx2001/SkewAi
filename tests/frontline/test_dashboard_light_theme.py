@@ -1,0 +1,81 @@
+"""Dashboard light-theme structural gate.
+
+Drives the real shipped assert-light-theme.mjs against source + dist CSS
+(after build). Proves light tokens + tokenized shell/cards exist and dark
+defaults remain dark.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+DASH = REPO / "dashboard"
+ASSERT = DASH / "scripts" / "assert-light-theme.mjs"
+
+
+@pytest.fixture(scope="module")
+def built_dashboard() -> None:
+    assert ASSERT.is_file(), f"missing theme assert script: {ASSERT}"
+    # Ensure dist exists so the script checks production CSS
+    r = subprocess.run(
+        ["npm", "run", "build"],
+        cwd=DASH,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert r.returncode == 0, f"npm build failed:\n{r.stdout}\n{r.stderr}"
+
+
+def test_assert_light_theme_script_passes(built_dashboard: None) -> None:
+    r = subprocess.run(
+        ["node", str(ASSERT)],
+        cwd=DASH,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert r.returncode == 0, f"theme assert failed:\n{r.stdout}\n{r.stderr}"
+    assert "assert-light-theme: PASSED" in r.stdout
+    assert "light --bg" in r.stdout or "OK: light --bg" in r.stdout
+    assert "dark :root --bg" in r.stdout or "OK: dark :root --bg" in r.stdout
+
+
+def test_source_css_has_no_dark_only_shell_hexes() -> None:
+    """Direct read of shipped sources — no reimplementation of the UI."""
+    bad = (
+        "#10151e",
+        "#0a0d14",
+        "#121824",
+        "#111722",
+        "#151b27",
+        "#222a3c",
+        "#0b0e14",
+    )
+    blobs = []
+    for name in ("styles.css", "console.css", "ux-v21.css"):
+        p = DASH / "src" / name
+        assert p.is_file(), p
+        blobs.append(p.read_text(encoding="utf-8").lower())
+    joined = "\n".join(blobs)
+    for hex_ in bad:
+        assert hex_.lower() not in joined, f"dark-only fill still in CSS: {hex_}"
+
+
+def test_light_token_block_and_shell_overrides_exist() -> None:
+    console = (DASH / "src" / "console.css").read_text(encoding="utf-8")
+    ux = (DASH / "src" / "ux-v21.css").read_text(encoding="utf-8")
+    assert ':root[data-theme="light"]' in console
+    assert "--bg:" in console
+    assert "--ink:" in console
+    for sel in (
+        ':root[data-theme="light"] .sidebar',
+        ':root[data-theme="light"] .main',
+        ':root[data-theme="light"] .jump-tile',
+        ':root[data-theme="light"] .stat-card',
+    ):
+        assert sel in ux or sel in console, f"missing {sel}"

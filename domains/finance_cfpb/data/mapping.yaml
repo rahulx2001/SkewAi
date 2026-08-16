@@ -1,0 +1,29 @@
+# Mapping: CFPB consumer complaint CSV columns → canonical records fields.
+# Used by the Pack Builder (when implemented) to ingest the public CFPB dataset.
+# The fixture seed script (scripts/seed_finance_cfpb.py) bypasses this and writes directly.
+
+source: CFPB consumer complaint database CSV
+records:
+  record_id: Complaint ID
+  received_at: Date received
+  occurred_at: Date received
+  entity_1: Product
+  entity_2: Sub-product
+  entity_3: Company
+  category: Issue
+  text: Consumer complaint narrative
+  severity_label: ""  # CFPB has no severity label; derived from Timely response? / Consumer disputed?
+  region: State
+  source: "CFPB"
+
+advisories:
+  advisory_id: advisory_id  # curated; not a direct CFPB CSV column
+  issued_at: issued_at
+  scope_entity_1: Product
+  scope_entity_2: Sub-product
+  scope_entity_3: Company
+  scope_category: Issue
+  summary: summary
+  remedy: remedy
+  url: url
+  source: "CFPB"

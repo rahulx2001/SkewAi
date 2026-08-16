@@ -1,0 +1,102 @@
+# Template Domain Pack — copy this directory to start a new vertical.
+#
+# 1. Copy: cp -r domains/_template domains/<your_pack_id>
+# 2. Edit pack.yaml: fill in id, display_name, greeting, entities, slots, safety, advisory_match, severity
+# 3. Add gazetteers/<name>.csv for each gazetteer-validated slot
+# 4. Edit taxonomy.yaml
+# 5. Lint: make pack-lint PACK=<your_pack_id>
+# 6. Build a domain warehouse (either via the Pack Builder or a seed script)
+# 7. Test: DOMAIN_PACK=<your_pack_id> make contact
+#
+# See docs/domain_pack_guide.md for the full schema reference.
+
+id: _template
+display_name: Template Pack (edit me)
+greeting: "Thanks for calling. How can I help you today?"
+goodbye: "Thanks for reaching out. Your case number is {case_id}. A specialist will follow up by email within one business day."
+refusal_topics:
+  - legal advice
+
+entities:
+  entity_1: "Entity 1"
+  entity_2: "Entity 2"
+  entity_3: "Entity 3"
+
+slot_frame:
+  - name: entity_1
+    label: "Entity 1"
+    prompt: "What's the entity_1?"
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: entity_1
+  - name: entity_2
+    label: "Entity 2"
+    prompt: "What's the entity_2?"
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: entity_2
+  - name: entity_3
+    label: "Entity 3"
+    prompt: "What's the entity_3?"
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: entity_3
+  - name: category
+    label: "Category"
+    prompt: "What's the category?"
+    required: true
+    max_re_asks: 2
+    validation: gazetteer
+    gazetteer: categories
+  - name: description
+    label: "Description"
+    prompt: "In your own words, what's the issue?"
+    required: true
+    max_re_asks: 1
+    validation: free-text
+
+safety:
+  escalation_lexicon:
+    - emergency
+    - urgent
+    - dangerous
+  safety_questions:
+    - "Is anyone in immediate danger?"
+    - "Are you in a safe location right now?"
+  escalation_script: |
+    I want to flag this immediately for a specialist. A specialist will reach
+    out within the hour. If you're in immediate danger, please contact
+    emergency services.
+
+advisory_match:
+  sql_template: |
+    SELECT advisory_id, issued_at,
+           scope_entity_2 || ' ' || scope_entity_3 || ' ' || scope_category AS scope_summary,
+           summary, remedy, url, source
+    FROM advisories
+    WHERE (scope_entity_1 = $entity_1 OR scope_entity_1 IS NULL)
+      AND (scope_entity_2 = $entity_2 OR scope_entity_2 IS NULL)
+      AND (scope_entity_3 = $entity_3 OR scope_entity_3 IS NULL)
+      AND (scope_category = $category OR scope_category IS NULL)
+    ORDER BY issued_at DESC
+    LIMIT 5
+  readback_fields: [advisory_id, scope_summary, remedy, url]
+
+severity:
+  rules:
+    - when: safety.any
+      severity: Critical
+      reason: "Safety flag present — escalated to Critical"
+    - when: default
+      severity: Low
+      reason: "Default severity"
+  priority_matrix:
+    safety: 1
+    Critical: 1
+    Medium: 2
+    Low: 3
+
+taxonomy_ref: taxonomy.yaml

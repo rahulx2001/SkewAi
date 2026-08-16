@@ -1,0 +1,108 @@
+id: automotive_nhtsa
+display_name: Automotive (NHTSA)
+greeting: Thanks for calling support. What's going on with your vehicle?
+goodbye: Thanks for reaching out. Your case number is {case_id}. A specialist will
+  follow up by email within one business day.
+refusal_topics:
+- x
+entities:
+  entity_1: Year
+  entity_2: Make
+  entity_3: Model
+slot_frame:
+- name: entity_1
+  label: Vehicle year
+  prompt: What's the model year of your vehicle?
+  required: true
+  max_re_asks: 2
+  validation: year-range
+  year_range:
+  - 1990
+  - 2026
+- name: entity_2
+  label: Make
+  prompt: What's the make? For example, Honda, Ford, Toyota.
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: makes
+- name: entity_3
+  label: Model
+  prompt: And the model? For example, CR-V, F-150, Corolla.
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: models
+- name: category
+  label: System
+  prompt: Which system is affected? For example, brakes, engine, steering, airbags.
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: categories
+- name: description
+  label: Symptom description
+  prompt: In your own words, what's happening with the vehicle?
+  required: true
+  max_re_asks: 1
+  validation: free-text
+safety:
+  escalation_lexicon:
+  - fire
+  - smoke
+  - crash
+  - injury
+  - airbag deployed
+  - loss of control
+  - vehicle stopped in traffic
+  - unable to brake
+  - seatbelt failed
+  safety_questions:
+  - Is anyone hurt?
+  - Are you in a safe location right now?
+  escalation_script: 'I want to flag this immediately for a safety specialist. Please
+    do not
+
+    drive the vehicle until a specialist has reviewed your case. They will
+
+    reach out within the hour. If at any point you feel unsafe, please call
+
+    emergency services.
+
+    '
+advisory_match:
+  sql_template: "SELECT advisory_id, issued_at,\n       scope_entity_2 || ' ' || scope_entity_3\
+    \ || ' ' || scope_category AS scope_summary,\n       summary, remedy, url, source\n\
+    FROM advisories\nWHERE (scope_entity_1 = $entity_1 OR scope_entity_1 IS NULL)\n\
+    \  AND (scope_entity_2 = $entity_2 OR scope_entity_2 IS NULL)\n  AND (scope_entity_3\
+    \ = $entity_3 OR scope_entity_3 IS NULL)\n  AND (scope_category = $category OR\
+    \ scope_category IS NULL)\nORDER BY issued_at DESC\nLIMIT 5\n"
+  readback_fields:
+  - advisory_id
+  - scope_summary
+  - remedy
+  - url
+severity:
+  model_artifact: automotive_nhtsa/models/severity_rules.json
+  rules:
+  - when: safety.any
+    severity: Critical
+    reason: "Safety flag present \u2014 escalated to Critical"
+  - when: description_matches_fire|smoke|crash|injury
+    severity: Critical
+    reason: Severity-critical language in description
+  - when: category in [SERVICE BRAKES, AIR BAGS, FUEL SYSTEM, STEERING]
+    severity: Medium
+    reason: Safety-critical system
+  - when: category in [ELECTRICAL, ENGINE, POWER TRAIN]
+    severity: Medium
+    reason: Drivetrain component
+  - when: default
+    severity: Low
+    reason: Default severity
+  priority_matrix:
+    safety: 1
+    Critical: 1
+    Medium: 2
+    Low: 3
+taxonomy_ref: taxonomy.yaml

@@ -1,0 +1,11 @@
+# Template taxonomy — replace with your domain's category tree.
+
+groups:
+  - name: Group 1
+    categories:
+      - CATEGORY_A
+      - CATEGORY_B
+  - name: Group 2
+    categories:
+      - CATEGORY_C
+      - CATEGORY_D

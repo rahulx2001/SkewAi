@@ -1,0 +1,15 @@
+# Frontline v2 — Docker pilot image dependencies (file-backed install).
+# Subset of requirements.txt: API + agents + eval runtime without heavy
+# optional ML wheels (sentence-transformers) or test-only packages.
+
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.6,<3.0
+duckdb>=0.10,<2.0
+pyyaml>=6.0,<7.0
+python-ulid>=2.2,<4.0
+python-dotenv>=1.0,<2.0
+websockets>=12.0,<14.0
+slowapi>=0.1.9,<1.0
+vaderSentiment>=3.3,<4.0
+httpx>=0.27,<1.0

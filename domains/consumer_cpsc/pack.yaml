@@ -1,0 +1,93 @@
+id: consumer_cpsc
+display_name: Consumer Products (CPSC)
+greeting: Thanks for calling. How can I help you today?
+goodbye: Thanks for reaching out. Your case number is {case_id}. A specialist will
+  follow up by email within one business day.
+refusal_topics:
+- legal advice
+entities:
+  entity_1: Brand
+  entity_2: Product
+  entity_3: Model
+slot_frame:
+- name: entity_1
+  label: Brand
+  prompt: What's the Brand?
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: entity_1
+- name: entity_2
+  label: Product
+  prompt: What's the Product?
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: entity_2
+- name: entity_3
+  label: Model
+  prompt: What's the Model?
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: entity_3
+- name: category
+  label: Category
+  prompt: What's the category?
+  required: true
+  max_re_asks: 2
+  validation: gazetteer
+  gazetteer: categories
+- name: description
+  label: Description
+  prompt: In your own words, what's the issue?
+  required: true
+  max_re_asks: 1
+  validation: free-text
+safety:
+  escalation_lexicon:
+  - emergency
+  - urgent
+  - dangerous
+  safety_questions:
+  - Is anyone in immediate danger?
+  - Are you in a safe location right now?
+  escalation_script: 'I want to flag this immediately for a specialist. A specialist
+    will reach
+
+    out within the hour. If you''re in immediate danger, please contact
+
+    emergency services.
+
+    '
+advisory_match:
+  sql_template: "SELECT advisory_id, issued_at,\n       scope_entity_2 || ' ' || scope_entity_3\
+    \ || ' ' || scope_category AS scope_summary,\n       summary, remedy, url, source\n\
+    FROM advisories\nWHERE (scope_entity_1 = $entity_1 OR scope_entity_1 IS NULL)\n\
+    \  AND (scope_entity_2 = $entity_2 OR scope_entity_2 IS NULL)\n  AND (scope_entity_3\
+    \ = $entity_3 OR scope_entity_3 IS NULL)\n  AND (scope_category = $category OR\
+    \ scope_category IS NULL)\nORDER BY issued_at DESC\nLIMIT 5\n"
+  readback_fields:
+  - advisory_id
+  - scope_summary
+  - remedy
+  - url
+severity:
+  rules:
+  - when: safety.any
+    severity: Critical
+    reason: "Safety flag present \u2014 escalated to Critical"
+  - when: default
+    severity: Low
+    reason: Default severity
+  priority_matrix:
+    safety: 1
+    Critical: 1
+    Medium: 2
+    Low: 3
+taxonomy_ref: taxonomy.yaml
+pack_id: consumer_cpsc
+description: "Pilot scaffold for CPSC consumer product incidents \u2014 feature #42."
+vertical: consumer_products
+language: en
+name: Consumer Products (CPSC)
