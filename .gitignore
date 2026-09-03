@@ -49,7 +49,10 @@ dashboard/test-results/
 .vscode/
 *.swp
 *.swo
-.cursor/
+.cursor/*
+# Keep the committed Cloud Agent environment config tracked.
+!.cursor/environment.json
+!.cursor/install.sh
 .grok/
 
 # Docker / local tooling
