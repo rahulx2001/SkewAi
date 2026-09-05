@@ -31,6 +31,8 @@ SAFE_TABLES = frozenset(
         "connector_deliveries",
         "contact_memory",
         "llm_spend",
+        "canonical_identity",
+        "entity_observations",
     }
 )
 
@@ -55,6 +57,15 @@ SAFE_COLUMNS = frozenset(
         "row_hash",
         "assignee",
         "sla_due_at",
+        # Chain-preserving erasure only (dsr.tombstone — fixed internal DDL,
+        # never request input).
+        "text",
+        "input_summary",
+        "output_summary",
+        "body_json",
+        "erased",
+        "description",
+        "body",
     }
 )
 
@@ -66,6 +77,14 @@ SAFE_ALTER_COLUMNS = frozenset(
         "tenant_id",
         "assignee",
         "sla_due_at",
+        "case_kind",
+        "customer_ref",
+        "degraded_ledger",
+        "csat",
+        "customer_resolved",
+        "erased",
+        "entity_key",
+        "provenance",
     }
 )
 

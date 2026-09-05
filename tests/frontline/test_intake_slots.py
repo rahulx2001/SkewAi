@@ -115,18 +115,20 @@ async def test_slot_skipped_after_max_re_asks(pack):
     ctx = _ctx(pack)
     agent = IntakeAgent(ctx)
 
-    # Two safety questions first.
+    # Safety questions first (asked, then answered — answers are bound).
     await agent.run(customer_turn="My car has a brake problem.")
     await agent.run(customer_turn="No, nobody is hurt.")
-
-    # Now slot re-asks begin. entity_1 (year) is first.
-    await agent.run(customer_turn="It just doesn't stop.")
+    # Answering the last safety question falls through to the first slot ask
+    # on the same turn.
+    await agent.run(customer_turn="Yes, I'm in a safe location.")
     a1 = ctx.slot_attempts.get("entity_1", 0)
     assert a1 == 1
-    await agent.run(customer_turn="It started yesterday.")
+
+    # Now slot re-asks continue. entity_1 (year) is first.
+    await agent.run(customer_turn="It just doesn't stop.")
     a2 = ctx.slot_attempts.get("entity_1", 0)
     assert a2 == 2
-    # Third turn — entity_1 has hit its max_re_asks (2), so the agent skips it
+    # Third slot turn — entity_1 has hit its max_re_asks (2), so the agent skips it
     # and asks for the next missing slot. entity_1 attempts did not grow.
     res = await agent.run(customer_turn="Still happening.")
     assert ctx.slot_attempts.get("entity_1", 0) == 2
@@ -196,3 +198,6 @@ def test_automotive_kill_switch_lexicon(pack):
     assert "smoke" in lexic
     assert "crash" in lexic
     assert "injury" in lexic
+    assert "hurt" in lexic
+    assert "injured" in lexic
+    assert "bleeding" in lexic

@@ -7,7 +7,7 @@ LLM. Gates: ``FRONTLINE_LLM_ENABLED`` + a provider key, plus turn and daily
 spend caps enforced in ``provider.can_spend``.
 """
 
-from src.ai.provider import NarrationResult, can_spend, get_spend, llm_enabled, narrate
+from src.ai.provider import NarrationResult, can_spend, get_spend, llm_enabled, llm_provider, narrate
 from src.ai.narration import (
     phrase_followup_draft,
     phrase_intake_question,
@@ -19,6 +19,7 @@ __all__ = [
     "can_spend",
     "get_spend",
     "llm_enabled",
+    "llm_provider",
     "narrate",
     "phrase_followup_draft",
     "phrase_intake_question",

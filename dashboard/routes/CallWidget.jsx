@@ -8,7 +8,9 @@ import {
   callPhaseHint,
   callStateLabel,
   capabilitySnapshot,
+  fatalWsErrorMessage,
   greetingSpeakText,
+  isFatalWsError,
   mapInteractionEnded,
   mergeTranscriptTurn,
   shouldAcceptSpeechResult,
@@ -16,8 +18,13 @@ import {
   shouldReconnectOnClose,
   shouldResumeListeningOnOpen,
   slotProgress,
+  transcriptFromResume,
 } from "../src/voiceHelpers.js";
 import { capabilityLabel } from "../src/ui/labels.js";
+
+// Backoff caps at 5s, so 8 tries ≈ 25s of retrying — comfortably inside the
+// server's reconnect grace (FRONTLINE_WS_RECONNECT_GRACE_S, default 120s).
+const RECONNECT_MAX_ATTEMPTS = 8;
 
 function getSpeechRecognition() {
   if (typeof window === "undefined") return null;
@@ -73,6 +80,17 @@ export default function CallWidget() {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+  }
+
+  /** Ask the server to finalize the contact (REST path, works with no socket). */
+  function releaseInteraction() {
+    const iid = interactionIdRef.current;
+    if (!iid) return;
+    interactionIdRef.current = null;
+    fetch(`/api/interactions/${iid}/end`, {
+      method: "POST",
+      headers: apiHeaders(),
+    }).catch(() => {});
   }
 
   function closeWsQuietly() {
@@ -266,7 +284,7 @@ export default function CallWidget() {
         setActivity({
           agent: msg.agent,
           action_type: msg.action_type,
-          summary: msg.summary || "",
+          summary: msg.summary || msg.output_summary || "",
         });
         break;
       }
@@ -284,6 +302,8 @@ export default function CallWidget() {
         // Mark terminal BEFORE close so onclose does not reconnect / wipe summary.
         const summary = mapInteractionEnded(msg);
         markCallTerminal();
+        // Server already finalized it — no /end POST on unmount.
+        interactionIdRef.current = null;
         setEnded(summary);
         setState(CALL_STATE.ENDED);
         setWsStatus("disconnected");
@@ -291,7 +311,33 @@ export default function CallWidget() {
         closeWsQuietly();
         break;
       }
+      case "resumed": {
+        // Server accepted the re-attach. Its turn list is authoritative — we may
+        // have missed turns while the socket was down.
+        const rows = transcriptFromResume(msg.turns);
+        if (rows) {
+          setTranscript(rows);
+          setTurnCount(rows.length);
+          turnSeqRef.current = rows.length;
+        }
+        setError(null);
+        setInfo("Reconnected — the contact is still live");
+        break;
+      }
       case "error": {
+        if (isFatalWsError(msg)) {
+          // Retrying cannot help: stop the reconnect loop and close out cleanly
+          // instead of looping the raw "active interaction not found" detail.
+          markCallTerminal();
+          setError(fatalWsErrorMessage(msg));
+          setInfo(null);
+          setEnded((prev) => prev || { reason: "connection_lost" });
+          setState(CALL_STATE.ENDED);
+          setWsStatus("disconnected");
+          cleanupCall();
+          closeWsQuietly();
+          break;
+        }
         setError(msg.detail || msg.message || "Server error");
         break;
       }
@@ -403,6 +449,10 @@ export default function CallWidget() {
     setActivity(null);
     setTurnCount(0);
     turnSeqRef.current = 0;
+    speakPhaseRef.current = "normal";
+    setSpeakPhase("normal");
+    setMicGranted(null);
+    setWsStatus("connecting");
     setState(CALL_STATE.CONNECTING);
 
     let startRes;
@@ -484,9 +534,11 @@ export default function CallWidget() {
         }
       };
       ws.onerror = () => {
-        if (!callEndedRef.current && !intentionalCloseRef.current) {
-          setError("WebSocket connection error");
-        }
+        if (callEndedRef.current || intentionalCloseRef.current) return;
+        // onerror fires on every failed reconnect attempt; do not overwrite
+        // the "reconnecting…" info line. onclose owns the terminal banner.
+        if (reconnectAttemptRef.current > 0 || isReconnect) return;
+        setError("WebSocket connection error");
       };
       ws.onclose = () => {
         if (
@@ -498,16 +550,21 @@ export default function CallWidget() {
           setWsStatus("disconnected");
           return;
         }
-        if (reconnectAttemptRef.current >= 5) {
+        if (reconnectAttemptRef.current >= RECONNECT_MAX_ATTEMPTS) {
           setWsStatus("disconnected");
           setState(CALL_STATE.ENDED);
           setEnded((prev) => prev || { reason: "connection_lost" });
           markCallTerminal();
           cleanupCall();
+          // Release the contact server-side now instead of leaving it parked
+          // until the reconnect grace expires.
+          releaseInteraction();
           return;
         }
         setWsStatus("reconnecting");
-        setInfo("Connection dropped — reconnecting…");
+        setInfo(
+          `Connection dropped — reconnecting (${reconnectAttemptRef.current + 1}/${RECONNECT_MAX_ATTEMPTS})…`
+        );
         const delay = Math.min(5000, 400 * Math.pow(1.6, reconnectAttemptRef.current));
         reconnectAttemptRef.current += 1;
         reconnectTimerRef.current = setTimeout(() => {
@@ -535,13 +592,7 @@ export default function CallWidget() {
     setState(CALL_STATE.ENDED);
     setEnded((prev) => prev || { reason: "user_hangup" });
     cleanupCall();
-    const iid = interactionIdRef.current || interactionId;
-    if (iid) {
-      fetch(`/api/interactions/${iid}/end`, {
-        method: "POST",
-        headers: apiHeaders(),
-      }).catch(() => {});
-    }
+    releaseInteraction();
     closeWsQuietly();
   }
 
@@ -550,6 +601,9 @@ export default function CallWidget() {
     return () => {
       markCallTerminal();
       cleanupCall();
+      // Leaving the page is a deliberate hangup — do not park the contact for
+      // the whole reconnect grace window.
+      releaseInteraction();
       closeWsQuietly();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -571,7 +625,8 @@ export default function CallWidget() {
       return;
     }
     // If agent is speaking, cancel TTS so we don't talk over ourselves.
-    // speechSynthesis.cancel often does not fire utterance onend — resume STT explicitly.
+    // speechSynthesis.cancel often does not fire utterance onend — resume STT
+    // explicitly and clear speakPhase so recog.onend is not stuck on greeting.
     if (speakingRef.current && hasTTS) {
       try {
         window.speechSynthesis.cancel();
@@ -580,6 +635,8 @@ export default function CallWidget() {
       }
       speakingRef.current = false;
     }
+    speakPhaseRef.current = "normal";
+    setSpeakPhase("normal");
     pushTurn({ speaker: "customer", text });
     sendWs({ type: "user_turn", text, final: true });
     setTextFallback("");

@@ -17,6 +17,7 @@ Investigation auto-linking (deterministic rule):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -24,13 +25,17 @@ from typing import Any
 
 from src.agents.base import Agent
 from src.config import settings
-from src.data.warehouse import ops_con
+from src.data.warehouse import ops_con, ops_in_thread
 from src.ids import new_ulid
 from src.ledger import record_action
 from src.ledger.writer import record_action_on_con
 
 # Serialize open/link for a cluster within this process (M2).
 _investigation_open_lock = threading.Lock()
+# Same-loop serialization for the async close path (item 31): the threading
+# lock covers sync sections; this covers awaits around them. Cross-process
+# safety comes from the distributed close claim (src/jobs/registry).
+_investigation_open_alock = asyncio.Lock()
 
 
 def _case_id() -> str:
@@ -55,6 +60,13 @@ class CaseAgent(Agent):
     async def run(self, **kwargs: Any) -> dict[str, Any]:
         ctx = self.ctx
 
+        # Idempotent re-close (item 7): a preset case_id that already exists
+        # must never allocate a second case — finalize/update the existing one.
+        # A preset id WITHOUT a row (stale/planted) falls through to fresh
+        # creation so hangup can never strand a contact on a phantom case.
+        if ctx.case_id and self._case_row(ctx.case_id) is not None:
+            return await self.reclose_existing(ctx.case_id)
+
         # ── Compute evidence list ─────────────────────────────────────────
         evidence_ids: list[str] = []
         if ctx.advisory_match and ctx.advisory_match.get("advisory_id"):
@@ -68,18 +80,51 @@ class CaseAgent(Agent):
                 if r.get("record_id")
             )
 
-        # ── Draft follow-up (deterministic; LLM polish is optional) ───────
-        followup = self._draft_followup(evidence_ids)
+        # ── Allocate case_id FIRST so follow-up + ledger never see <pending>
+        case_id = _case_id()
+        ctx.case_id = case_id
 
-        # ── Investigation auto-linking ────────────────────────────────────
+        # ── Investigation auto-linking BEFORE draft so the letter can
+        # honestly claim "under active investigation" only when linked ──
         investigation_id = None
         investigation_opened = False
         cluster_id = ctx.investigation_brief.get("cluster_id") if ctx.investigation_brief else None
         if cluster_id is not None:
-            investigation_id = self._link_or_open_investigation(cluster_id)
+            async with _investigation_open_alock:
+                investigation_id = await ops_in_thread(
+                    self._link_or_open_investigation, cluster_id
+                )
             investigation_opened = investigation_id is not None and not self._was_existing(
                 cluster_id, investigation_id
             )
+        ctx.investigation_id = investigation_id
+
+        # Hypotheses from elicitation answers (item 35): when the contact is
+        # linked to an investigation AND the customer answered diagnostic
+        # questions, record each answer as a proposed hypothesis with
+        # provenance (question_id + answer_id) — the brief alone is not
+        # where hypotheses live.
+        if investigation_id:
+            try:
+                from src.enterprise.investigation_workspace import add_hypothesis
+                from src.frontline.elicitation import answers_for_interaction
+
+                for ans in answers_for_interaction(ctx.interaction_id):
+                    body = (
+                        f"Customer answer [{ans.get('question_id')}/"
+                        f"{ans.get('answer_id')}]: "
+                        f"{(ans.get('prompt') or '').strip()[:200]} → "
+                        f"{(ans.get('answer') or '').strip()[:300]}"
+                    )
+                    try:
+                        add_hypothesis(investigation_id, body, status="open")
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # ── Draft follow-up (deterministic; LLM polish is optional) ───────
+        followup = self._draft_followup(evidence_ids)
 
         # ── Safety floor (C-OPEN-1): any safety flag → Critical + P1 ──────
         if any(ctx.safety_flags.values()):
@@ -88,7 +133,6 @@ class CaseAgent(Agent):
             ctx.priority = 1
 
         # ── Insert case + case_created ledger in one transaction (M3) ─────
-        case_id = _case_id()
         case_action = self._action(
             action_type="case_created",
             input_summary=f"slots={ctx.slots}, severity={ctx.severity}, priority=P{ctx.priority}",
@@ -96,51 +140,74 @@ class CaseAgent(Agent):
             evidence_ids=evidence_ids,
             case_id=case_id,
         )
-        with ops_con() as con:
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.execute(
-                    """
-                    INSERT INTO cases (
-                        case_id, interaction_id, pack_id, created_at,
-                        category, description_summary, onset, severity,
-                        severity_source, priority, safety_flags,
-                        advisory_match_id, cluster_match_id, similar_record_count,
-                        investigation_id, status, followup_draft
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        case_id,
-                        ctx.interaction_id,
-                        ctx.pack.id,
-                        _now(),
-                        ctx.slots.get("category"),
-                        (ctx.slots.get("description") or "")[:500],
-                        _now(),
-                        ctx.severity,
-                        ctx.severity_source,
-                        ctx.priority,
-                        json.dumps(ctx.safety_flags),
-                        ctx.advisory_match.get("advisory_id") if ctx.advisory_match else None,
-                        cluster_id,
-                        (
-                            ctx.investigation_brief.get("similar_record_count", 0)
-                            if ctx.investigation_brief
-                            else 0
-                        ),
-                        investigation_id,
-                        "open",
-                        followup,
-                    ],
-                )
-                record_action_on_con(con, case_action)
-                con.execute("COMMIT")
-            except Exception:
+        insert_args = [
+            case_id,
+            ctx.interaction_id,
+            ctx.pack.id,
+            _now(),
+            ctx.slots.get("category"),
+            (ctx.slots.get("description") or "")[:500],
+            _now(),
+            ctx.severity,
+            ctx.severity_source,
+            ctx.priority,
+            json.dumps(ctx.safety_flags),
+            ctx.advisory_match.get("advisory_id") if ctx.advisory_match else None,
+            cluster_id,
+            (
+                ctx.investigation_brief.get("similar_record_count", 0)
+                if ctx.investigation_brief
+                else 0
+            ),
+            investigation_id,
+            "open",
+            followup,
+            "customer",
+            getattr(ctx, "customer_ref", None),
+        ]
+
+        def _insert_case() -> None:
+            with ops_con() as con:
+                con.execute("BEGIN TRANSACTION")
                 try:
-                    con.execute("ROLLBACK")
+                    try:
+                        con.execute(
+                            """
+                            INSERT INTO cases (
+                                case_id, interaction_id, pack_id, created_at,
+                                category, description_summary, onset, severity,
+                                severity_source, priority, safety_flags,
+                                advisory_match_id, cluster_match_id, similar_record_count,
+                                investigation_id, status, followup_draft,
+                                case_kind, customer_ref
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            insert_args,
+                        )
+                    except Exception:
+                        # Pre-case_kind schema: fall back to the legacy column set.
+                        con.execute(
+                            """
+                            INSERT INTO cases (
+                                case_id, interaction_id, pack_id, created_at,
+                                category, description_summary, onset, severity,
+                                severity_source, priority, safety_flags,
+                                advisory_match_id, cluster_match_id, similar_record_count,
+                                investigation_id, status, followup_draft
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            insert_args[:-2],
+                        )
+                    record_action_on_con(con, case_action)
+                    con.execute("COMMIT")
                 except Exception:
-                    pass
-                raise
+                    try:
+                        con.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
+
+        await ops_in_thread(_insert_case)
 
         ctx.case_id = case_id
         ctx.investigation_id = investigation_id
@@ -280,7 +347,73 @@ class CaseAgent(Agent):
             "linked_issues": getattr(ctx, "linked_issues", None) or [],
         }
 
-    # ── Follow-up drafting ────────────────────────────────────────────────
+    @staticmethod
+    def _case_row(case_id: str) -> dict[str, Any] | None:
+        with ops_con(read_only=True) as con:
+            try:
+                cur = con.execute(
+                    "SELECT * FROM cases WHERE case_id = ?", [case_id]
+                )
+                row = cur.fetchone()
+            except Exception:
+                return None
+            if not row:
+                return None
+            return dict(zip([d[0] for d in cur.description], row))
+
+    async def reclose_existing(self, case_id: str) -> dict[str, Any]:
+        """Idempotent re-close of an already-created case (item 7).
+
+        Refreshes severity/priority from the current context, ledgers a
+        ``case_status_updated`` action, and returns the SAME case_id —
+        repeated hangup/close events never create a second case.
+        """
+        ctx = self.ctx
+        row = self._case_row(case_id) or {}
+        if any(ctx.safety_flags.values()):
+            ctx.severity = "Critical"
+            ctx.severity_source = ctx.severity_source or "rules"
+            ctx.priority = 1
+
+        def _touch() -> None:
+            with ops_con() as con:
+                con.execute(
+                    """
+                    UPDATE cases
+                    SET severity = ?, severity_source = ?, priority = ?
+                    WHERE case_id = ?
+                    """,
+                    [
+                        ctx.severity or row.get("severity") or "Medium",
+                        ctx.severity_source or row.get("severity_source") or "rules",
+                        ctx.priority or row.get("priority") or 3,
+                        case_id,
+                    ],
+                )
+
+        await ops_in_thread(_touch)
+        ctx.case_id = case_id
+        ctx.investigation_id = row.get("investigation_id")
+        record_action(self._action(
+            action_type="case_status_updated",
+            input_summary="idempotent re-close: existing case reused",
+            output_summary=(
+                f"case_id={case_id} kept; no duplicate created "
+                f"(severity={ctx.severity} P{ctx.priority})"
+            ),
+            evidence_ids=[],
+            case_id=case_id,
+        ))
+        return {
+            "case_id": case_id,
+            "investigation_id": row.get("investigation_id"),
+            "investigation_opened": False,
+            "followup_draft": row.get("followup_draft") or "",
+            "evidence_ids": [],
+            "remedy_offer": getattr(ctx, "remedy_offer", None),
+            "linked_issues": getattr(ctx, "linked_issues", None) or [],
+            "reused": True,
+        }
     def _draft_followup(self, evidence_ids: list[str]) -> str:
         """Grounded follow-up email. References only ids in evidence_ids."""
         ctx = self.ctx
@@ -337,7 +470,9 @@ class CaseAgent(Agent):
                     f"Historically, similar clusters preceded an advisory by "
                     f"{ib['lead_time_weeks']} weeks."
                 )
-            lines.append("This issue is under active investigation.")
+            # Only claim active investigation when one is actually linked
+            if ctx.investigation_id:
+                lines.append("This issue is under active investigation.")
             lines.append("")
         lines.append("A specialist will follow up within one business day.")
         lines.append("")
@@ -350,25 +485,45 @@ class CaseAgent(Agent):
         the Nth case threshold is crossed.
 
         Serialized with a process lock + re-check so two concurrent threshold
-        crossings cannot open two open investigations for the same cluster (M2).
+        crossings cannot open two open investigations for the same cluster
+        (M2). Cross-process races are covered by the slice claim (audit 4.5):
+        a claim loser never inserts — it links to the winner's row.
+
+        Locking discipline: ``ops_con`` holds a NON-REENTRANT process lock
+        for the connection lifetime, so the slice claim (which opens its own
+        connection) is acquired BETWEEN two short connections, never nested
+        inside one — nesting self-deadlocks.
         """
         ctx = self.ctx
+        try:
+            from src.jobs.registry import acquire_slice_claim
+
+            def _claim() -> bool:
+                return acquire_slice_claim(
+                    f"inv:{ctx.pack.id}:{cluster_id}", f"case-{ctx.interaction_id}"
+                )
+        except Exception:
+            def _claim() -> bool:
+                return True
+
+        def _bump(con, inv_id: str) -> str:
+            con.execute(
+                """
+                UPDATE investigations
+                SET case_count = case_count + 1, last_case_at = ?
+                WHERE investigation_id = ?
+                """,
+                [_now(), inv_id],
+            )
+            return inv_id
+
         with _investigation_open_lock:
+            # Phase A (short connection): link to an existing open row, else
+            # check the rolling threshold. No claim held here.
             with ops_con() as con:
-                # 1. Existing open investigation for this cluster?
                 inv_id = self._find_open_investigation(con, cluster_id, ctx.pack.id)
                 if inv_id:
-                    con.execute(
-                        """
-                        UPDATE investigations
-                        SET case_count = case_count + 1, last_case_at = ?
-                        WHERE investigation_id = ?
-                        """,
-                        [_now(), inv_id],
-                    )
-                    return inv_id
-
-                # 2. Count cases for this cluster in the rolling window (last 7 days).
+                    return _bump(con, inv_id)
                 window_start = _now() - timedelta(days=7)
                 count_row = con.execute(
                     """
@@ -379,24 +534,19 @@ class CaseAgent(Agent):
                     [ctx.pack.id, cluster_id, window_start],
                 ).fetchone()
                 recent_count = count_row[0] if count_row else 0
-
                 if recent_count + 1 < settings.investigation_min_cases:
                     return None
-
-                # 3. Re-check open inv under the lock (another caller may have opened).
+            # Phase B (NO connection held): claim the fleet-wide open right.
+            # Claiming only now that we intend to insert keeps the TTL window
+            # from blocking openers that ultimately don't insert.
+            claimed = _claim()
+            # Phase C (fresh connection): re-check, then insert-or-link.
+            with ops_con() as con:
                 inv_id = self._find_open_investigation(con, cluster_id, ctx.pack.id)
                 if inv_id:
-                    con.execute(
-                        """
-                        UPDATE investigations
-                        SET case_count = case_count + 1, last_case_at = ?
-                        WHERE investigation_id = ?
-                        """,
-                        [_now(), inv_id],
-                    )
-                    return inv_id
-
-                # 4. Open a new investigation.
+                    return _bump(con, inv_id)
+                if not claimed:
+                    return None  # winner owns the open; link on next contact
                 seq_row = con.execute("SELECT nextval('investigation_seq')").fetchone()
                 seq = seq_row[0] if seq_row else 1
                 inv_id = _investigation_id(seq)

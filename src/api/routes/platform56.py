@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from src.api.auth import require_api_key, require_api_key_strict
 from src.api.limiter import limiter
-from src.api.rbac import get_role, require_perm
+from src.api.rbac import get_role, require_perm, require_perm_dep
 
 router = APIRouter(
     prefix="/api/frontline",
@@ -146,7 +146,11 @@ async def approvals_request(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/approvals/{approval_id}/decide")
-async def approvals_decide(approval_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def approvals_decide(
+    approval_id: str,
+    body: dict[str, Any],
+    _role: str = Depends(require_perm_dep("approval:decide", open_mode_ok=True)),
+) -> dict[str, Any]:
     from src.frontline.four_eyes import decide_approval
 
     try:
@@ -357,6 +361,32 @@ async def auth_oidc() -> dict[str, Any]:
     return oidc_discovery()
 
 
+@router.get("/auth/me")
+async def auth_me(
+    request: Request,
+    x_frontline_session: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Identity for the signed-in web session (httpOnly cookie preferred)."""
+    from fastapi import HTTPException as _HTTP
+    from src.api.rbac import session_token_from_cookies, verify_session
+
+    token = (
+        x_frontline_session or session_token_from_cookies(request.cookies) or ""
+    ).strip()
+    if not token:
+        return {"signed_in": False}
+    try:
+        body = verify_session(token)
+    except _HTTP:
+        return {"signed_in": False, "expired": True}
+    return {
+        "signed_in": True,
+        "subject": body.get("sub"),
+        "role": body.get("role"),
+        "exp": body.get("exp"),
+    }
+
+
 @router.post("/auth/session")
 @limiter.limit("20 per minute")
 async def auth_session(
@@ -364,33 +394,24 @@ async def auth_session(
     body: dict[str, Any],
     role: str = Depends(get_role),
 ) -> dict[str, Any]:
-    """Mint a session. Elevated roles need an admin issuer (FIND-002)."""
-    from src.api.rbac import issue_session
+    """JSON-body session mint is closed. Use Google / OIDC."""
+    from src.api.auth import is_open_mode
     from src.security.audit_log import security_event
 
-    subject = str(body.get("subject") or "user")
-    requested = str(body.get("role") or "agent")
-    try:
-        out = issue_session(subject, requested, issuer_role=role)
-        security_event(
-            "auth.session_mint",
-            outcome="success",
-            actor=subject,
-            role=out.get("role"),
-            detail={"issuer_role": role, "requested": requested},
-            ip=request.client.host if request.client else None,
-        )
-        return out
-    except Exception as e:
-        security_event(
-            "auth.session_mint",
-            outcome="failure",
-            actor=subject,
-            role=role,
-            detail={"requested": requested, "error": type(e).__name__},
-            ip=request.client.host if request.client else None,
-        )
-        raise
+    security_event(
+        "auth.session_mint",
+        outcome="denied",
+        actor=str(body.get("subject") or ""),
+        detail={"reason": "idp_required"},
+        ip=request.client.host if request.client else None,
+    )
+    # Enforcement site for session:mint (JSON mint stays closed either way).
+    if not is_open_mode():
+        require_perm(role, "session:mint")
+    raise HTTPException(
+        status_code=403,
+        detail="session mint requires Google / OIDC sign-in",
+    )
 
 
 @router.post("/coach/suggest")

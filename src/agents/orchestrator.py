@@ -28,6 +28,7 @@ post_contact_audit.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -44,6 +45,8 @@ from src.domains.loader import LoadedPack, load_pack
 from src.ids import new_ulid
 from src.ledger import record_action
 
+logger = logging.getLogger(__name__)
+
 
 
 # ── States ───────────────────────────────────────────────────────────────
@@ -53,17 +56,22 @@ COLLECTING = "COLLECTING"
 SAFETY_ESCALATION = "SAFETY_ESCALATION"
 SUPERVISED = "SUPERVISED"
 ENRICHING = "ENRICHING"
+HANDOFF_PENDING = "HANDOFF_PENDING"
 CLOSING = "CLOSING"
 DONE = "DONE"
 ABANDONED = "ABANDONED"
+
+# Handoff SLA: supervisor pickup window before the customer is told sorry.
+HANDOFF_SLA_S = 75
 
 # Allowed transitions (excluding SUPERVISED which has its own enter/exit logic).
 _TRANSITIONS = {
     GREETING: {COLLECTING, SUPERVISED, ABANDONED},
     # CLOSING allowed from COLLECTING for max-turns force wrap-up (partial slots).
-    COLLECTING: {SAFETY_ESCALATION, ENRICHING, SUPERVISED, ABANDONED, CLOSING},
+    COLLECTING: {SAFETY_ESCALATION, ENRICHING, SUPERVISED, ABANDONED, CLOSING, HANDOFF_PENDING},
     SAFETY_ESCALATION: {CLOSING, SUPERVISED, ABANDONED},
-    ENRICHING: {CLOSING, SUPERVISED, ABANDONED},
+    ENRICHING: {CLOSING, SUPERVISED, ABANDONED, HANDOFF_PENDING},
+    HANDOFF_PENDING: {SUPERVISED, COLLECTING, ENRICHING, ABANDONED, CLOSING},
     CLOSING: {DONE, ABANDONED},
     DONE: set(),
     ABANDONED: set(),
@@ -80,6 +88,7 @@ class OrchestratorHooks:
     All hooks are async. None are required — defaults are no-ops.
     """
     emit_customer_turn: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None
+    emit_heard_turn: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None
     emit_activity: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
     emit_slots_update: Optional[Callable[[dict[str, str]], Awaitable[None]]] = None
     emit_handoff_offer: Optional[Callable[[], Awaitable[None]]] = None
@@ -140,14 +149,58 @@ class Orchestrator:
         self._record_state(COLLECTING)
         return greeting
 
-    async def handle_customer_turn(self, text: str, final: bool = True) -> None:
-        """Process a customer turn (text from STT or text input)."""
+    async def handle_customer_turn(
+        self, text: str, final: bool = True, client_turn_id: str | None = None,
+        asr_confidence: dict[str, float] | None = None,
+        region: str | None = None, dtmf: str | None = None,
+    ) -> None:
+        """Process a customer turn (text from STT or text input).
+
+        ``client_turn_id`` (board #4): reconnect retries re-send the same
+        turn; a seen id is dropped after recording nothing — no double
+        sentiment scoring, no double elicitation answers.
+        ``asr_confidence`` 2.1: {slot: 0..1} forwarded to intake readback.
+        ``region`` 2.4: two-party/biometric consent branching. ``dtmf`` 2.4.
+        """
+        # 2.1/2.4 observability: turn latency + budget
+        import time as _t
+        _turn_start = _t.perf_counter()
+        try:
+            from src.observability.metrics import observe as _obs
+            _obs("turn_received", 1.0)
+        except Exception:
+            pass
+        # 2.4: region-aware consent (overrides generic preamble when set)
+        if region:
+            try:
+                from src.voice.policy import consent_requirement as _cr
+                _creq = _cr(region)
+                if _creq.get("requires_explicit_voice_consent"):
+                    record_action(self._orchestrator_action(
+                        "state_transition",
+                        input_summary=f"region={region} voice consent required",
+                        output_summary=_creq.get("script", "")[:500],
+                    ))
+            except Exception:
+                pass
         if self.ctx.state in (DONE, ABANDONED):
             return
+        if client_turn_id and self._seen_client_turn(client_turn_id):
+            try:
+                from src.observability.metrics import inc as _inc
 
-        # If in SUPERVISED, the AI does NOT generate turns.
-        if self.ctx.state == SUPERVISED:
+                _inc("duplicate_turn_dropped")
+            except Exception:
+                pass
+            logger.debug("duplicate client turn dropped: %s", client_turn_id)
             return
+
+        # SUPERVISED (item 6): suppress only customer-facing *generation*.
+        # Safety/scoring/ledger processing below still runs for every turn —
+        # an emergency ("I'M BLEEDING") or kill-switch during takeover must
+        # never be silently dropped. `supervised=True` threads through each
+        # stage to withhold emissions while recording everything.
+        supervised = self.ctx.state == SUPERVISED
 
         # ── Security: validate input before any agent logic ────────────────
         from src.security import validate_input
@@ -155,9 +208,12 @@ class Orchestrator:
         if not v.ok:
             record_action(self._orchestrator_action(
                 "state_transition",
-                input_summary="customer input rejected by security",
+                input_summary="customer input rejected by security"
+                + (" (supervised: generation suppressed)" if supervised else ""),
                 output_summary=f"reason: {v.reason}",
             ))
+            if supervised:
+                return
             # Politely decline and ask for a rephrase; never surface the reason.
             decline = "I'm sorry, I didn't catch that clearly. Could you rephrase?"
             record_action(self._orchestrator_action(
@@ -176,8 +232,15 @@ class Orchestrator:
 
         # Record the customer turn
         self.ctx.record_turn("customer", text)
+        await self.hooks._maybe(
+            getattr(self.hooks, "emit_heard_turn", None),
+            text,
+            {"speaker": "customer"},
+        )
 
         # Spoken confirmation of a prior diagnostic read-back.
+        # Any answer (yes/no or free text) to a pending diagnostic question is
+        # ledgered as customer-confirmed evidence and attached for audit.
         pending_q = (self.ctx.slots or {}).get("__diag_qid")
         if pending_q:
             from src.frontline.elicitation import (
@@ -185,7 +248,10 @@ class Orchestrator:
                 record_spoken_confirmation,
             )
 
-            if looks_like_confirmation(text):
+            # Bare confirmations ("yes", "correct") close the question; longer
+            # agreements ("Yes, only on cold mornings") carry evidence and
+            # take the free-text path so the content is preserved.
+            if looks_like_confirmation(text) and len(text.strip()) <= 24:
                 record_spoken_confirmation(
                     self.ctx.interaction_id,
                     text,
@@ -193,6 +259,65 @@ class Orchestrator:
                     question_id=pending_q,
                 )
                 self.ctx.slots.pop("__diag_qid", None)
+            elif text and text.strip():
+                # Free-text diagnostic answer: confirmed evidence with content
+                record_spoken_confirmation(
+                    self.ctx.interaction_id,
+                    text,
+                    confirmed=True,
+                    question_id=pending_q,
+                )
+                # Persist answer provenance (item 35) — slots alone are
+                # volatile; diagnostic_answers survives for brief/hypotheses.
+                try:
+                    from src.frontline.elicitation import record_elicitation_answer
+
+                    record_elicitation_answer(
+                        self.ctx.interaction_id,
+                        str(pending_q),
+                        text.strip(),
+                        prompt="",
+                        confirmed=True,
+                    )
+                except Exception:
+                    pass
+                # Surface the Q&A on the console activity feed (UI card).
+                # Customer text is escaped: custom renderers don't auto-escape
+                # (board: stored XSS); ledger/turns keep verbatim evidence.
+                try:
+                    from src.security.input_validation import escape_untrusted
+
+                    await self.hooks._maybe(self.hooks.emit_activity, {
+                        "agent": "intake",
+                        "action_type": "diagnostic_answered",
+                        "summary": f"Q {pending_q}: {escape_untrusted(text.strip()[:200])}",
+                        "ok": True,
+                    })
+                except Exception:
+                    pass
+                # Keep the answer on the context for the investigation brief
+                try:
+                    diag_answers = self.ctx.slots.get("__diag_answers") or {}
+                    if not isinstance(diag_answers, dict):
+                        diag_answers = {}
+                    diag_answers[str(pending_q)] = text.strip()[:1000]
+                    self.ctx.slots["__diag_answers"] = diag_answers
+                except Exception:
+                    pass
+                self.ctx.slots.pop("__diag_qid", None)
+                # Re-run semantics (board #4): answers arriving AFTER
+                # enrichment silently refresh the investigator brief (version
+                # bump, ledgered by the agent itself) instead of leaving a
+                # stale brief on the close path. Sentinel/Triage are NOT
+                # re-run — severity/advisory were already decided.
+                if self.ctx.enrichment_done and self.ctx.investigation_brief:
+                    try:
+                        refreshed = await InvestigatorAgent(self.ctx).run()
+                        if isinstance(refreshed, dict) and refreshed.get("brief"):
+                            prev = self.ctx.investigation_brief.get("brief_version", 1)
+                            self.ctx.investigation_brief["brief_version"] = int(prev) + 1
+                    except Exception:
+                        pass
 
         # ── Sentiment (always runs; cheap, deterministic) ───────────────
         sentiment = SentimentAgent(self.ctx)
@@ -208,20 +333,76 @@ class Orchestrator:
             # Audit-first: ledger the handoff offer BEFORE emitting it.
             record_action(self._orchestrator_action(
                 "handoff_offer_emitted",
-                input_summary="frustration threshold crossed; empathy + human offer",
+                input_summary="frustration threshold crossed; empathy + human offer"
+                + (" (supervised: console only)" if supervised else ""),
                 output_summary=offer,
             ))
-            await self.hooks._maybe(
-                self.hooks.emit_customer_turn,
-                offer,
-                {"speaker": "agent", "fast_path": True, "llm_used": False},
-            )
-            self.ctx.record_turn("agent", offer, llm_used=False)
+            if supervised:
+                # Supervisor already owns the conversation: surface on the
+                # console activity feed instead of generating a customer turn.
+                await self.hooks._maybe(self.hooks.emit_activity, {
+                    "agent": "sentiment",
+                    "action_type": "frustration_flagged",
+                    "summary": offer,
+                    "ok": True,
+                })
+            else:
+                await self.hooks._maybe(
+                    self.hooks.emit_customer_turn,
+                    offer,
+                    {"speaker": "agent", "fast_path": True, "llm_used": False},
+                )
+                self.ctx.record_turn("agent", offer, llm_used=False)
             await self.hooks._maybe(self.hooks.emit_handoff_offer)
 
         # ── Intake ────────────────────────────────────────────────────────
+        # 2.3: budget_remaining logged every turn for audit of elicitation conflicts
+        try:
+            _ccount = sum(1 for t in self.ctx.turns if t.get("speaker") == "customer")
+            from src.config import settings as _s
+            record_action(self._orchestrator_action(
+                "state_transition",
+                input_summary=f"turn budget: used={_ccount}/{_s.max_turns}",
+                output_summary=f"budget_remaining={max(0, _s.max_turns - _ccount)}",
+            ))
+        except Exception:
+            pass
+        # 6.4: per-agent flags (intake kill → safe close, not crash)
+        try:
+            from src.ops.pilot import agent_enabled as _ae
+            if not _ae("intake"):
+                record_action(self._orchestrator_action(
+                    "state_transition",
+                    input_summary="intake disabled by flag",
+                    output_summary="skip to closing",
+                ))
+                await self._move_to_closing()
+                return
+        except Exception:
+            pass
         intake = IntakeAgent(self.ctx)
-        ires = await intake.run(customer_turn=text)
+        ires = await intake.run(customer_turn=text,
+                                asr_confidence=asr_confidence, dtmf=dtmf)
+        # 2.1/6.3: turn latency observe vs 1200ms SLO
+        try:
+            import time as _t2
+            from src.observability.metrics import observe as _obs2
+            _obs2("turn_latency_ms", (_t2.perf_counter() - _turn_start) * 1000.0)
+        except Exception:
+            pass
+
+        # Supervised safety path (item 6): kill-switch/escalation language is
+        # fully processed — severity, ledger, sentinel, alert, console
+        # surfacing — while staying in SUPERVISED (the supervisor, already in
+        # control, decides what the customer hears).
+        if supervised and ires.get("kill_switch"):
+            # Keep the escalation script: if the supervisor releases with
+            # safety pending, release() emits it (audit 3.3) instead of
+            # dropping the escalation.
+            if ires.get("question"):
+                self.ctx.pending_safety_script = str(ires["question"])[:500]
+            await self._supervised_safety_hit(ires["kill_switch"], text)
+            return
 
         # Kill-switch → SAFETY_ESCALATION
         if ires.get("kill_switch"):
@@ -250,7 +431,32 @@ class Orchestrator:
                 await alert_safety_escalation(self.ctx.interaction_id, ires["kill_switch"])
             except Exception:
                 pass
+            # Best-effort enrichment on the escalation path (audit 4.1): a
+            # turn-1 kill-switch fires before slots complete, and the
+            # Critical case that follows is exactly where evidence matters
+            # most. Short timeout, partial results kept, never blocking.
+            try:
+                await asyncio.wait_for(self._run_enrichment(), timeout=5.0)
+                self.ctx.enrichment_done = True
+            except Exception:
+                pass
             await self._move_to_closing()
+            return
+
+        # Normal supervised input (item 6): the turn was validated, scored,
+        # and slot-processed above; record that safety processing ran and
+        # return WITHOUT generating a customer-facing turn.
+        if supervised:
+            record_action(self._orchestrator_action(
+                "supervised_turn_observed",
+                input_summary=f"customer turn safety-processed during takeover",
+                output_summary=(
+                    f"frustration={self.ctx.frustration_score} "
+                    f"peak={self.ctx.peak_frustration} "
+                    f"kill_switch={bool(ires.get('kill_switch'))}; "
+                    "generation suppressed"
+                ),
+            ))
             return
 
         # Max customer turns: force wrap-up (case + goodbye), not silent empty questions.
@@ -304,7 +510,11 @@ class Orchestrator:
 
         # Emit the next question (or empty if all slots filled)
         question = ires.get("question", "")
-        safety_pending = bool(ires.get("safety_question") or ires.get("kill_switch"))
+        safety_pending = bool(
+            ires.get("safety_question")
+            or (self.ctx.slots or {}).get("__safety_pending__")
+            or ires.get("kill_switch")
+        )
         if (
             self.ctx.has_required_slots()
             and not self.ctx.slots.get("__diag_asked")
@@ -313,7 +523,10 @@ class Orchestrator:
             from src.frontline.elicitation import next_question
             from src.ledger import record_action as _ra
 
-            dq = next_question(self.ctx.pack.id, self.ctx.slots)
+            dq = next_question(
+                self.ctx.pack.id, self.ctx.slots,
+                interaction_id=self.ctx.interaction_id,
+            )
             if dq:
                 question = dq["prompt"]
                 self.ctx.slots["__diag_qid"] = dq["question_id"]
@@ -338,6 +551,18 @@ class Orchestrator:
         # A pending question means the agent is still collecting (e.g. a safety
         # question was just asked and we must wait for the customer's answer
         # before transitioning). This preserves the one-question-per-turn policy.
+        #
+        # Slot confirmation gate (board #4): a mis-heard entity compounds
+        # through cluster pick → case → corpus. One readback turn with a
+        # bounded single correction round precedes enrichment.
+        if (
+            not question
+            and self.ctx.has_required_slots()
+            and self.ctx.state == COLLECTING
+            and not supervised
+        ):
+            if await self._confirm_slots_gate(text):
+                return
         if (
             not question
             and self.ctx.has_required_slots()
@@ -345,31 +570,137 @@ class Orchestrator:
         ):
             await self._enter_enriching()
 
-    async def hangup(self) -> None:
-        """Customer hung up. Move to ABANDONED (or DONE if a case was created).
+    def _confirmation_summary(self) -> str:
+        s = self.ctx.slots or {}
+        parts = [str(s.get(k) or "").strip() for k in ("entity_1", "entity_2", "entity_3")]
+        vehicle = " ".join(p for p in parts if p) or "your vehicle"
+        cat = str(s.get("category") or "the issue").strip()
+        return (
+            f"Just to confirm before I dig in: {vehicle} — {cat}. Is that right?"
+        )
 
-        Either way, persist the turns + interaction row so the audit trail is
-        complete — even for abandoned contacts (the customer's last words
-        matter for RCA). Customer hangup always leaves SUPERVISED (force-close);
-        supervisor-only auto-close still uses ``_move_to_closing`` without force.
+    async def _confirm_slots_gate(self, text: str) -> bool:
+        """Confirm-before-enrich readback. Returns True when this turn is consumed."""
+        from src.frontline.elicitation import looks_like_confirmation
+
+        slots = self.ctx.slots or {}
+        if slots.get("__confirmed__"):
+            return False
+        if slots.get("__confirm_pending__"):
+            if looks_like_confirmation(text):
+                slots.pop("__confirm_pending__", None)
+                slots["__confirmed__"] = "1"
+                record_action(self._orchestrator_action(
+                    "slot_extracted",
+                    input_summary="slot confirmation accepted",
+                    output_summary="slots confirmed; proceeding to enrichment",
+                ))
+                return False
+            # Correction path: overwrite policy via targeted re-extraction.
+            rounds = 0
+            try:
+                rounds = int(slots.get("__confirm_rounds") or 0)
+            except (TypeError, ValueError):
+                rounds = 0
+            try:
+                changed = IntakeAgent(self.ctx).reextract_overwrite(text)
+            except Exception:
+                changed = {}
+            if changed and rounds < 1:
+                slots["__confirm_rounds"] = str(rounds + 1)
+                summary = self._confirmation_summary()
+                record_action(self._orchestrator_action(
+                    "question_asked",
+                    input_summary=f"slots corrected: {sorted(changed)}",
+                    output_summary=summary,
+                ))
+                await self.hooks._maybe(
+                    self.hooks.emit_customer_turn,
+                    summary,
+                    {"speaker": "agent", "fast_path": True, "llm_used": False},
+                )
+                self.ctx.record_turn("agent", summary, llm_used=False)
+                return True
+            # No change extracted, or second round: proceed (bounded, no loops).
+            slots.pop("__confirm_pending__", None)
+            slots["__confirmed__"] = "1"
+            return False
+        summary = self._confirmation_summary()
+        slots["__confirm_pending__"] = "1"
+        slots["__confirm_rounds"] = "0"
+        record_action(self._orchestrator_action(
+            "question_asked",
+            input_summary="slot confirmation readback",
+            output_summary=summary,
+        ))
+        await self.hooks._maybe(
+            self.hooks.emit_customer_turn,
+            summary,
+            {"speaker": "agent", "fast_path": True, "llm_used": False},
+        )
+        self.ctx.record_turn("agent", summary, llm_used=False)
+        await self.hooks._maybe(self.hooks.emit_slots_update, dict(self.ctx.slots))
+        return True
+
+    async def hangup(self) -> None:
+        """Customer hung up. Close with a case when there is evidence to keep.
+
+        Rule (audit 6.1 — the worst failure mode is dropping a safety
+        contact): safety_flag OR enrichment_done OR an existing case_id routes
+        to Stage 5 (case created, outcome escalated_safety/case_created).
+        Only a contact with no case, no safety flag, and no enrichment may
+        abandon. Either way turns + interaction row persist.
         """
         if self.ctx.state == DONE:
             return
         if self.ctx.state == SUPERVISED:
             # Customer left; supervisor control ends so we can finalize.
             self.ctx.supervised = False
+            self.ctx.closed_while_supervised = True
             self._pre_supervised_state = None
-        if self.ctx.case_id:
+        must_close = bool(
+            self.ctx.case_id
+            or self.ctx.enrichment_done
+            or any(self.ctx.safety_flags.values())
+        )
+        if self.ctx.state == HANDOFF_PENDING:
+            # Customer left while queued: cancel the handoff row.
+            try:
+                from src.data.warehouse import ops_con as _ops_con2
+
+                with _ops_con2() as _con:
+                    _con.execute(
+                        "UPDATE handoff_requests SET status = 'cancelled'"
+                        " WHERE interaction_id = ? AND status = 'pending'",
+                        [self.ctx.interaction_id],
+                    )
+            except Exception:
+                pass
+        if must_close:
+            if not self.ctx.case_id:
+                record_action(self._orchestrator_action(
+                    "state_transition",
+                    input_summary="hangup with safety/enrichment evidence",
+                    output_summary="routing to close so a case is created",
+                ))
             await self._move_to_closing(force=True)
         else:
             self._transition(self.ctx.state, ABANDONED)
             self._record_state(ABANDONED)
             await self._finalize_interaction(outcome="incomplete")
 
-    async def takeover(self) -> None:
-        """Supervisor takes over. Save the pre-state; AI stops generating turns."""
-        if self.ctx.state == SUPERVISED:
+    async def takeover(self, claimed_by: str | None = None) -> None:
+        """Supervisor takes over. Save the pre-state; AI stops generating turns.
+
+        Simultaneous takeovers (board): the first claimant wins; a second
+        supervisor gets the live state back with the existing claimant named
+        instead of silently seizing the call. Takeover stays idempotent.
+        A finished contact (DONE/ABANDONED) cannot be seized.
+        """
+        if self.ctx.state in (SUPERVISED, DONE, ABANDONED):
             return
+        was_handoff = self.ctx.state == HANDOFF_PENDING
+        self.ctx.takeover_claimed_by = (claimed_by or "").strip() or None
         self._pre_supervised_state = self.ctx.state
         self.ctx.supervised = True
         self._transition(self.ctx.state, SUPERVISED)
@@ -378,6 +709,20 @@ class Orchestrator:
             input_summary=f"prior_state={self._pre_supervised_state}",
             output_summary="supervisor now controls the conversation",
         ))
+        if was_handoff:
+            # Supervisor claimed the queued handoff: close the queue row so
+            # the SLA sweep never fires for a served customer.
+            try:
+                from src.data.warehouse import ops_con as _ops_con
+
+                with _ops_con() as _con:
+                    _con.execute(
+                        "UPDATE handoff_requests SET status = 'claimed'"
+                        " WHERE interaction_id = ? AND status = 'pending'",
+                        [self.ctx.interaction_id],
+                    )
+            except Exception:
+                pass
         # Fire ops alert (non-blocking, deduped per interaction per day)
         try:
             from src.frontline.alerts import alert_takeover_started
@@ -386,20 +731,71 @@ class Orchestrator:
             pass  # alerts must never break a call
 
     async def release(self) -> None:
-        """Supervisor releases. Return to the prior state."""
+        """Supervisor releases. Next state is recomputed from facts (audit 3.3).
+
+        Restoring the literal pre-takeover state is stale when enrichment
+        finished or safety fired while supervised: safety escalation pending
+        → SAFETY_ESCALATION (stored script delivered); enrichment done →
+        CLOSING; slots complete → ENRICHING; else the prior state.
+        """
         if self.ctx.state != SUPERVISED:
             return
-        prior = self._pre_supervised_state or COLLECTING
-        self._transition(SUPERVISED, prior)
+        if self.ctx.safety_flags.get("escalation"):
+            target: str | None = "SAFETY_ESCALATION"
+        elif self.ctx.enrichment_done:
+            target = "CLOSING"
+        elif self.ctx.has_required_slots():
+            target = "ENRICHING"
+        else:
+            target = self._pre_supervised_state or COLLECTING
+        if target == "CLOSING":
+            # _move_to_closing owns the SUPERVISED→CLOSING transition itself.
+            self.ctx.supervised = False
+            record_action(self._orchestrator_action(
+                "takeover_released",
+                input_summary="returning to state=CLOSING (recomputed)",
+                output_summary="AI resumes",
+            ))
+            self._pre_supervised_state = None
+            await self._move_to_closing(force=True)
+            return
+        self._transition(SUPERVISED, target)
         # Clear the supervised flag so the console / audit reflects that the
         # AI has resumed. (takeover sets this to True; release must reset it.)
         self.ctx.supervised = False
         record_action(self._orchestrator_action(
             "takeover_released",
-            input_summary=f"returning to state={prior}",
+            input_summary=f"returning to state={target} (recomputed)",
             output_summary="AI resumes",
         ))
         self._pre_supervised_state = None
+        if target == "SAFETY_ESCALATION":
+            await self._deliver_pending_safety_script()
+        elif target == "ENRICHING":
+            await self._enter_enriching()
+
+    async def _deliver_pending_safety_script(self) -> None:
+        """Emit the stored escalation script post-release (audit 3.3)."""
+        script = (self.ctx.pending_safety_script or "").strip() or (
+            "For your safety, please pull over somewhere safe right away. "
+            "If anyone is hurt, call emergency services now."
+        )
+        self.ctx.pending_safety_script = None
+        self.ctx.severity = "Critical"
+        self.ctx.severity_source = "rules"
+        self.ctx.priority = 1
+        record_action(self._orchestrator_action(
+            "escalation_script_emitted",
+            input_summary="safety escalation raised while supervised; delivered on release",
+            output_summary=script,
+        ))
+        await self.hooks._maybe(
+            self.hooks.emit_customer_turn,
+            script,
+            {"speaker": "agent", "fast_path": True, "llm_used": False},
+        )
+        self.ctx.record_turn("agent", script, llm_used=False)
+        await self._move_to_closing()
 
     async def human_turn(self, text: str) -> None:
         """Supervisor typed a message. Ledger it BEFORE emitting.
@@ -431,9 +827,232 @@ class Orchestrator:
             {"speaker": "supervisor", "fast_path": True, "llm_used": False},
         )
 
+    def _seen_client_turn(self, client_turn_id: str) -> bool:
+        """Idempotency check for retried turns (board #4).
+
+        INSERT-or-detect on ``turn_dedup``: the PK makes concurrent retries
+        collapse too (loser hits IntegrityError → treated as duplicate).
+        Returns True when this turn was already processed.
+        """
+        tid = (client_turn_id or "").strip()
+        if not tid:
+            return False
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+
+        try:
+            with ops_con() as con:
+                seen = con.execute(
+                    "SELECT 1 FROM turn_dedup WHERE interaction_id = ? AND client_turn_id = ?",
+                    [self.ctx.interaction_id, tid],
+                ).fetchone()
+                if seen:
+                    return True
+                con.execute(
+                    "INSERT INTO turn_dedup (interaction_id, client_turn_id, seen_at)"
+                    " VALUES (?, ?, ?)",
+                    [self.ctx.interaction_id, tid, utc_now()],
+                )
+            return False
+        except Exception:
+            # PK race lost → duplicate. Any other DB failure → process the
+            # turn (dropping customer input is worse than double-processing).
+            try:
+                with ops_con(read_only=True) as con:
+                    seen = con.execute(
+                        "SELECT 1 FROM turn_dedup WHERE interaction_id = ? AND client_turn_id = ?",
+                        [self.ctx.interaction_id, tid],
+                    ).fetchone()
+                    return bool(seen)
+            except Exception:
+                return False
+
+    # ── Handoff queue (audit 2.4) ──────────────────────────────────────────
+    async def accept_handoff(self) -> dict[str, Any]:
+        """Customer accepted the handoff offer: park in HANDOFF_PENDING.
+
+        Pushes a supervisor-queue row with a 60–90s SLA and notifies the
+        console. A supervisor claims it via takeover(); if nobody picks up,
+        the reaper sweep restores the prior state, apologises, and ledgers
+        handoff_unfulfilled — the offer is never a dead end.
+        """
+        if self.ctx.state not in (COLLECTING, ENRICHING):
+            return {"accepted": False, "reason": f"state={self.ctx.state}"}
+        if not self.ctx.handoff_offered:
+            return {"accepted": False, "reason": "no offer outstanding"}
+        from datetime import timedelta as _td
+
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+        from src.ids import new_ulid
+
+        sla_due = utc_now() + _td(seconds=HANDOFF_SLA_S)
+        hid = "hfr_" + new_ulid()
+        with ops_con() as con:
+            con.execute(
+                """
+                INSERT INTO handoff_requests
+                (handoff_id, interaction_id, status, prior_state, sla_due_at,
+                 claimed_by, created_at)
+                VALUES (?, ?, 'pending', ?, ?, NULL, ?)
+                """,
+                [hid, self.ctx.interaction_id, self.ctx.state, sla_due, utc_now()],
+            )
+        self._pre_supervised_state = self.ctx.state
+        self._transition(self.ctx.state, HANDOFF_PENDING)
+        self._record_state(HANDOFF_PENDING)
+        record_action(self._orchestrator_action(
+            "handoff_accepted",
+            input_summary="customer accepted human handoff",
+            output_summary=f"queued for supervisor pickup; SLA {HANDOFF_SLA_S}s",
+        ))
+        await self.hooks._maybe(self.hooks.emit_activity, {
+            "agent": "orchestrator",
+            "action_type": "handoff_accepted",
+            "summary": (
+                f"Customer accepted handoff — pickup SLA {HANDOFF_SLA_S}s "
+                f"(queue {hid})."
+            ),
+            "ok": True,
+        })
+        await self.hooks._maybe(
+            self.hooks.emit_customer_turn,
+            "Connecting you to a human specialist now — thanks for holding.",
+            {"speaker": "agent", "fast_path": True, "llm_used": False},
+        )
+        self.ctx.record_turn(
+            "agent", "Connecting you to a human specialist now.", llm_used=False
+        )
+        return {"accepted": True, "handoff_id": hid, "sla_s": HANDOFF_SLA_S}
+
+    async def sweep_handoff_timeout(self) -> bool:
+        """Expire our pending handoff when the SLA lapsed (audit 2.4).
+
+        Returns True when a timeout was processed. Restores the prior state,
+        apologises to the customer, ledgers handoff_unfulfilled, and resumes
+        the AI flow — no dead end.
+        """
+        if self.ctx.state != HANDOFF_PENDING:
+            return False
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+
+        with ops_con() as con:
+            row = con.execute(
+                """
+                SELECT handoff_id, prior_state, sla_due_at FROM handoff_requests
+                WHERE interaction_id = ? AND status = 'pending'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                [self.ctx.interaction_id],
+            ).fetchone()
+        if not row:
+            return False
+        hid, prior, sla_due = row[0], row[1], row[2]
+        try:
+            expired = utc_now().replace(tzinfo=None) >= sla_due.replace(tzinfo=None)
+        except Exception:
+            expired = True
+        if not expired:
+            return False
+        with ops_con() as con:
+            con.execute(
+                "UPDATE handoff_requests SET status = 'unfulfilled' WHERE handoff_id = ?",
+                [hid],
+            )
+        resume = prior or COLLECTING
+        try:
+            self._transition(HANDOFF_PENDING, resume)
+        except ValueError:
+            self._transition(HANDOFF_PENDING, COLLECTING)
+            resume = COLLECTING
+        self._record_state(resume)
+        record_action(self._orchestrator_action(
+            "handoff_unfulfilled",
+            input_summary=f"no supervisor pickup within {HANDOFF_SLA_S}s",
+            output_summary=f"resumed {resume}; callback offered",
+        ))
+        await self.hooks._maybe(self.hooks.emit_activity, {
+            "agent": "orchestrator",
+            "action_type": "handoff_unfulfilled",
+            "summary": "Handoff SLA expired with no pickup; AI resumed.",
+            "ok": False,
+        })
+        apology = (
+            "I'm sorry for the wait — no specialist was available. "
+            "I can keep helping, or arrange a callback at a better time."
+        )
+        await self.hooks._maybe(
+            self.hooks.emit_customer_turn,
+            apology,
+            {"speaker": "agent", "fast_path": True, "llm_used": False},
+        )
+        self.ctx.record_turn("agent", apology, llm_used=False)
+        # The callback offer is a real queue row, not just words: staff work
+        # it from the existing callback queue (board: no dead-end offers).
+        try:
+            from src.frontline.callback import schedule_callback
+
+            schedule_callback(
+                interaction_id=self.ctx.interaction_id,
+                pack_id=self.ctx.pack.id,
+                phone_or_channel="console-callback",
+                case_id=self.ctx.case_id,
+                reason="handoff_unfulfilled",
+            )
+        except Exception:
+            pass
+        return True
+
+    # ── Supervised safety (item 6) ─────────────────────────────────────────
+    async def _supervised_safety_hit(self, kill_term: str, text: str) -> None:
+        """Process a kill-switch/safety hit observed during SUPERVISED takeover.
+
+        Mirrors the autonomous SAFETY_ESCALATION scoring (Critical/P1,
+        ledger, sentinel, alert) but stays in SUPERVISED: the supervisor is
+        already live on the conversation and decides what the customer hears.
+        The hit is surfaced on the console activity feed — never dropped.
+        """
+        from src.security.input_validation import escape_untrusted as _escape_untrusted
+
+        self.ctx.severity = "Critical"
+        self.ctx.severity_source = "rules"
+        self.ctx.priority = 1
+        self.ctx.safety_flags["escalation"] = True
+        record_action(self._orchestrator_action(
+            "supervised_safety_raised",
+            input_summary=f"kill-switch term during takeover: '{kill_term}'",
+            output_summary=(
+                "severity=Critical P1 recorded; supervisor owns response; "
+                "no autonomous customer turn generated"
+            ),
+        ))
+        await self.hooks._maybe(self.hooks.emit_activity, {
+            "agent": "sentinel",
+            "action_type": "escalated",
+            "summary": (
+                f"SAFETY during takeover — customer said: "
+                f"{_escape_untrusted(text[:200])} "
+                f"(trigger: '{kill_term}'). Severity set Critical/P1."
+            ),
+            "ok": True,
+        })
+        await self.hooks._maybe(
+            getattr(self.hooks, "emit_frustration_update", None),
+            float(self.ctx.frustration_score or 0.0),
+        )
+        await SentinelAgent(self.ctx).run(trigger="escalation")
+        try:
+            from src.frontline.alerts import alert_safety_escalation
+            await alert_safety_escalation(self.ctx.interaction_id, kill_term)
+        except Exception:
+            pass  # alerts must never break safety processing
+
     # ── Enrichment ────────────────────────────────────────────────────────
     async def _enter_enriching(self) -> None:
-        self._transition(COLLECTING, ENRICHING)
+        # Idempotent entry (audit 3.3 release path may already sit here).
+        if self.ctx.state != ENRICHING:
+            self._transition(self.ctx.state, ENRICHING)
         self._record_state(ENRICHING)
 
         # Sentinel can fire as soon as entities are present (already true here).
@@ -448,6 +1067,10 @@ class Orchestrator:
                 input_summary=f"enrichment timeout after {settings.enrich_timeout_s}s",
                 output_summary="moving to CLOSING with partial enrichment",
             ))
+        finally:
+            # Enrichment ran (even partially/timed-out): a later hangup must
+            # close with a case, never abandon the evidence (audit 6.1).
+            self.ctx.enrichment_done = True
 
         await self._move_to_closing()
 
@@ -456,19 +1079,85 @@ class Orchestrator:
 
         Sentinel, Triage, and Investigator write distinct ctx fields and do not
         depend on each other's outputs for the pilot path.
+
+        Failure isolation (item 8): each agent runs under structured result
+        handling (``return_exceptions=True``). A DB/ML/network failure in one
+        agent is ledgered as that agent's failed action and the other agents'
+        partial results are still used — the contact is never stranded in
+        ENRICHING because of a single dependency.
         """
+        from src.ledger import AgentAction
         from src.ledger.writer import remember_interaction_pack
+        from src.observability.otel import start_span
 
         remember_interaction_pack(self.ctx.interaction_id, self.ctx.pack.id)
         sentinel = SentinelAgent(self.ctx)
         triage = TriageAgent(self.ctx)
         inv = InvestigatorAgent(self.ctx)
 
-        sres, tres, ires = await asyncio.gather(
-            sentinel.run(trigger="entities_complete"),
-            triage.run(),
-            inv.run(),
-        )
+        with start_span(
+            "orchestrator.enrichment",
+            attributes={"interaction_id": self.ctx.interaction_id},
+        ):
+            raw = await asyncio.gather(
+                sentinel.run(trigger="entities_complete"),
+                triage.run(),
+                inv.run(),
+                return_exceptions=True,
+            )
+
+        def _settle(
+            agent: str,
+            action_type: str,
+            value: Any,
+        ) -> dict[str, Any]:
+            if isinstance(value, BaseException):
+                # Isolated failure: observable, partial-results-safe.
+                try:
+                    record_action(AgentAction(
+                        interaction_id=self.ctx.interaction_id,
+                        agent=agent,
+                        action_type=action_type,
+                        input_summary="enrichment agent raised",
+                        output_summary=(
+                            f"partial enrichment: {agent} failed; "
+                            "siblings preserved"
+                        ),
+                        ok=False,
+                        error=f"{type(value).__name__}: {value}"[:500],
+                        case_id=self.ctx.case_id,
+                    ))
+                except Exception:
+                    pass
+                if agent == "investigator":
+                    # Audit 4.1: a failed investigator must not leave the case
+                    # evidence-free forever — enqueue a leased, retried
+                    # backfill that patches the brief post-close.
+                    try:
+                        from src.jobs.queue import enqueue
+
+                        enqueue(
+                            "reenrich",
+                            {
+                                "interaction_id": self.ctx.interaction_id,
+                                "case_id": self.ctx.case_id,
+                                "reason": f"{type(value).__name__}: {value}"[:200],
+                            },
+                        )
+                    except Exception:
+                        pass
+                return {
+                    "skipped": True,
+                    "reason": f"{agent} failed: {type(value).__name__}",
+                    "error": f"{type(value).__name__}: {value}"[:500],
+                }
+            if isinstance(value, dict):
+                return value
+            return {"skipped": True, "reason": f"{agent} returned no result"}
+
+        sres = _settle("sentinel", "advisory_check", raw[0])
+        tres = _settle("triage", "severity_scored", raw[1])
+        ires = _settle("investigator", "brief_written", raw[2])
 
         if sres.get("advisory_match"):
             notice = sres["notice"]
@@ -559,10 +1248,53 @@ class Orchestrator:
     async def _move_to_closing(self, *, force: bool = False) -> None:
         if self.ctx.state == CLOSING or self.ctx.state == DONE:
             return
+        if self.ctx.state == ABANDONED:
+            # Customer already gone and finalized: never create a case after
+            # abandon (late enrichment completions land here). Idempotent.
+            return
         if self.ctx.state == SUPERVISED and not force:
             return  # supervisor controls; don't auto-close mid-call
         if self.ctx.state == SUPERVISED and force:
             self.ctx.supervised = False
+        # Distributed close claim (item 31): exactly one worker in the fleet
+        # may run the close body. In-process state guards cover one process;
+        # this covers replicas sharing the ops DB (Redis NX when configured).
+        from src.jobs.registry import acquire_close_claim_info, heartbeat_close_claim
+
+        _claim_owner = f"orch-{id(self):x}"
+        _claim_takeover = False
+        try:
+            _claim = acquire_close_claim_info(self.ctx.interaction_id, _claim_owner)
+            if not _claim["acquired"]:
+                record_action(self._orchestrator_action(
+                    "state_transition",
+                    input_summary="close already claimed by another worker",
+                    output_summary="standing down; no duplicate case",
+                ))
+                return
+            _claim_takeover = bool(_claim["takeover"])
+            # Heartbeat so a slow-but-alive closer keeps ownership while a
+            # truly dead worker's claim expires and becomes re-acquirable
+            # (audit 5.1).
+            heartbeat_close_claim(self.ctx.interaction_id, _claim_owner)
+        except Exception:
+            pass
+        if _claim_takeover and not self.ctx.case_id:
+            # Crash-retry (audit 5.1): the previous worker may have inserted
+            # the case after claiming. Reuse it instead of allocating new.
+            try:
+                from src.data.warehouse import ops_con as _ops_con2
+
+                with _ops_con2(read_only=True) as _con:
+                    _row = _con.execute(
+                        "SELECT case_id FROM cases WHERE interaction_id = ?"
+                        " ORDER BY created_at LIMIT 1",
+                        [self.ctx.interaction_id],
+                    ).fetchone()
+                if _row and _row[0]:
+                    self.ctx.case_id = str(_row[0])
+            except Exception:
+                pass
         self._transition(self.ctx.state, CLOSING)
         self._record_state(CLOSING)
 
@@ -577,6 +1309,13 @@ class Orchestrator:
 
         # Case agent
         case_agent = CaseAgent(self.ctx)
+        # Returning-customer attach (audit 1.1): same hashed identity +
+        # same entity/category with an OPEN case in the window → attach this
+        # contact's turns to the existing case instead of opening a second
+        # one (which would double-count the corpus and split context).
+        attached = self._attach_returning_case()
+        if attached:
+            self.ctx.case_id = attached
         cres = await case_agent.run()
         case_id = cres["case_id"]
 
@@ -634,10 +1373,15 @@ class Orchestrator:
         if from_state == SUPERVISED:
             # Release may return to the pre-takeover state; hangup must always
             # be able to leave SUPERVISED (docstring: ABANDONED from any state).
+            # Release recomputes from facts (audit 3.3), so escalation and
+            # enrichment targets are legal exits too.
             resume = {self._pre_supervised_state} if self._pre_supervised_state else {
                 COLLECTING, ENRICHING, CLOSING
             }
-            allowed = resume | {ABANDONED, CLOSING, DONE}
+            allowed = resume | {
+                ABANDONED, CLOSING, DONE, SAFETY_ESCALATION, ENRICHING,
+                COLLECTING, HANDOFF_PENDING,
+            }
         if to_state not in allowed and from_state != to_state:
             raise ValueError(f"Illegal transition: {from_state} → {to_state}")
         self.ctx.state = to_state
@@ -674,6 +1418,13 @@ class Orchestrator:
             )
 
     def _outcome(self) -> str:
+        # Human-touch outcomes (board) take precedence over the plain close:
+        # a claimed handoff that ended in a case was handed off; a case
+        # forced closed while supervised was human-resolved.
+        if self.ctx.case_id and self._handoff_was_claimed():
+            return "handed_off"
+        if self.ctx.case_id and self.ctx.closed_while_supervised:
+            return "human_resolved"
         if self.ctx.safety_flags.get("escalation"):
             return "escalated_safety"
         if self.ctx.advisory_match:
@@ -682,9 +1433,23 @@ class Orchestrator:
             return "case_created"
         return "incomplete"
 
+    def _handoff_was_claimed(self) -> bool:
+        try:
+            from src.data.warehouse import ops_con as _ops_con
+
+            with _ops_con(read_only=True) as _con:
+                row = _con.execute(
+                    "SELECT 1 FROM handoff_requests WHERE interaction_id = ?"
+                    " AND status IN ('claimed', 'done')",
+                    [self.ctx.interaction_id],
+                ).fetchone()
+                return bool(row)
+        except Exception:
+            return False
+
     async def _finalize_interaction(self, outcome: str) -> None:
         from src.data.timeutil import utc_now
-        from src.data.warehouse import ops_con
+        from src.data.warehouse import ops_con, ops_in_thread
         # Determine final status from outcome: 'incomplete' → 'abandoned',
         # otherwise 'completed'. 'escalated_safety' stays 'escalated' for the
         # console's red-flag view.
@@ -694,31 +1459,36 @@ class Orchestrator:
             final_status = "escalated"
         else:
             final_status = "completed"
-        with ops_con() as con:
-            con.execute(
-                """
-                UPDATE interactions
-                SET ended_at = ?, status = ?, outcome = ?,
-                    peak_frustration = ?, supervised = ?, llm_calls = ?,
-                    entity_1 = ?, entity_2 = ?, entity_3 = ?,
-                    category = ?, description = ?
-                WHERE interaction_id = ?
-                """,
-                [
-                    utc_now(),
-                    final_status,
-                    outcome,
-                    self.ctx.peak_frustration,
-                    self.ctx.supervised,
-                    self.ctx.llm_calls,
-                    self.ctx.slots.get("entity_1"),
-                    self.ctx.slots.get("entity_2"),
-                    self.ctx.slots.get("entity_3"),
-                    self.ctx.slots.get("category"),
-                    (self.ctx.slots.get("description") or "")[:500],
-                    self.ctx.interaction_id,
-                ],
-            )
+        payload = [
+            utc_now(),
+            final_status,
+            outcome,
+            self.ctx.peak_frustration,
+            self.ctx.supervised,
+            self.ctx.llm_calls,
+            self.ctx.slots.get("entity_1"),
+            self.ctx.slots.get("entity_2"),
+            self.ctx.slots.get("entity_3"),
+            self.ctx.slots.get("category"),
+            (self.ctx.slots.get("description") or "")[:500],
+            self.ctx.interaction_id,
+        ]
+
+        def _write() -> None:
+            with ops_con() as con:
+                con.execute(
+                    """
+                    UPDATE interactions
+                    SET ended_at = ?, status = ?, outcome = ?,
+                        peak_frustration = ?, supervised = ?, llm_calls = ?,
+                        entity_1 = ?, entity_2 = ?, entity_3 = ?,
+                        category = ?, description = ?
+                    WHERE interaction_id = ?
+                    """,
+                    payload,
+                )
+
+        await ops_in_thread(_write)
         # Cross-contact entity memory (enterprise) — never raise into contact path.
         try:
             from src.enterprise.memory import upsert_memory_from_interaction
@@ -741,6 +1511,22 @@ class Orchestrator:
                 persist_turn(self.ctx.interaction_id, t)
         except Exception:
             pass
+
+        # ── Step 5.6: project the contact into the domain warehouse ────────
+        # The loop only compounds if closed contacts reach the table the
+        # fleet scan reads. Best-effort, never raises into finalize.
+        if outcome in ("case_created", "advisory_notified", "escalated_safety"):
+            try:
+                self._project_contact_to_corpus(outcome)
+            except Exception:
+                pass
+        elif outcome == "incomplete" and (self.ctx.slots.get("category") or "").strip():
+            # Abandoned WITH slots (board): lost signal, but do not pollute
+            # observed statistics — project as inferred.
+            try:
+                self._project_contact_to_corpus(outcome, provenance="inferred")
+            except Exception:
+                pass
 
         # ── Enqueue Qubot post_contact_audit (non-blocking) ────────────────
         # Never await the auditor on the contact/WS hot path (H4 / audit3).
@@ -787,6 +1573,253 @@ class Orchestrator:
         except Exception:
             pass
 
+    def _attach_returning_case(self) -> str | None:
+        """Find an open case for a returning customer (audit 1.1).
+
+        Matches sha256 customer_ref + same entity_2/category on a case still
+        being worked (``open`` or ``pending_followup`` — a Qubot
+        needs_review flag must not hide the case from the returning customer)
+        updated within FRONTLINE_RETURNING_CUSTOMER_DAYS (default 14).
+        Returns the case_id to attach to, or None. The preset case_id flows
+        into CaseAgent.run()'s idempotent re-close path, and the attach is
+        ledgered as case_attached_existing.
+        """
+        import os as _os
+
+        ref = (self.ctx.customer_ref or "").strip()
+        if not ref or self.ctx.case_id:
+            return None
+        try:
+            window_days = int(_os.getenv("FRONTLINE_RETURNING_CUSTOMER_DAYS", "14"))
+        except ValueError:
+            window_days = 14
+        entity_2 = (self.ctx.slots.get("entity_2") or "").strip()
+        category = (self.ctx.slots.get("category") or "").strip()
+        if not entity_2 and not category:
+            return None
+        try:
+            from src.data.timeutil import utc_now
+            from src.data.warehouse import ops_con
+
+            cutoff = utc_now() - __import__("datetime").timedelta(
+                days=max(1, window_days)
+            )
+            with ops_con(read_only=True) as con:
+                row = con.execute(
+                    """
+                    SELECT case_id FROM cases c
+                    JOIN interactions i ON i.interaction_id = c.interaction_id
+                    WHERE c.customer_ref = ?
+                      AND c.status IN ('open', 'pending_followup')
+                      AND c.created_at >= ?
+                      AND (i.entity_2 = ? OR ? = '')
+                      AND (i.category = ? OR ? = '')
+                    ORDER BY c.created_at DESC LIMIT 1
+                    """,
+                    [ref, cutoff, entity_2, entity_2, category, category],
+                ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        try:
+            record_action(self._orchestrator_action(
+                "case_attached_existing",
+                input_summary=f"returning customer_ref match (window {window_days}d)",
+                output_summary=f"attached to {row[0]} instead of opening a new case",
+            ))
+        except Exception:
+            pass
+        return str(row[0])
+
+    def _project_contact_to_corpus(self, outcome: str, *, provenance: str = "observed") -> str | None:
+        """Write this contact as a domain record (source='FRONTLINE').
+
+        Returns the record_id, or None when there is nothing projectable
+        (no category). record_id is namespaced per source so a contact can
+        never collide with an ingested row. Evidence closes project as
+        ``observed``; abandoned-with-slots contacts project as ``inferred``
+        (board: lost signal without polluting observed statistics).
+        """
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import apply_domain_schema, domain_con
+
+        slots = self.ctx.slots or {}
+        category = (slots.get("category") or "").strip()
+        if not category:
+            return None
+        e1 = (slots.get("entity_1") or "").strip().upper()
+        e2 = (slots.get("entity_2") or "").strip().upper()
+        e3 = (slots.get("entity_3") or "").strip().upper()
+        entity_key = "|".join([p for p in (e1, e2, e3) if p])
+        now = utc_now().replace(tzinfo=None)
+        rid = f"FRONTLINE-{self.ctx.interaction_id}"
+        with domain_con(self.ctx.pack.id, read_only=False) as con:
+            apply_domain_schema(con)
+            try:
+                con.execute("ALTER TABLE records ADD COLUMN embedding FLOAT[]")
+            except Exception:
+                pass
+            # 1.1: embed at close so fleet scan sees vectors immediately
+            try:
+                from src.ml_runtime.embeddings import embed_text as _embed
+                _emb = _embed((slots.get("description") or "")[:1000])
+            except Exception:
+                _emb = None
+            sec_raw = slots.get("secondary_categories")
+            sec_label = ", ".join(sec_raw) if isinstance(sec_raw, list) else (str(sec_raw) if sec_raw else None)
+            con.execute(
+                """
+                INSERT OR REPLACE INTO records (
+                    record_id, occurred_at, received_at, entity_1, entity_2,
+                    entity_3, category, subcategory, text, severity_label,
+                    region, source, entity_key, provenance, embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'FRONTLINE', ?, ?, ?)
+                """,
+                [
+                    rid,
+                    now,
+                    now,
+                    slots.get("entity_1"),
+                    slots.get("entity_2"),
+                    slots.get("entity_3"),
+                    category,
+                    sec_label,
+                    (slots.get("description") or "")[:1000],
+                    self.ctx.severity or None,
+                    entity_key or None,
+                    provenance,
+                    _emb,
+                ],
+            )
+        # 1.1: gazetteer candidate queue (human approve, never auto-mutate)
+        try:
+            from src.data.warehouse import ops_con as _ops
+            with _ops() as _c:
+                _c.execute(
+                    "CREATE TABLE IF NOT EXISTS gazetteer_candidates "
+                    "(term VARCHAR, slot VARCHAR, pack_id VARCHAR, "
+                    "interaction_id VARCHAR, created_at TIMESTAMP DEFAULT current_timestamp)"
+                )
+                for _slot in ("entity_2", "entity_3", "category"):
+                    _v = (slots.get(_slot) or "").strip()
+                    if _v:
+                        _c.execute(
+                            "INSERT INTO gazetteer_candidates (term, slot, pack_id, interaction_id) "
+                            "VALUES (?, ?, ?, ?)",
+                            [_v, _slot, self.ctx.pack.id, self.ctx.interaction_id],
+                        )
+        except Exception:
+            pass
+        # 1.1: invalidate anomaly buckets async + immediate slice recompute (audit 1.1)
+        try:
+            from src.jobs.queue import enqueue as _enq
+            _enq("recompute_anomalies", {
+                "pack_id": self.ctx.pack.id,
+                "category": category,
+                "entity_2": slots.get("entity_2"),
+            })
+        except Exception:
+            pass
+        try:
+            from src.ml_runtime.anomalies import recompute_weekly_anomalies
+            recompute_weekly_anomalies(
+                self.ctx.pack.id,
+                category=category,
+                entity_2=slots.get("entity_2"),
+            )
+        except Exception:
+            pass
+        try:
+            record_action(self._orchestrator_action(
+                "state_transition",
+                input_summary="contact projected to domain corpus",
+                output_summary=f"record_id={rid} source=FRONTLINE provenance={provenance}",
+            ))
+        except Exception:
+            pass
+        # Fix-regression watch (board #6): a new contact matching a recently
+        # fixed slice (same category + entity inside 90 days) re-opens the
+        # question — alert instead of silently counting it as background.
+        try:
+            self._watch_fix_regression(category, slots, rid)
+        except Exception:
+            pass
+        return rid
+
+    def _watch_fix_regression(
+        self, category: str, slots: dict[str, Any], record_id: str
+    ) -> None:
+        from datetime import timedelta as _td
+
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+
+        e2 = (slots.get("entity_2") or "").strip()
+        e3 = (slots.get("entity_3") or "").strip()
+        if not category or (not e2 and not e3):
+            return
+        with ops_con(read_only=True) as con:
+            try:
+                rows = con.execute(
+                    """
+                    SELECT fix_id, investigation_id, fixed_at FROM recorded_fixes
+                    WHERE pack_id = ? AND category = ?
+                      AND (entity_2 = ? OR entity_3 = ?)
+                      AND fixed_at >= ?
+                    """,
+                    [
+                        self.ctx.pack.id, category, e2, e3,
+                        utc_now() - _td(days=90),
+                    ],
+                ).fetchall()
+            except Exception:
+                return
+        if not rows:
+            return
+        fix_id = str(rows[0][0])
+        try:
+            record_action(self._orchestrator_action(
+                "state_transition",
+                input_summary=f"contact matches fixed slice (fix {fix_id})",
+                output_summary=f"possible fix regression on {category}; record {record_id}",
+            ))
+        except Exception:
+            pass
+        try:
+            from src.frontline.alerts import fire_alert
+
+            import anyio as _anyio
+
+            async def _fire() -> None:
+                try:
+                    await fire_alert(
+                        event="fix_regression",
+                        summary=(
+                            f"[P1 CRITICAL] fix regression detected: new {category} contact "
+                            f"matches fix {fix_id} (<90d)"
+                        ),
+                        ref_id=fix_id,
+                        pack_id=self.ctx.pack.id,
+                        extra={
+                            "fix_id": fix_id,
+                            "record_id": record_id,
+                            "priority": "P1",
+                            "severity": "Critical",
+                            "regression": True,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            try:
+                _loop = asyncio.get_running_loop()
+                _loop.create_task(_fire())
+            except RuntimeError:
+                _anyio.run(_fire)
+        except Exception:
+            pass
+
     def _orchestrator_action(self, action_type: str, input_summary: str = "", output_summary: str = ""):
         from src.ledger import AgentAction
         return AgentAction(
@@ -810,13 +1843,18 @@ async def create_interaction(
     channel: str = "web_text",
     pack_id: str | None = None,
     hooks: OrchestratorHooks | None = None,
+    customer_ref: str | None = None,
 ) -> tuple[Orchestrator, str]:
     """Create an interaction row + orchestrator. Returns (orchestrator, greeting).
 
     Feature #51: refuses new contacts while the process is draining (SIGTERM /
     blue-green). Raises ``ServiceDrainingError`` so API callers return 503.
+
+    ``customer_ref`` is an already-hashed identity (sha256 hex of
+    phone/email/account — never raw PII) used for returning-customer case
+    attach (audit 1.1).
     """
-    from src.data.warehouse import ops_con
+    from src.data.warehouse import ops_con, ops_in_thread
     from src.domains.active_pack import resolve_active_pack_id
     from src.ops.drain import DRAIN, ServiceDrainingError
 
@@ -830,25 +1868,44 @@ async def create_interaction(
     from src.data.timeutil import utc_now
 
     try:
-        with ops_con() as con:
-            con.execute(
-                """
-                INSERT INTO interactions
-                (interaction_id, pack_id, pack_version, started_at, channel,
-                 status, supervised, llm_calls)
-                VALUES (?, ?, ?, ?, ?, 'active', FALSE, 0)
-                """,
-                [
-                    interaction_id,
-                    pack.id,
-                    pack.pack_version,
-                    utc_now(),
-                    channel,
-                ],
-            )
+        insert_row = [
+            interaction_id,
+            pack.id,
+            pack.pack_version,
+            utc_now(),
+            channel,
+            customer_ref,
+        ]
+
+        def _insert() -> None:
+            with ops_con() as con:
+                try:
+                    con.execute(
+                        """
+                        INSERT INTO interactions
+                        (interaction_id, pack_id, pack_version, started_at, channel,
+                         status, supervised, llm_calls, customer_ref)
+                        VALUES (?, ?, ?, ?, ?, 'active', FALSE, 0, ?)
+                        """,
+                        insert_row,
+                    )
+                except Exception:
+                    # Pre-customer_ref schema: column added by later migrate.
+                    con.execute(
+                        """
+                        INSERT INTO interactions
+                        (interaction_id, pack_id, pack_version, started_at, channel,
+                         status, supervised, llm_calls)
+                        VALUES (?, ?, ?, ?, ?, 'active', FALSE, 0)
+                        """,
+                        insert_row[:5],
+                    )
+
+        await ops_in_thread(_insert)
         record_action(_build_started_action(interaction_id, pack.id))
 
         orch = Orchestrator(interaction_id, pack, channel=channel, hooks=hooks)
+        orch.ctx.customer_ref = customer_ref
         greeting = await orch.start()
         return orch, greeting
     except Exception:

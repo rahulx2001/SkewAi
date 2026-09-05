@@ -20,6 +20,7 @@ import pytest_asyncio
 
 from src.agents.base import InteractionContext
 from src.agents.orchestrator import Orchestrator, OrchestratorHooks
+from src.config import REPO_ROOT
 from src.data.warehouse import init_ops_db as _init_ops_db, reset_ops_db as _reset_ops_db_impl
 from src.domains.loader import load_pack
 from src.ids import new_ulid
@@ -42,6 +43,16 @@ def _isolate_test_databases(tmp_path_factory):
     os.environ["FRONTLINE_TEST_ISOLATION"] = "1"
     os.environ["FRONTLINE_DB_PATH"] = str(ops)
     os.environ["DOMAIN_DB_PATH"] = str(domains)
+    os.environ["OIDC_LOCAL_PATH"] = str(root / "oidc_local.json")
+    # Pack marketplace + evidence lockers write JSON; keep those off the git tree.
+    dest_reg = root / "registry.json"
+    src_reg = REPO_ROOT / "domains" / "registry.json"
+    if src_reg.is_file():
+        dest_reg.write_text(src_reg.read_text(encoding="utf-8"), encoding="utf-8")
+    os.environ["PACK_REGISTRY_PATH"] = str(dest_reg)
+    lockers = root / "lockers"
+    lockers.mkdir(parents=True, exist_ok=True)
+    os.environ["QUBOT_LOCKER_DIR"] = str(lockers)
     # Never allow accidental wipe of pilot path during tests.
     os.environ.pop("FRONTLINE_ALLOW_DEFAULT_DB_RESET", None)
     yield root

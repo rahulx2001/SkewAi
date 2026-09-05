@@ -81,13 +81,33 @@ def _record_spend(cost_units: float = 0.01) -> None:
             )
 
 
+def _openai_key() -> str:
+    return (os.getenv("OPENAI_API_KEY") or settings.openai_api_key or "").strip()
+
+
+def _claude_key() -> str:
+    return (os.getenv("CLAUDE_API_KEY") or settings.claude_api_key or "").strip()
+
+
+def llm_provider() -> str:
+    """Active provider name: ``openai``, ``anthropic``, or empty.
+
+    OpenAI wins when both keys are set. A Claude-only install must never
+    send ``CLAUDE_API_KEY`` to ``api.openai.com``.
+    """
+    if _openai_key():
+        return "openai"
+    if _claude_key():
+        return "anthropic"
+    return ""
+
+
 def llm_enabled() -> bool:
     """True only when a provider key is set AND FRONTLINE_LLM_ENABLED=1."""
     raw = os.getenv("FRONTLINE_LLM_ENABLED", "").strip().lower()
     if raw not in {"1", "true", "yes", "on"}:
         return False
-    key = (settings.openai_api_key or settings.claude_api_key or "").strip()
-    return bool(key)
+    return bool(llm_provider())
 
 
 def can_spend() -> tuple[bool, str]:
@@ -102,8 +122,20 @@ def can_spend() -> tuple[bool, str]:
 
 
 def _http_chat(system: str, user: str, model: str) -> str:
+    """Dispatch to the provider that actually owns the configured key."""
+    provider = llm_provider()
+    if provider == "anthropic":
+        return _http_chat_anthropic(system, user, model)
+    if provider == "openai":
+        return _http_chat_openai(system, user, model)
+    raise ValueError("no_provider_key")
+
+
+def _http_chat_openai(system: str, user: str, model: str) -> str:
     """Minimal OpenAI-compatible chat completions call (stdlib only)."""
-    api_key = (settings.openai_api_key or settings.claude_api_key).strip()
+    api_key = _openai_key()
+    if not api_key:
+        raise ValueError("openai_key_missing")
     base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     url = f"{base}/chat/completions"
     body = {
@@ -127,6 +159,51 @@ def _http_chat(system: str, user: str, model: str) -> str:
     with urllib.request.urlopen(req, timeout=8.0) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return (data["choices"][0]["message"]["content"] or "").strip()
+
+
+def _anthropic_model(model: str) -> str:
+    cand = (model or "").strip()
+    if cand.startswith("claude"):
+        return cand
+    env = os.getenv("FRONTLINE_LLM_MODEL", "").strip()
+    if env.startswith("claude"):
+        return env
+    return "claude-haiku-4-5-20251001"
+
+
+def _http_chat_anthropic(system: str, user: str, model: str) -> str:
+    """Anthropic Messages API (stdlib only). Never sends the key to OpenAI."""
+    api_key = _claude_key()
+    if not api_key:
+        raise ValueError("claude_key_missing")
+    base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    url = f"{base}/v1/messages"
+    body = {
+        "model": _anthropic_model(model),
+        "max_tokens": 120,
+        "temperature": 0.3,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=8.0) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    blocks = data.get("content") or []
+    texts = [
+        (b.get("text") or "")
+        for b in blocks
+        if isinstance(b, dict) and b.get("type", "text") == "text"
+    ]
+    return "".join(texts).strip()
 
 
 def narrate(
@@ -157,10 +234,16 @@ def narrate(
         if not text:
             raise ValueError("empty_llm_response")
         _record_spend(0.01)
+        provider = llm_provider()
+        default_model = (
+            _anthropic_model(model or "")
+            if provider == "anthropic"
+            else (model or os.getenv("FRONTLINE_LLM_MODEL", "gpt-4o-mini"))
+        )
         return NarrationResult(
             text=text[:500],
             ok=True,
-            model_id=model or os.getenv("FRONTLINE_LLM_MODEL", "gpt-4o-mini"),
+            model_id=default_model,
             prompt_hash=ph,
             used_llm=True,
             reason="ok",
@@ -180,6 +263,7 @@ __all__ = [
     "NarrationResult",
     "narrate",
     "llm_enabled",
+    "llm_provider",
     "can_spend",
     "get_spend",
 ]

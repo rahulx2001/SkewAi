@@ -200,13 +200,14 @@ def test_fix_effectiveness_after_quieter_than_before(tmp_path, monkeypatch):
         category="SERVICE BRAKES",
         entity_2="HONDA",
         entity_3="CR-V",
-        window_days=30,
+        window_days=60,
     )
     assert measured["before_count"] == 10
     assert measured["after_count"] == 2
-    assert measured["before_rate"] == 10 / 30
-    assert measured["after_rate"] == 2 / 30
+    assert measured["before_rate"] == 10 / 60
+    assert measured["after_rate"] == 2 / 60
     assert measured["after_rate"] < measured["before_rate"]
+    assert measured["conclusive"] is True
     assert measured["improved"] is True
 
 

@@ -1,0 +1,20 @@
+# Mapping: bank service-log CSV columns → canonical records fields.
+# Second source for the finance pack (Axion slice): branch/call-center
+# service logs land alongside CFPB complaints with source="SERVICE".
+# Company + product keys link service contacts to complaints across sources.
+# Executed by scripts/ingest_source.py --source service.
+
+source: bank service log CSV
+records:
+  record_id: CONTACT_ID
+  received_at: CONTACT_DATE
+  occurred_at: CONTACT_DATE
+  entity_1: Product
+  entity_2: Sub-product
+  entity_3: Company
+  category: Issue
+  text: NOTES
+  severity_label: ""
+  region: State
+  source: "SERVICE"
+  entity_key: "{Company}|{Product}|{Issue}"

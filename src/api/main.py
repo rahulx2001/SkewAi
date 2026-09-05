@@ -76,6 +76,22 @@ async def _lifespan(app: FastAPI):
     from src.security.harden import validate_startup_security
 
     validate_startup_security()
+    # Secret redaction in logs (item 50): API keys / session secrets must
+    # never appear in Docker logs, access logs, or debug output.
+    try:
+        from src.security.secrets import install_secret_redaction
+
+        install_secret_redaction()
+    except Exception:
+        pass
+    # Ledger WAL replay (audit X.5): safety actions delivered from the local
+    # WAL during a DB outage rejoin the chain on recovery. Best-effort.
+    try:
+        from src.ledger import replay_ledger_wal
+
+        replay_ledger_wal()
+    except Exception:
+        pass
     # Feature #51: SIGTERM begins call drain (reject new contacts, finish active).
     try:
         from src.ops.drain import install_sigterm_handler
@@ -84,19 +100,48 @@ async def _lifespan(app: FastAPI):
     except Exception:
         pass
     # Startup: close stale active interaction rows not in the live registry.
+    reaper_task = None
     try:
-        from src.api.routes.interactions import reap_orphans
+        from src.api.routes.interactions import reap_orphans, reaper_loop
 
         await reap_orphans()
+        # Periodic sweep: a customer WS that drops now keeps the contact
+        # resumable, so something must finalize it if the browser never returns.
+        import asyncio as _asyncio
+
+        reaper_task = _asyncio.create_task(reaper_loop())
+    except Exception:
+        pass
+    hb_task = None
+    try:
+        from src.jobs.registry import heartbeat, register_worker
+
+        rec = register_worker(host="api")
+        import asyncio as _asyncio
+
+        async def _heartbeat_loop() -> None:
+            while True:
+                await _asyncio.sleep(30)
+                heartbeat(rec["worker_id"])
+
+        hb_task = _asyncio.create_task(_heartbeat_loop())
     except Exception:
         pass
     try:
-        from src.jobs.registry import register_worker
-
-        register_worker(host="api")
-    except Exception:
-        pass
-    yield
+        yield
+    finally:
+        if hb_task is not None:
+            hb_task.cancel()
+            try:
+                await hb_task
+            except BaseException:
+                pass
+        if reaper_task is not None:
+            reaper_task.cancel()
+            try:
+                await reaper_task
+            except BaseException:
+                pass
 
 
 # Production-like: disable interactive docs / OpenAPI (anonymous attack surface).
@@ -190,6 +235,68 @@ from src.security.headers import SecurityHeadersASGI
 app.add_middleware(SecurityHeadersASGI)  # type: ignore[arg-type]
 
 
+class ObservabilityASGI:
+    """Request correlation + timing (item 47).
+
+    Assigns every HTTP request an ``X-Request-ID`` (incoming value honored
+    when well-formed), binds it to the log context, and records a timed
+    span. Pure ASGI so it also stamps WebSocket scopes. Never raises into
+    the app — observability failures must not crash business logic.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        try:
+            from src.observability.otel import bind_request, new_request_id
+
+            headers = dict(
+                (k.decode("latin-1").lower(), v.decode("latin-1"))
+                for k, v in (scope.get("headers") or [])
+            )
+            incoming = (headers.get("x-request-id") or "").strip()
+            rid = incoming[:64] if incoming else new_request_id()
+            bind_request(rid)
+            scope["state"] = {**(scope.get("state") or {}), "request_id": rid}
+        except Exception:
+            rid = ""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        import time as _time
+
+        _start = _time.perf_counter()
+
+        async def send_with_obs(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                if rid:
+                    headers.append((b"x-request-id", rid.encode("ascii")))
+                message = {**message, "headers": headers}
+                try:
+                    from src.observability.metrics import observe as _observe
+
+                    _observe(
+                        "http_request_ms",
+                        (_time.perf_counter() - _start) * 1000.0,
+                    )
+                except Exception:
+                    pass
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_obs)
+        except Exception:
+            raise
+
+
+app.add_middleware(ObservabilityASGI)  # type: ignore[arg-type]
+
+
 class ApiVersionASGI:
     """Attach stable API-Version header to every HTTP response."""
 
@@ -214,15 +321,43 @@ class ApiVersionASGI:
 app.add_middleware(ApiVersionASGI)  # type: ignore[arg-type]
 
 
+class V1AliasASGI:
+    """10/10 API versioning: /api/v1/* is an alias of canonical /api/*.
+
+    Routers stay single-source; this rewrite runs before routing so clients
+    that pin /v1/ never break. Non-v1 paths pass through untouched.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            path = scope.get("path") or ""
+            if path == "/api/v1" or path.startswith("/api/v1/"):
+                scope = {**scope, "path": "/api/" + path[len("/api/v1/"):].lstrip("/"),
+                         "raw_path": scope.get("raw_path")}
+        except Exception:
+            pass
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(V1AliasASGI)  # type: ignore[arg-type]
+
+
 # ── Routers ──────────────────────────────────────────────────────────────────
 from src.api.routes import enterprise as enterprise_routes
+from src.api.routes import hardening as hardening_routes
 from src.api.routes import pipeline as pipeline_routes
+from src.api.routes import oidc_auth as oidc_auth_routes
 from src.api.routes import platform56 as platform56_routes
 from src.api.routes import v3_platform as v3_routes
 
 app.include_router(interactions.router)
 app.include_router(packs.router)
 app.include_router(frontline.router)
+app.include_router(hardening_routes.router)
+app.include_router(oidc_auth_routes.router)
 app.include_router(platform56_routes.router)
 app.include_router(enterprise_routes.router)
 app.include_router(v3_routes.router)
@@ -290,16 +425,29 @@ async def health() -> dict:
     pack_ok = False
     detail: dict = {}
     try:
-        with ops_con(read_only=True) as con:
-            con.execute("SELECT 1").fetchone()
+        def _ping() -> None:
+            with ops_con(read_only=True) as con:
+                con.execute("SELECT 1").fetchone()
+
+        from src.data.warehouse import ops_in_thread
+
+        await ops_in_thread(_ping)
         db_ok = True
     except Exception as e:
         detail["db_error"] = f"{type(e).__name__}: {e}"
+    pack = None
     try:
-        load_pack(pack_id)
+        pack = load_pack(pack_id)
         pack_ok = True
     except Exception as e:
         detail["pack_error"] = f"{type(e).__name__}: {e}"
+    # Readiness (audit 0.5): a booted process with a missing model, empty
+    # gazetteers, or no cost_model would silently run degraded forever.
+    # Readiness fails CLOSED (503) unless explicitly waived per check via
+    # FRONTLINE_READINESS_WAIVE=comma,list.
+    readiness = _readiness_report(pack_id, pack, db_ok=pack_ok and db_ok)
+    if not readiness["ready"]:
+        detail["readiness"] = readiness
 
     from src.api.auth import auth_required as auth_is_required
     from src.jobs.registry import backend_name, worker_count
@@ -316,16 +464,18 @@ async def health() -> dict:
         "pack_ok": pack_ok,
         "single_worker": n_workers <= 1,
         "worker_count": n_workers,
-        "orchestrator_registry": "in_process",
+        # WS attach registry is process-local (sockets can't migrate), but
+        # terminal close/investigation-open are fleet-safe via distributed
+        # close claims (Redis NX when REDIS_URL is set, else shared-DB PK
+        # dedupe) + asyncio.Lock + DB re-checks — see src/jobs/registry.
+        "orchestrator_registry": "in_process_ws+distributed_close_claims",
         "worker_registry": backend_name(),
         "security": {
             "auth_required": auth_is_required(),
             "production_like": is_production_like(),
             "audit_log": True,
-            "soc2_engineering_baseline": True,
             "note": (
-                "Engineering controls only — SOC 2 Type II requires policies, "
-                "evidence over time, and a CPA attestation."
+                "Engineering controls only. Not a SOC 2 Type II attestation."
             ),
         },
         # Keys may be set in env but no provider is shipped — always false until src/ai exists.
@@ -344,7 +494,81 @@ async def health() -> dict:
     }
     if detail:
         body["detail"] = detail
+    body["readiness"] = readiness
+    if not readiness["ready"]:
+        from fastapi.responses import JSONResponse
+
+        body["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=body)
     return body
+
+
+def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[str, Any]:
+    """Per-artifact readiness (audit 0.5). Fails closed unless waived.
+
+    Waivers: FRONTLINE_READINESS_WAIVE=commaname list, e.g.
+    "triage_model,cost_model" for a deliberately rules-only pilot.
+    """
+    from typing import Any as _Any
+
+    waived = {
+        w.strip().lower()
+        for w in (os.getenv("FRONTLINE_READINESS_WAIVE") or "").split(",")
+        if w.strip()
+    }
+    checks: dict[str, dict[str, _Any]] = {}
+
+    def _check(name: str, ok: bool, note: str) -> None:
+        checks[name] = {
+            "ok": bool(ok) or name in waived,
+            "waived": name in waived and not ok,
+            "note": note,
+        }
+
+    _check("database", db_ok, "ops warehouse reachable")
+    if pack is None:
+        _check("pack", False, f"pack {pack_id} failed to load")
+        _check("gazetteers", False, "no pack")
+        _check("triage", False, "no pack")
+        _check("cost_model", False, "no pack")
+    else:
+        _check("pack", True, f"pack {pack_id} loaded")
+        try:
+            gaz = getattr(pack, "gazetteers", {}) or {}
+            terms = sum(len(getattr(g, "values", []) or []) for g in gaz.values())
+        except Exception:
+            terms = 0
+        _check("gazetteers", terms > 0, f"{terms} gazetteer terms")
+        try:
+            sev = pack.manifest.severity
+            artifact = getattr(sev, "model_artifact", None)
+            if artifact:
+                from pathlib import Path as _P
+
+                from src.config import REPO_ROOT as _RR
+
+                p = _P(str(artifact))
+                exists = p.is_file() or (_RR / p).is_file() or (_RR / "domains" / p).is_file()
+                _check("triage", exists, f"model artifact {artifact}")
+            else:
+                rules = list(getattr(sev, "rules", []) or [])
+                _check("triage", bool(rules), "rules-only (no artifact declared)")
+        except Exception as e:
+            _check("triage", False, f"triage inspect failed: {type(e).__name__}")
+        try:
+            cm = pack.manifest.cost_model
+            _check("cost_model", cm is not None, "pack cost_model present")
+        except Exception:
+            _check("cost_model", False, "no cost_model on manifest")
+    try:
+        from src.ledger.merkle import latest_head
+
+        latest_head()
+        _check("merkle_log", True, "tree-head table reachable")
+    except Exception as e:
+        _check("merkle_log", False, f"unreachable: {type(e).__name__}")
+    ready = all(c["ok"] for c in checks.values())
+    return {"ready": ready, "checks": checks}
 
 
 # Serve built dashboard (Docker / pilot one-box). Prefer SPA at /ui.

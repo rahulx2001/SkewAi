@@ -73,8 +73,61 @@ def book_appointment(
             end = (start_dt + timedelta(hours=1)).isoformat()
         except Exception:
             end = slot_start
+    # Authorization limits (board #10): pack-owned policy, enforced before
+    # any write. Over-cap or supervisor-required bookings are NOT created;
+    # the caller gets requires_approval with the reason, ledgered.
+    try:
+        from src.domains.loader import load_pack as _load_pack
+
+        _policy = _load_pack(pack_id).manifest.booking_policy
+        _max_per_case = max(1, int(_policy.max_per_case))
+        _need_supervisor = bool(_policy.require_supervisor)
+    except Exception:
+        _max_per_case, _need_supervisor = 1, False
     with ops_con() as con:
         _ensure(con)
+        _existing = 0
+        if case_id:
+            try:
+                _existing = int(con.execute(
+                    "SELECT COUNT(*) FROM appointments WHERE case_id = ? AND status = 'booked'",
+                    [case_id],
+                ).fetchone()[0])
+            except Exception:
+                _existing = 0
+        if _need_supervisor or _existing >= _max_per_case:
+            reason = (
+                "supervisor approval required by pack policy"
+                if _need_supervisor
+                else f"booking cap reached ({_existing}/{_max_per_case} for this case)"
+            )
+            if interaction_id:
+                try:
+                    from src.ledger import AgentAction as _AA
+                    from src.ledger import record_action as _ra
+
+                    _ra(_AA(
+                        interaction_id=interaction_id,
+                        agent="case",
+                        action_type="appointment_booked",
+                        input_summary=str(slot_start),
+                        output_summary=f"requires_approval: {reason}",
+                        case_id=case_id,
+                        ok=False,
+                        error=reason,
+                    ))
+                except Exception:
+                    pass
+            return {
+                "appointment_id": None,
+                "status": "requires_approval",
+                "slot_start": slot_start,
+                "slot_end": end,
+                "location": location,
+                "reason": reason,
+                "stub": True,
+                "availability": "stub",
+            }
         con.execute(
             """
             INSERT INTO appointments
@@ -111,9 +164,14 @@ def book_appointment(
         "location": location,
         "calendar_url": cal,
         "ledgered": ledgered,
+        "stub": True,
+        "test_mode": True,
+        "availability": "stub",
+        "note": "Pilot stub: writes to ops appointments only, no real calendar/double-book check.",
         "customer_message": (
             f"You're booked for {slot_start} at {location}. "
             + (f"Manage: {cal}" if cal else "We'll send a confirmation.")
+            + " (Pilot scheduling — a specialist will confirm this booking.)"
         ),
     }
 
@@ -125,7 +183,15 @@ def offer_for_advisory(
     pack_id: str,
     interaction_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build an offer payload when an advisory matches (free remedy)."""
+    """Build an offer payload when an advisory matches (free remedy).
+
+    Availability is labeled (item 40): slots come from the pilot stub
+    calendar, so the offer carries ``availability: "stub"`` and the prompt
+    says confirmation comes from a specialist — never presented as live
+    calendar booking.
+    """
+    from src.frontline.capabilities import capability_status
+
     slots = list_open_slots(days_ahead=5, per_day=1)[:3]
     return {
         "offer_type": "free_remedy_appointment",
@@ -134,8 +200,11 @@ def offer_for_advisory(
         "pack_id": pack_id,
         "interaction_id": interaction_id,
         "open_slots": slots,
+        "availability": capability_status("booking")["availability"],
+        "availability_note": capability_status("booking")["note"],
         "prompt": (
             "There is a free remedy appointment available for this advisory. "
-            "Would you like to book one of these times?"
+            "Would you like to book one of these times? "
+            "(Pilot scheduling — a specialist will confirm the booking.)"
         ),
     }

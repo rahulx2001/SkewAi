@@ -81,10 +81,10 @@ def _build_clusters(pack_id: str) -> list[dict]:
     return [
         {"cluster_id": 14, "pack_id": pack_id, "top_terms": json.dumps(["grinding", "brakes", "cr-v"]),
          "category": "SERVICE BRAKES", "record_count": 5,
-         "first_seen": _NOW - timedelta(days=180), "last_seen": _NOW - timedelta(days=10)},
+         "first_seen": _NOW - timedelta(days=220), "last_seen": _NOW - timedelta(days=10)},
         {"cluster_id": 22, "pack_id": pack_id, "top_terms": json.dumps(["airbag", "warning", "light"]),
          "category": "AIR BAGS", "record_count": 3,
-         "first_seen": _NOW - timedelta(days=400), "last_seen": _NOW - timedelta(days=20)},
+         "first_seen": _NOW - timedelta(days=420), "last_seen": _NOW - timedelta(days=20)},
         {"cluster_id": 31, "pack_id": pack_id, "top_terms": json.dumps(["window", "electrical", "regulator"]),
          "category": "ELECTRICAL SYSTEM", "record_count": 2,
          "first_seen": _NOW - timedelta(days=120), "last_seen": _NOW - timedelta(days=5)},
@@ -92,7 +92,18 @@ def _build_clusters(pack_id: str) -> list[dict]:
 
 
 def _build_cluster_assignments() -> list[dict]:
-    out = []
+    """Real cosine distances (item 5) — never a constant per row.
+
+    Distance = 1 - cosine(record embedding, cluster centroid), computed with
+    the shipped embedding function so fixtures carry honest geometry.
+    """
+    from src.ml_runtime.embeddings import cosine, embed_text, fit_idf
+
+    try:
+        fit_idf([r["text"] for r in _RECORDS])
+    except Exception:
+        pass
+    by_cluster: dict[int, list[str]] = {}
     for r in _RECORDS:
         if r["record_id"].startswith("NHTSA-1000"):
             cluster = 14
@@ -100,7 +111,34 @@ def _build_cluster_assignments() -> list[dict]:
             cluster = 22
         else:
             cluster = 31
-        out.append({"record_id": r["record_id"], "cluster_id": cluster, "distance": 0.1})
+        by_cluster.setdefault(cluster, []).append(r["record_id"])
+    text_by_id = {r["record_id"]: r["text"] for r in _RECORDS}
+    vecs = {rid: embed_text(text_by_id[rid]) for ids in by_cluster.values() for rid in ids}
+    out = []
+    for cluster, ids in by_cluster.items():
+        dim = len(vecs[ids[0]])
+        centroid = [0.0] * dim
+        for rid in ids:
+            for d, v in enumerate(vecs[rid]):
+                centroid[d] += v
+        n = float(len(ids))
+        centroid = [x / n for x in centroid]
+        import math as _math
+
+        norm = _math.sqrt(sum(x * x for x in centroid)) or 1.0
+        centroid = [x / norm for x in centroid]
+        for rid in ids:
+            try:
+                dist = max(0.0, min(2.0, 1.0 - cosine(vecs[rid], centroid)))
+            except ValueError:
+                dist = 1.0
+            out.append({"record_id": rid, "cluster_id": cluster, "distance": dist})
+    try:
+        from src.ml_runtime.embeddings import reset_idf
+
+        reset_idf()
+    except Exception:
+        pass
     return out
 
 
@@ -142,8 +180,9 @@ def build(pack_id: str = "automotive_nhtsa", *, force: bool = False) -> Path:
                 """
                 INSERT INTO records
                 (record_id, occurred_at, received_at, entity_1, entity_2, entity_3,
-                 category, subcategory, text, severity_label, region, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'NHTSA')
+                 category, subcategory, text, severity_label, region, source,
+                 entity_key, provenance)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'NHTSA', ?, 'fixture')
                 """,
                 [
                     r["record_id"],
@@ -151,6 +190,10 @@ def build(pack_id: str = "automotive_nhtsa", *, force: bool = False) -> Path:
                     _NOW - timedelta(days=10),
                     r["entity_1"], r["entity_2"], r["entity_3"],
                     r["category"], r["text"], r["severity_label"], r["region"],
+                    "|".join([
+                        str(r["entity_1"]).upper(), str(r["entity_2"]).upper(),
+                        str(r["entity_3"]).upper(),
+                    ]),
                 ],
             )
 
@@ -209,12 +252,21 @@ def build(pack_id: str = "automotive_nhtsa", *, force: bool = False) -> Path:
             con.execute(
                 """
                 INSERT INTO backtest_results
-                (cluster_id, advisory_id, lead_time_weeks, matched)
-                VALUES (?, ?, ?, ?)
+                (cluster_id, advisory_id, lead_time_weeks, matched,
+                 pack_id, provenance, match_basis)
+                VALUES (?, ?, ?, ?, ?, 'fixture', 'seed-fixture')
                 """,
-                [b["cluster_id"], b["advisory_id"], b["lead_time_weeks"], b["matched"]],
+                [b["cluster_id"], b["advisory_id"], b["lead_time_weeks"], b["matched"], pack_id],
             )
 
+    # Seeds write current-schema warehouses directly: stamp migrations so
+    # ingest gates (audit 0.5) see this DB at HEAD, not "behind".
+    try:
+        from scripts.migrate import stamp_schema_current
+
+        stamp_schema_current(path, target="domain")
+    except Exception:
+        pass
     return path
 
 

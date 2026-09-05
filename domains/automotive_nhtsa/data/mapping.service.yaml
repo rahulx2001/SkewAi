@@ -1,0 +1,22 @@
+# Mapping: service/repair-record CSV columns → canonical records fields.
+# Third source for the automotive pack (Axion slice): dealer service visits
+# and repair orders land in `records` with source="SERVICE". Technician
+# notes are the highest-signal text for early detection (they predate both
+# complaints and claims).
+# Executed by scripts/ingest_source.py --source service.
+
+source: dealer service records CSV
+records:
+  record_id: RO_NUMBER
+  received_at: VISIT_DATE
+  occurred_at: VISIT_DATE
+  entity_1: MODEL_YR
+  entity_2: MAKE
+  entity_3: MODEL
+  category: SYSTEM
+  subcategory: OP_CODE
+  text: TECH_NOTES
+  severity_label: ""
+  region: STATE
+  source: "SERVICE"
+  entity_key: "{MODEL_YR}|{MAKE}|{MODEL}"

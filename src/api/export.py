@@ -46,6 +46,7 @@ async def build_audit_export(
     limit: int = 50,
     include_markdown: bool = False,
     run_auditor: bool = True,
+    redact_pii: bool = True,
 ) -> dict[str, Any]:
     """Build a JSON-serializable export of contacts + actions + audit verdicts.
 
@@ -56,6 +57,10 @@ async def build_audit_export(
         exports the most recent ``limit`` interactions.
     interaction_ids:
         Optional explicit list; when set, date filters are ignored.
+    redact_pii:
+        When True (default), emails/phones/SSN/cards in summaries and turns
+        are replaced with [EMAIL]/[PHONE]/[SSN]/[CARD] via security.pii.
+        Pass False only for privileged DSR/legal export with strict auth.
     """
     params: list[Any] = []
     sql = """
@@ -122,6 +127,24 @@ async def build_audit_export(
             row["report_path"] = str(report_path) if report_path.exists() else None
             if include_markdown and report_path.exists():
                 row["report_markdown"] = report_path.read_text(encoding="utf-8")
+
+    # PII redaction (was dead code in security.pii — now wired into exports)
+    if redact_pii:
+        try:
+            from src.security.pii import redact_pii as _redact
+
+            for row in interactions:
+                for k in ("entity_1", "entity_2", "entity_3"):
+                    if isinstance(row.get(k), str):
+                        row[k] = _redact(row[k])
+                for a in row.get("actions") or []:
+                    for fk in ("input_summary", "output_summary", "error"):
+                        if isinstance(a.get(fk), str):
+                            a[fk] = _redact(a[fk])
+                if isinstance(row.get("report_markdown"), str):
+                    row["report_markdown"] = _redact(row["report_markdown"])
+        except Exception:
+            pass
 
     for row in interactions:
         iid = row["interaction_id"]

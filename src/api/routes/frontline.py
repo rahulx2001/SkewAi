@@ -33,9 +33,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from src.api.auth import check_api_key, require_api_key, require_api_key_strict
 from src.api.export import build_audit_export
 from src.api.limiter import limiter
-from src.api.rbac import get_actor, get_role
+from src.api.rbac import get_actor, get_role, require_perm, require_perm_dep
 from src.config import settings
-from src.data.warehouse import ops_con
+from src.data.warehouse import ops_con, ops_in_thread
 from src.frontline.simulator import simulate as run_simulate
 from src.qubot.auditor import REPORTS_DIR, DIGESTS_DIR, audit_interaction, write_daily_digest
 from src.qubot.retrievers import (
@@ -58,25 +58,24 @@ router = APIRouter(
 @router.get("/early-warning")
 async def early_warning(window_days: int = 7, include_simulated: bool = True) -> dict[str, Any]:
     """Clusters re-scored with live-contact counts joined to backtest lead-time stats."""
-    risk = live_risk(window_days=window_days)
-    funnel = case_funnel(window_days=window_days)
-    if not include_simulated:
-        # Filter out simulated interactions from the funnel
-        with ops_con(read_only=True) as con:
-            row = con.execute(
-                """
-                SELECT COUNT(*) FROM interactions
-                WHERE channel = 'simulated'
-                  AND started_at >= now() - INTERVAL (? || ' days')
-                """,
-                [str(window_days)],
-            ).fetchone()
-            sim_count = row[0] if row else 0
-        funnel["simulated_count"] = sim_count
-    return {
-        "live_risk": risk,
-        "funnel": funnel,
-    }
+
+    def _load() -> dict[str, Any]:
+        risk = live_risk(window_days=window_days)
+        funnel = case_funnel(window_days=window_days)
+        if not include_simulated:
+            with ops_con(read_only=True) as con:
+                row = con.execute(
+                    """
+                    SELECT COUNT(*) FROM interactions
+                    WHERE channel = 'simulated'
+                      AND started_at >= now() - INTERVAL (? || ' days')
+                    """,
+                    [str(window_days)],
+                ).fetchone()
+                funnel["simulated_count"] = row[0] if row else 0
+        return {"live_risk": risk, "funnel": funnel}
+
+    return await ops_in_thread(_load)
 
 
 # ── Simulate ──────────────────────────────────────────────────────────────────
@@ -103,11 +102,20 @@ async def simulate(
     Offloaded via ``asyncio.to_thread`` so blocking DuckDB work does not stall
     live WebSocket contacts on the main event loop (H4).
     Optional ``pack_id`` overrides the active pack (e2e / multi-pack pilots).
+
+    Idempotent (item 45): repeat POSTs with the same ``Idempotency-Key``
+    return the stored result instead of re-simulating.
     """
     if count > 100:
         count = 100  # cap to avoid abuse
+    from src.api.idempotency import check_idempotency, store_idempotent_result
+
+    material = f"count={count}&speed={speed}&pack_id={pack_id or ''}"
+    replay = check_idempotency(request, "simulate", material)
+    if replay is not None:
+        return replay
     result = await asyncio.to_thread(_simulate_in_thread, count, speed, pack_id)
-    return {
+    out = {
         "completed": result.completed,
         "abandoned": result.abandoned,
         "escalated": result.escalated,
@@ -116,6 +124,8 @@ async def simulate(
         "errors": result.errors,
         "pack_id": pack_id,
     }
+    store_idempotent_result(request, "simulate", out)
+    return out
 
 
 # ── Ops metrics ──────────────────────────────────────────────────────────────
@@ -132,21 +142,42 @@ async def frontline_metrics(window_days: int = 7) -> dict[str, Any]:
 # ── Cases ────────────────────────────────────────────────────────────────────
 
 
+def _scrub_or_authorize(
+    role: str, scrub_pii: bool, *, surface: str
+) -> bool:
+    """Default privacy-preserving reads (item 16).
+
+    Returns True when the response must be PII-scrubbed. ``scrub_pii=False``
+    is an explicit opt-out that requires the ``dsr:export`` permission —
+    ordinary case readers cannot turn redaction off.
+    """
+    if scrub_pii:
+        return True
+    require_perm(role, "dsr:export")
+    return False
+
+
 @router.get("/cases/export")
 async def export_cases(
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
     limit: int = Query(default=500, ge=1, le=2000),
+    scrub_pii: bool = Query(default=True),
+    _role: str = Depends(require_perm_dep("case:read")),
 ):
-    """CSV export of cases (filters match list endpoint)."""
+    """CSV export of cases (filters match list endpoint).
+
+    PII is redacted by default; ``scrub_pii=false`` requires ``dsr:export``.
+    """
     from fastapi.responses import Response
 
     from src.api.export import build_manifest
     from src.frontline.ops import build_cases_csv
 
+    scrub = _scrub_or_authorize(_role, scrub_pii, surface="cases/export")
     csv_text, count = build_cases_csv(
-        status=status, severity=severity, q=q, limit=limit
+        status=status, severity=severity, q=q, limit=limit, scrub_pii=scrub
     )
     body = csv_text.encode("utf-8")
     manifest = build_manifest(body, count=count)
@@ -162,24 +193,41 @@ async def export_cases(
 
 
 @router.get("/cases")
+@limiter.limit("60 per minute")
 async def list_cases(
+    request: Request,
+    _role: str = Depends(require_perm_dep("case:read")),
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = None,
+    scrub_pii: bool = Query(default=True),
 ) -> dict[str, Any]:
     """List cases (filter by status / severity / free-text q).
 
     Pagination: ``limit``, ``offset`` or opaque ``cursor``; response includes
     ``pagination`` (``has_more``, ``next_offset``, ``next_cursor``).
+
+    Free-text fields are PII-redacted by default; ``scrub_pii=false`` is an
+    explicit opt-out requiring ``dsr:export``.
     """
     from src.api.jsonutil import json_safe
-    from src.api.pagination import clamp_limit, page_meta, resolve_offset
+    from src.api.pagination import (
+        InvalidCursor,
+        clamp_limit,
+        page_meta,
+        resolve_offset_strict,
+    )
+    from src.security.pii import redact_dict
 
-    lim = clamp_limit(limit)
-    off = resolve_offset(offset=offset, cursor=cursor)
+    scrub = _scrub_or_authorize(_role, scrub_pii, surface="cases")
+    try:
+        lim = clamp_limit(limit)
+        off = resolve_offset_strict(offset=offset, cursor=cursor)
+    except InvalidCursor as e:
+        raise HTTPException(status_code=400, detail=f"invalid cursor: {e}") from e
 
     sql = "SELECT * FROM cases"
     params: list[Any] = []
@@ -228,8 +276,27 @@ async def list_cases(
     rows = await asyncio.to_thread(_load_cases)
     has_extra = len(rows) > lim
     page = rows[:lim]
-    # total known only when we did not fill past the page (no extra row).
-    total = None if has_extra else off + len(page)
+    if scrub:
+        page = [redact_dict(r) for r in page]
+    # Exact total for small tables (item 44): same filters, COUNT(*) — cheap
+    # at pilot scale and lets UIs render real page counts.
+    total: int | None = None
+    if not has_extra:
+        total = off + len(page)
+    else:
+        try:
+            def _count() -> int:
+                with ops_con(read_only=True) as con:
+                    base = sql.split(" ORDER BY ")[0]
+                    from_idx = base.upper().find(" FROM ")
+                    c = con.execute(
+                        "SELECT COUNT(*) " + base[from_idx:], params[:-2]
+                    ).fetchone()
+                    return int(c[0]) if c else off + len(page)
+
+            total = await asyncio.to_thread(_count)
+        except Exception:
+            total = None
     return {
         "cases": page,
         "count": len(page),
@@ -238,15 +305,31 @@ async def list_cases(
     }
 
 @router.get("/cases/{case_id}")
-async def get_case(case_id: str) -> dict[str, Any]:
-    """Get a single case + its audit report path + notes."""
+@limiter.limit("120 per minute")
+async def get_case(
+    request: Request,
+    case_id: str,
+    _role: str = Depends(require_perm_dep("case:read")),
+    scrub_pii: bool = Query(default=True),
+) -> dict[str, Any]:
+    """Get a single case + its audit report path + notes.
+
+    Free-text fields are PII-redacted by default (``scrub_pii=false`` needs
+    ``dsr:export``).
+    """
     from src.api.jsonutil import json_safe
     from src.frontline.ops import list_case_notes
+    from src.security.pii import redact_dict
 
-    with ops_con(read_only=True) as con:
-        cur = con.execute("SELECT * FROM cases WHERE case_id = ?", [case_id])
-        cols = [d[0] for d in con.description]
-        row = cur.fetchone()
+    scrub = _scrub_or_authorize(_role, scrub_pii, surface="cases/{id}")
+
+    def _load():
+        with ops_con(read_only=True) as con:
+            cur = con.execute("SELECT * FROM cases WHERE case_id = ?", [case_id])
+            cols = [d[0] for d in con.description]
+            return cols, cur.fetchone()
+
+    cols, row = await ops_in_thread(_load)
     if not row:
         raise HTTPException(status_code=404, detail=f"case not found: {case_id}")
     case = dict(zip(cols, row))
@@ -266,6 +349,12 @@ async def get_case(case_id: str) -> dict[str, Any]:
         case["audit_report_path"] = str(report_path) if report_path.exists() else None
         case["audit_report_url"] = f"/api/frontline/audits/{iid}"
     case["notes"] = list_case_notes(case_id)
+    if scrub:
+        case = redact_dict(case)
+        case["notes"] = [
+            redact_dict(n) if isinstance(n, dict) else n
+            for n in (case.get("notes") or [])
+        ]
     return case
 
 
@@ -274,6 +363,7 @@ async def patch_case(
     case_id: str,
     body: dict[str, Any],
     actor: str = Depends(get_actor),
+    _role: str = Depends(require_perm_dep("case:write", open_mode_ok=True)),
 ) -> dict[str, Any]:
     """Update case status and/or follow-up draft (operator lifecycle)."""
     from src.api.jsonutil import json_safe
@@ -296,26 +386,47 @@ async def patch_case(
 
 
 @router.get("/cases/{case_id}/notes")
-async def get_case_notes(case_id: str, limit: int = 50) -> dict[str, Any]:
+async def get_case_notes(
+    case_id: str,
+    limit: int = 50,
+    scrub_pii: bool = Query(default=True),
+    _role: str = Depends(require_perm_dep("case:read")),
+) -> dict[str, Any]:
     from src.frontline.ops import get_case_row, list_case_notes
+    from src.security.pii import redact_dict
 
     if get_case_row(case_id) is None:
         raise HTTPException(status_code=404, detail=f"case not found: {case_id}")
     notes = list_case_notes(case_id, limit=limit)
+    if _scrub_or_authorize(_role, scrub_pii, surface="cases/notes"):
+        notes = [redact_dict(n) if isinstance(n, dict) else n for n in notes]
     return {"case_id": case_id, "notes": notes, "count": len(notes)}
 
 
 @router.post("/cases/{case_id}/notes")
 async def post_case_note(
+    request: Request,
     case_id: str,
     body: dict[str, Any],
     actor: str = Depends(get_actor),
+    _role: str = Depends(require_perm_dep("case:write", open_mode_ok=True)),
 ) -> dict[str, Any]:
-    """Add an operator note on a case."""
+    """Add an operator note on a case.
+
+    Idempotent (item 45): retries with the same ``Idempotency-Key`` return
+    the original note instead of duplicating it.
+    """
+    import json as _json
+
+    from src.api.idempotency import check_idempotency, store_idempotent_result
     from src.frontline.ops import add_case_note
 
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
+    material = f"{case_id}\n{_json.dumps(body, sort_keys=True, default=str)}"
+    replay = check_idempotency(request, "case_note", material)
+    if replay is not None:
+        return replay
     try:
         note = add_case_note(
             case_id,
@@ -326,6 +437,8 @@ async def post_case_note(
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if isinstance(note, dict):
+        store_idempotent_result(request, "case_note", note)
     return note
 
 
@@ -359,11 +472,139 @@ async def get_investigation(investigation_id: str) -> dict[str, Any]:
     return invs[0]
 
 
+@router.get("/investigations/{investigation_id}/comments")
+async def list_investigation_comments(
+    investigation_id: str,
+    _role: str = Depends(require_perm_dep("case:read")),
+) -> dict[str, Any]:
+    """Engineer discussion on an investigation, oldest first."""
+    from src.enterprise.investigation_workspace import get_investigation as _get_inv
+
+    try:
+        inv = _get_inv(investigation_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    comments = inv.get("comments", [])
+    return {"investigation_id": investigation_id, "comments": comments, "count": len(comments)}
+
+
+@router.post("/investigations/{investigation_id}/comments")
+@limiter.limit("60 per minute")
+async def post_investigation_comment(
+    request: Request,
+    investigation_id: str,
+    body: dict[str, Any],
+    actor: str = Depends(get_actor),
+    _role: str = Depends(require_perm_dep("case:write", open_mode_ok=True)),
+) -> dict[str, Any]:
+    """Append an engineer comment. Idempotent via Idempotency-Key."""
+    import json as _json
+
+    from src.api.idempotency import check_idempotency, store_idempotent_result
+    from src.enterprise.investigation_workspace import add_comment
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    material = f"{investigation_id}\n{_json.dumps(body, sort_keys=True, default=str)}"
+    replay = check_idempotency(request, "inv_comment", material)
+    if replay is not None:
+        return replay
+    try:
+        inv = add_comment(investigation_id, str(body.get("body") or ""), author=actor)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    out = {"investigation_id": investigation_id, "comments": inv.get("comments", [])}
+    store_idempotent_result(request, "inv_comment", out)
+    return out
+
+
+@router.post("/clusters/{cluster_id}/feedback")
+async def post_cluster_feedback(
+    cluster_id: int,
+    body: dict[str, Any],
+    actor: str = Depends(get_actor),
+    _role: str = Depends(require_perm_dep("case:write", open_mode_ok=True)),
+) -> dict[str, Any]:
+    """Engineer label correction (board #9): 'this assignment is wrong'.
+
+    verdict ∈ wrong | novel | correct. Stored with author + timestamp;
+    clustering jobs consume open 'wrong' rows as cannot-link signals.
+    """
+    from src.data.warehouse import domain_con, ops_con
+    from src.domains.active_pack import resolve_active_pack_id
+    from src.ids import new_ulid
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    verdict = str(body.get("verdict") or "").strip().lower()
+    if verdict not in ("wrong", "novel", "correct"):
+        raise HTTPException(status_code=400, detail="verdict must be wrong|novel|correct")
+    pack_id = str(body.get("pack_id") or resolve_active_pack_id())
+    uid = None
+    try:
+        with domain_con(pack_id) as con:
+            row = con.execute(
+                "SELECT cluster_uid FROM clusters WHERE cluster_id = ? AND pack_id = ?",
+                [int(cluster_id), pack_id],
+            ).fetchone()
+            uid = str(row[0]) if row and row[0] else None
+    except Exception:
+        uid = None
+    from src.data.timeutil import utc_now
+
+    fid = "cfb_" + new_ulid()
+    with ops_con() as con:
+        con.execute(
+            """
+            INSERT INTO cluster_feedback
+            (feedback_id, cluster_id, cluster_uid, pack_id, verdict, note, author, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [fid, int(cluster_id), uid, pack_id, verdict,
+             str(body.get("note") or "")[:2000], actor[:80], utc_now()],
+        )
+    return {"feedback_id": fid, "cluster_id": int(cluster_id),
+            "cluster_uid": uid, "verdict": verdict}
+
+
+@router.get("/clusters/{cluster_id}/feedback")
+async def list_cluster_feedback(
+    cluster_id: int,
+    pack_id: str | None = None,
+    _role: str = Depends(require_perm_dep("case:read")),
+) -> dict[str, Any]:
+    """List engineer labels for a cluster, newest last."""
+    from src.data.warehouse import ops_con
+    from src.domains.active_pack import resolve_active_pack_id
+
+    pid = pack_id or resolve_active_pack_id()
+    with ops_con(read_only=True) as con:
+        try:
+            cur = con.execute(
+                """
+                SELECT feedback_id, verdict, note, author, created_at
+                FROM cluster_feedback
+                WHERE cluster_id = ? AND pack_id = ?
+                ORDER BY created_at
+                """,
+                [int(cluster_id), pid],
+            )
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        except Exception:
+            rows = []
+    return {"cluster_id": int(cluster_id), "pack_id": pid,
+            "feedback": rows, "count": len(rows)}
+
+
 @router.patch("/investigations/{investigation_id}")
 async def patch_investigation(
     investigation_id: str,
     body: dict[str, Any],
     actor: str = Depends(get_actor),
+    _role: str = Depends(require_perm_dep("case:write", open_mode_ok=True)),
 ) -> dict[str, Any]:
     """Set investigation status: open | monitoring | closed."""
     from src.frontline.ops import update_investigation
@@ -385,7 +626,10 @@ async def patch_investigation(
 
 
 @router.get("/audits/export")
+@limiter.limit("10 per minute")
 async def export_audits(
+    request: Request,
+    _role: str = Depends(require_perm_dep("audit:read", open_mode_ok=True)),
     start: str | None = Query(default=None, description="Inclusive start date YYYY-MM-DD"),
     end: str | None = Query(default=None, description="Inclusive end date YYYY-MM-DD"),
     interaction_ids: str | None = Query(
@@ -429,13 +673,21 @@ async def export_audits(
 
 
 @router.get("/audits")
+@limiter.limit("60 per minute")
 async def list_audits(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = None,
+    _role: str = Depends(require_perm_dep("audit:read", open_mode_ok=True)),
 ) -> dict[str, Any]:
     """List available contact audit reports (from disk). Paginated."""
-    from src.api.pagination import clamp_limit, page_meta, resolve_offset
+    from src.api.pagination import (
+        InvalidCursor,
+        clamp_limit,
+        page_meta,
+        resolve_offset_strict,
+    )
 
     if not REPORTS_DIR.exists():
         return {
@@ -444,23 +696,30 @@ async def list_audits(
             "pagination": page_meta(limit=limit, offset=0, returned=0, total=0),
         }
     lim = clamp_limit(limit)
-    off = resolve_offset(offset=offset, cursor=cursor)
+    try:
+        off = resolve_offset_strict(offset=offset, cursor=cursor)
+    except InvalidCursor as e:
+        raise HTTPException(status_code=400, detail=f"invalid cursor: {e}") from e
     files = sorted(REPORTS_DIR.glob("*.md"), reverse=True)
     total = len(files)
     slice_files = files[off : off + lim]
-    audits = []
-    for f in slice_files:
-        # parse interaction_id from filename
-        iid = f.stem
-        with ops_con(read_only=True) as con:
-            con.execute(
-                "SELECT outcome FROM interactions WHERE interaction_id = ?", [iid]
-            ).fetchone()
-        audits.append({
-            "interaction_id": iid,
-            "report_path": str(f),
-            "report_url": f"/api/frontline/audits/{iid}",
-        })
+
+    def _rows() -> list[dict[str, str]]:
+        out = []
+        for f in slice_files:
+            iid = f.stem
+            with ops_con(read_only=True) as con:
+                con.execute(
+                    "SELECT outcome FROM interactions WHERE interaction_id = ?", [iid]
+                ).fetchone()
+            out.append({
+                "interaction_id": iid,
+                "report_path": str(f),
+                "report_url": f"/api/frontline/audits/{iid}",
+            })
+        return out
+
+    audits = await ops_in_thread(_rows)
     return {
         "audits": audits,
         "count": len(audits),
@@ -471,10 +730,12 @@ async def list_audits(
 
 
 @router.get("/audits/{interaction_id}")
+@limiter.limit("60 per minute")
 async def get_audit(
     request: Request,
     interaction_id: str,
     rerun: bool = False,
+    _role: str = Depends(require_perm_dep("audit:read", open_mode_ok=True)),
 ) -> dict[str, Any]:
     """Get (or rerun) a contact audit report. Rerun requires API key when configured."""
     if rerun:
@@ -591,7 +852,12 @@ async def insights_product_gap(
 
 
 @router.get("/explain/{interaction_id}")
-async def explain_decision(interaction_id: str) -> dict[str, Any]:
+@limiter.limit("60 per minute")
+async def explain_decision(
+    request: Request,
+    interaction_id: str,
+    _role: str = Depends(require_perm_dep("ledger:read", open_mode_ok=True)),
+) -> dict[str, Any]:
     """Why decisions happened: slots, severity source, advisory, cluster, evidence."""
     from src.frontline.explainability import explain_interaction
 
@@ -712,15 +978,23 @@ async def dsr_delete(
     request: Request,
     interaction_id: str,
     role: str = Depends(get_role),
+    mode: str = Query(default="tombstone"),
 ) -> dict[str, Any]:
-    """Hard-delete ops rows for one interaction (admin only — FIND-004)."""
+    """Erase ops rows for one interaction (admin only — FIND-004).
+
+    Modes (audit 7.3): ``tombstone`` (default) preserves hash-chain
+    verifiability while removing PII content; ``erase`` is the legacy hard
+    delete (chain segment for the contact cannot be re-verified after).
+    """
     from src.api.rbac import require_perm
     from src.frontline.dsr import delete_interaction
     from src.security.audit_log import security_event
 
     require_perm(role, "dsr:delete")
+    if mode not in ("tombstone", "erase"):
+        raise HTTPException(status_code=400, detail="mode must be 'tombstone' or 'erase'")
     try:
-        out = delete_interaction(interaction_id)
+        out = delete_interaction(interaction_id, mode=mode)
         security_event(
             "dsr.delete",
             outcome="success",

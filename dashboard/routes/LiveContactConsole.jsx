@@ -85,17 +85,30 @@ export default function LiveContactConsole() {
       }
       if (msg.type === "agent_activity") {
         const iid = msg.interaction_id;
-        setActivities((prev) => ({
-          ...prev,
-          [iid]: [...(prev[iid] || []), msg].slice(-200),
-        }));
-      } else if (msg.type === "agent_turn") {
+        const sum = msg.output_summary || msg.summary || msg.input_summary || "";
+        const fp = `${msg.agent || ""}|${msg.action_type || ""}|${sum}`;
+        setActivities((prev) => {
+          const list = prev[iid] || [];
+          const dup = list.some((a) => {
+            if (msg.action_id && a.action_id && a.action_id === msg.action_id) return true;
+            const as = a.output_summary || a.summary || a.input_summary || "";
+            return `${a.agent || ""}|${a.action_type || ""}|${as}` === fp;
+          });
+          if (dup) return prev;
+          const normalized = {
+            ...msg,
+            summary: sum,
+            output_summary: sum,
+          };
+          return { ...prev, [iid]: [...list, normalized].slice(-200) };
+        });
+      } else if (msg.type === "agent_turn" || msg.type === "customer_turn") {
         const iid = msg.interaction_id;
         setTurns((prev) => ({
           ...prev,
           [iid]: [
             ...(prev[iid] || []),
-            { speaker: msg.speaker || "agent", text: msg.text, ts: msg.ts },
+            { speaker: msg.speaker || (msg.type === "customer_turn" ? "customer" : "agent"), text: msg.text, ts: msg.ts },
           ].slice(-200),
         }));
       } else if (msg.type === "slots_update") {
@@ -513,14 +526,14 @@ export default function LiveContactConsole() {
 
             <div className="scroll-y activity-feed" style={{ maxHeight: 360, paddingRight: 6 }}>
               {selActivities.length === 0 && <div className="empty">No agent activity yet.</div>}
-              {[...selActivities].reverse().map((a) => (
-                <div className="activity-card" key={a.action_id}>
+              {[...selActivities].reverse().map((a, i) => (
+                <div className="activity-card" key={a.action_id || `${a.agent}-${a.action_type}-${a.ts}-${i}`}>
                   <div className="head">
                     <span className={"badge " + (AGENT_BADGE_CLASS[a.agent] || "")}>{a.agent}</span>
                     <span className="faint mono">{a.action_type}</span>
                     {a.ok === false && <span className="err-text">error</span>}
                   </div>
-                  <div className="summary">{a.output_summary || a.input_summary || "—"}</div>
+                  <div className="summary">{a.output_summary || a.summary || a.input_summary || "—"}</div>
                   <div className="meta">
                     <span>{fmtDuration(a.duration_ms)}</span>
                     {(a.evidence_ids || []).slice(0, 4).map((eid) => (

@@ -110,8 +110,15 @@ class Gazetteer:
                 idx = lowered.find(k)
                 before = lowered[idx - 1] if idx > 0 else " "
                 after = lowered[idx + len(k)] if idx + len(k) < len(lowered) else " "
-                if not before.isalnum() and not after.isalnum():
-                    return self.canonical[k]
+                if before.isalnum() or after.isalnum():
+                    continue
+                # Short tokens ("IS"): reject a fully-lowercase span so English
+                # "is" does not match the Lexus IS gazetteer entry.
+                if len(k) <= 3:
+                    span = text[idx : idx + len(k)]
+                    if span == span.lower():
+                        continue
+                return self.canonical[k]
         return None
 
 

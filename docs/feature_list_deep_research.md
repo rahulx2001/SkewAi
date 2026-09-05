@@ -9,7 +9,16 @@
 
 ## Chosen path: Option C (hybrid)
 
-Do **not** clone Axion (batch fleet analytics, no voice). Keep voice/agents/Qubot as the high-signal front door and thicken the analytical spine on the existing two-warehouse schema: mapping-driven ingest, process-stable embeddings, audited-signal export. `weekly_anomalies.z_score` values in fixture seed scripts are **literals** (6.0 / 2.0 / 0.0). They are **not** computed in `src`. Phase 1 would add a statistical engine; this document must not imply one exists.
+Do **not** clone Axion (batch fleet analytics, no voice). Keep voice/agents/Qubot as the high-signal front door and thicken the analytical spine on the existing two-warehouse schema: mapping-driven ingest, process-stable embeddings, audited-signal export.
+
+> **2026-09 remediation update:** `src/ml_runtime/anomalies.py` now ships the
+> statistical engine (quasi-Poisson residuals on zero-filled weekly buckets,
+> BH-FDR, event-clock `occurred_at`) — `recompute_weekly_anomalies()` computes
+> every `weekly_anomalies` row on live paths and investigation intercepts.
+> Seed scripts still ship small literal fixture rows (6.0/2.0/0.0) so offline
+> demos render without ingest; they are demo fixtures, recomputed on any live
+> path, and `backtest_results` rows now carry `provenance` (`fixture` vs
+> `computed`) so fixtures can never masquerade as observed evidence.
 
 ---
 
@@ -17,7 +26,7 @@ Do **not** clone Axion (batch fleet analytics, no voice). Keep voice/agents/Qubo
 
 You already have a **real, demoable, dual-pack product**: explicit orchestrator, six agents, ledger-before-emit, Qubot auditor, browser voice, supervisor takeover, early-warning board, entity memory, dual-pack offline eval, Docker pilot kit. That is more than most early AI startups ship.
 
-The AI/ML trees are **populated**, not empty: `src/ai/` (optional LLM narration), `src/ml_runtime/` (bag-of-hash embeddings + clustering), `src/backtest/` (lead-time engine), `src/domains/builder/` (Pack Builder MVP). What you **do not** have is **computed** weekly z-scores (fixture literals only), **default** scale data (fixture ~10 records/pack unless `ingest_nhtsa` / a mapped CSV is run), **real telephony**, and **enterprise compliance** (SSO/multi-tenant). Selling fixture spikes as detected anomalies would contradict the seed scripts.
+The AI/ML trees are **populated**, not empty: `src/ai/` (optional LLM narration), `src/ml_runtime/` (512-dim bag-of-hash embeddings + clustering + statistical anomaly engine), `src/backtest/` (entity-gated lead-time engine), `src/domains/builder/` (Pack Builder MVP). What you **do not** have is **default** scale data (fixture ~10 records/pack unless `ingest_nhtsa` / a mapped CSV is run), **real telephony**, and **enterprise compliance** (SSO/multi-tenant). Seed anomaly rows remain literal demo fixtures (recomputed on live paths) — selling fixture spikes as detected anomalies would contradict the seed scripts.
 
 **What you need to build depends on the next milestone:**
 
@@ -59,7 +68,7 @@ The AI/ML trees are **populated**, not empty: `src/ai/` (optional LLM narration)
 | `src/ml_runtime/` | **Populated** — process-stable bag-of-hash embeddings + in-process clustering |
 | `src/backtest/` | **Populated** — lead-time engine; still typically run on fixture-scale data |
 | `src/domains/builder/` | **Populated** — Pack Builder MVP (`make pack-init`) |
-| `weekly_anomalies.z_score` | **Fixture/seed literals** in `scripts/seed_domains.py` (6.0/2.0/0.0). **Not computed in `src`.** Early-warning “spike” copy on the demo path is seeded, not statistical detection. |
+| `weekly_anomalies.z_score` | **Computed** by `src/ml_runtime/anomalies.py` (quasi-Poisson + BH-FDR) on every recompute/live path. Seed scripts still ship small literal fixture rows (6.0/2.0/0.0) for offline demos; recompute replaces them (`provenance='computed'`). |
 | `src/channels/twilio_stub.py` | **NotImplementedError** on all methods |
 | Corpus scale | **Default fixture ~10 / 2 / 3.** Mapping-driven ingest (`src/domains/mapping_ingest.py`, `make ingest-nhtsa`) can load real NHTSA rows. `ingest_scale` is synthetic and is not NHTSA proof. |
 
@@ -67,7 +76,7 @@ The AI/ML trees are **populated**, not empty: `src/ai/` (optional LLM narration)
 
 | Capability | Reality |
 |------------|---------|
-| Similar records / RCA | **SQL `ILIKE` + entity filters** (`investigator.py`); not embeddings |
+| Similar records / RCA | **Association + embedding-fused cluster scoring** (`investigator.py`: full-corpus lift, semantic re-rank, entity-overlap cluster fuse) with ILIKE fallback when embeddings are missing |
 | Severity XGBoost | Pack *advertises* `automotive_nhtsa/severity_xgb`; runtime missing → rules |
 | Clusters | Hand-seeded fixtures, not auto-clustered |
 | Entity memory | Exists (`contact_memory`); not voice biometrics / “case CS-1042” UX |
@@ -374,8 +383,8 @@ Answer based on your goal:
 
 ## 9. Key takeaways
 
-1. **Core product is real**; AI/ML dirs are populated. Honesty traps are fixture-scale data and **seeded** `weekly_anomalies.z_score`, not empty folders.  
-2. **Fixture-scale data + ILIKE fallback + fixture z-scores** remain honesty traps — Phase 0 ships mapping ingest + stable embeddings; do not claim computed spike detection.  
+1. **Core product is real**; AI/ML dirs are populated. Honesty traps are fixture-scale data and **seed** `weekly_anomalies` demo rows (recomputed on live paths), not empty folders.  
+2. **Fixture-scale data + ILIKE fallback** remain honesty traps — mapping ingest + stable embeddings shipped; spike detection is computed (quasi-Poisson + FDR) wherever recompute runs. Do not present seed fixtures as detections.  
 3. **Pack Builder (39)** is the GTM multiplier; without it you are a services-shaped product.  
 4. **Hash-chain (31) + consent (33) + PII (32)** are cheaper than Twilio and unlock regulated conversations.  
 5. **Postgres/queue/observability (45–47)** and **RBAC (50)** before multi-tenant (52).  
@@ -388,6 +397,7 @@ Answer based on your goal:
 
 - Walked live tree: `src/*`, packs, schema, dashboard, Makefile, README, `docs/residual_audit_report.md`  
 - Reconciled 2026-08-16: `src/ai/`, `src/ml_runtime/`, `src/backtest/`, `src/domains/builder/` are populated. `weekly_anomalies.z_score` is fixture/seed, not computed in `src`.  
+- Reconciled 2026-09-05 (remediation): anomaly z-scores ARE computed in `src/ml_runtime/anomalies.py` (quasi-Poisson + BH-FDR); the 2026-08-16 "not computed" note above is superseded. Seed rows remain literal demo fixtures (`provenance='fixture'`). Investigator now fuses embeddings + full-corpus lift; backtest requires entity overlap.  
 - Confirmed ILIKE path in `investigator.py`; rules-only severity in `triage.py`  
 - Confirmed Twilio `NotImplementedError`; `FRONTLINE_LLM_TURN_CAP` reserved unused  
 - Web research: GDPR/consent/audit expectations for voice AI and call centers (2024–2026 sources)  

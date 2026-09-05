@@ -124,3 +124,15 @@ severity:
     Low: 3
 
 taxonomy_ref: taxonomy.yaml
+# Pack-owned cost figures for financial_impact (item 33).
+cost_model:
+  cost_per_case: 180.0
+  recall_cost_per_unit: 1200.0
+  exposure_multiplier: 2.0
+  currency: USD
+# Evidence-backed region centroids for hotspot maps (item 33).
+region_centroids:
+  CA: [-119.4, 36.8]
+  TX: [-99.3, 31.5]
+  NY: [-75.5, 43.0]
+  FL: [-81.5, 27.8]

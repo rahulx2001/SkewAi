@@ -31,11 +31,19 @@ CANONICAL_RECORD_FIELDS = (
     "severity_label",
     "region",
     "source",
+    "entity_key",
 )
 
 
 def default_mapping_path(pack_id: str) -> Path:
     return REPO_ROOT / "domains" / pack_id / "data" / "mapping.yaml"
+
+
+def _norm_entity_key(val: Any) -> str:
+    """UPPER|separated canonical form; '' when nothing meaningful resolved."""
+    parts = [p.strip().upper() for p in str(val or "").replace(":", "|").split("|")]
+    parts = [p for p in parts if p]
+    return "|".join(parts)
 
 
 def load_mapping(path: str | Path) -> dict[str, Any]:
@@ -74,7 +82,14 @@ def _parse_ts(val: Any) -> datetime | None:
 
 
 def _cell(row: dict[str, str], spec: Any, headers: set[str]) -> str:
-    """Resolve a mapping spec: CSV column name, or a quoted/literal constant."""
+    """Resolve a mapping spec.
+
+    - CSV column name → cell value;
+    - ``"quoted"`` → literal constant;
+    - ``{COL_A}|{COL_B}`` template → joined column values (used for the
+      canonical cross-source ``entity_key``);
+    - anything else → literal (e.g. source: NHTSA) when not a header.
+    """
     if spec is None:
         return ""
     if not isinstance(spec, str):
@@ -82,6 +97,14 @@ def _cell(row: dict[str, str], spec: Any, headers: set[str]) -> str:
     key = spec.strip()
     if key.startswith('"') and key.endswith('"') and len(key) >= 2:
         return key[1:-1]
+    if "{" in key and "}" in key:
+        import re as _re
+
+        def _sub(m: "_re.Match[str]") -> str:
+            col = m.group(1).strip()
+            return (row.get(col) or "").strip() if col in headers else ""
+
+        return _re.sub(r"\{([^{}]+)\}", _sub, key).strip()
     if key in headers:
         return (row.get(key) or "").strip()
     # Literal (e.g. source: NHTSA) when it is not a header.
@@ -107,6 +130,11 @@ def map_row(row: dict[str, Any], records_map: dict[str, Any]) -> dict[str, Any] 
     out["text"] = text
     out["received_at"] = _parse_ts(out.get("received_at")) or utc_now()
     out["occurred_at"] = _parse_ts(out.get("occurred_at"))
+    # Canonical join key: normalized, empty when undeclared/unresolvable.
+    # Declared per-source via mapping.yaml `entity_key` (e.g.
+    # "{MAKETXT}|{MODELTXT}|{MODEL_YR}"); never invented from thin air —
+    # templates referencing absent columns resolve to "".
+    out["entity_key"] = _norm_entity_key(out.get("entity_key"))
     return out
 
 
@@ -146,8 +174,9 @@ def upsert_records(pack_id: str, records: Iterable[dict[str, Any]]) -> int:
                 """
                 INSERT OR REPLACE INTO records (
                     record_id, occurred_at, received_at, entity_1, entity_2, entity_3,
-                    category, subcategory, text, severity_label, region, source, embedding
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    category, subcategory, text, severity_label, region, source, embedding,
+                    entity_key, provenance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     rec["record_id"],
@@ -163,6 +192,8 @@ def upsert_records(pack_id: str, records: Iterable[dict[str, Any]]) -> int:
                     rec.get("region") or None,
                     rec.get("source") or None,
                     emb,
+                    rec.get("entity_key") or None,
+                    rec.get("provenance") or "observed",
                 ],
             )
             count += 1
@@ -176,16 +207,21 @@ def ingest_mapped_csv(
     mapping_path: str | Path | None = None,
     limit: int | None = None,
     enforce_trust: bool = True,
+    allow_untrusted_historical_backfill: bool = False,
     sla_days: int | None = None,
 ) -> dict[str, Any]:
     """Execute mapping.yaml against a CSV and upsert trusted rows.
 
-    ``enforce_trust=False`` is the historical corpus backfill (NHTSA FLAT).
-    Live ingest keeps the default: only trusted rows enter the warehouse.
-    ``evaluate_ingest`` errors are not swallowed.
+    Untrusted writes require ``allow_untrusted_historical_backfill=True``
+    (NHTSA historical FLAT). ``enforce_trust=False`` alone is rejected so a
+    copier cannot silently bypass the contract.
     """
     from src.data.trust import DEFAULT_FRESHNESS_SLA_DAYS, evaluate_ingest
 
+    if enforce_trust is False and not allow_untrusted_historical_backfill:
+        raise ValueError(
+            "untrusted ingest requires allow_untrusted_historical_backfill=True"
+        )
     mpath = Path(mapping_path) if mapping_path else default_mapping_path(pack_id)
     mapping = load_mapping(mpath)
     rows = list(iter_mapped_rows(csv_path, mapping, limit=limit))
@@ -195,7 +231,7 @@ def ingest_mapped_csv(
         persist=True,
         sla_days=DEFAULT_FRESHNESS_SLA_DAYS if sla_days is None else sla_days,
     )
-    to_write = trust["trusted_rows"] if enforce_trust else rows
+    to_write = rows if allow_untrusted_historical_backfill else trust["trusted_rows"]
     written = upsert_records(pack_id, to_write)
     return {
         "pack_id": pack_id,
@@ -206,7 +242,8 @@ def ingest_mapped_csv(
         "trusted": trust.get("trusted"),
         "rejected": trust.get("rejected"),
         "source": mapping.get("source"),
-        "enforce_trust": enforce_trust,
+        "enforce_trust": not allow_untrusted_historical_backfill,
+        "allow_untrusted_historical_backfill": allow_untrusted_historical_backfill,
     }
 
 

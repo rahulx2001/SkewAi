@@ -52,6 +52,8 @@ class ActionVerdict:
     verdict: str = "unverifiable"  # grounded | unverifiable | mismatch
     evidence_checked: int = 0
     evidence_confirmed: int = 0
+    evidence_confirmed_snapshot: int = 0
+    evidence_confirmed_live: int = 0
     mismatched_ids: list[str] = field(default_factory=list)
     uncited_ids_in_output: list[str] = field(default_factory=list)
     source_drifted_ids: list[str] = field(default_factory=list)
@@ -68,6 +70,13 @@ class AuditResult:
     pack_version: str
     context_version: str = "platform"
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Snapshot semantics (item 3): evidence is verified against the historical
+    # state pinned at action time (``as_of``), not the live warehouse. Re-audit
+    # after source edits reproduces the historical verdict; live-vs-pin
+    # differences surface separately as source drift.
+    as_of: str = ""
+    snapshot_verified: int = 0
+    live_verified: int = 0
 
     # Headline verdict
     overall_verdict: str = "grounded"  # grounded | mismatch | source-drifted
@@ -99,10 +108,76 @@ class AuditResult:
 
 
 # ── Evidence verification ───────────────────────────────────────────────────
+#
+# Snapshot-first (item 3): every verifier accepts an optional ``snapshot_row``
+# (the pinned historical row for this action). When present, existence AND
+# scope are checked against the snapshot — never the live warehouse — so later
+# database edits cannot rewrite a historical audit. Live state is used only
+# when no pin exists, and the provenance ("snapshot" vs "live") is returned
+# to the caller for labeling.
 
 
-def _verify_advisory_id(pack_id: str, advisory_id: str, customer_entities: dict[str, str | None]) -> tuple[bool, str]:
+def _snapshot_rows_for_action(action_id: str) -> dict[str, dict[str, Any]]:
+    """action pinned evidence_id -> historical row dict (parsed body_json)."""
+    try:
+        from src.qubot.evidence_pin import snapshots_for_action
+
+        out: dict[str, dict[str, Any]] = {}
+        for snap in snapshots_for_action(action_id):
+            eid = str(snap.get("evidence_id") or "")
+            if not eid:
+                continue
+            try:
+                row = json.loads(snap.get("body_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(row, dict):
+                out[eid] = row
+        return out
+    except Exception:
+        return {}
+
+
+def _scope_mismatch_advisory(
+    adv: dict[str, Any], customer_entities: dict[str, str | None]
+) -> str | None:
+    """Return mismatch reason or None when the advisory scope fits."""
+    for slot, scope_col in [
+        ("entity_1", "scope_entity_1"),
+        ("entity_2", "scope_entity_2"),
+        ("entity_3", "scope_entity_3"),
+        ("category", "scope_category"),
+    ]:
+        scope_val = adv.get(scope_col)
+        if scope_val is None:
+            continue  # advisory doesn't scope on this dimension
+        customer_val = customer_entities.get(slot)
+        if customer_val is None:
+            return (
+                f"advisory scopes {scope_col}='{scope_val}' "
+                f"but customer {slot} is empty"
+            )
+        if str(scope_val).upper() != str(customer_val).upper():
+            return (
+                f"advisory {scope_col}='{scope_val}' != "
+                f"customer {slot}='{customer_val}'"
+            )
+    return None
+
+
+def _verify_advisory_id(
+    pack_id: str,
+    advisory_id: str,
+    customer_entities: dict[str, str | None],
+    *,
+    snapshot_row: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """Re-query the domain warehouse: does the advisory exist AND match the customer's entities?"""
+    if snapshot_row is not None:
+        reason = _scope_mismatch_advisory(snapshot_row, customer_entities)
+        if reason is None:
+            return True, "snapshot:ok"
+        return False, f"snapshot:{reason}"
     try:
         with domain_con(pack_id) as con:
             cur = con.execute(
@@ -115,56 +190,86 @@ def _verify_advisory_id(pack_id: str, advisory_id: str, customer_entities: dict[
             cols = [d[0] for d in con.description] if con.description else []
             row = cur.fetchone()
     except FileNotFoundError:
-        return False, "domain warehouse not found"
+        return False, "live:domain warehouse not found"
     if not row:
-        return False, "advisory_id not in advisories table"
+        return False, "live:advisory_id not in advisories table"
     adv = dict(zip(cols, row))
 
     # Scope check: if advisory scopes to a specific value, the customer must have that value.
-    for slot, scope_col in [
-        ("entity_1", "scope_entity_1"),
-        ("entity_2", "scope_entity_2"),
-        ("entity_3", "scope_entity_3"),
-        ("category", "scope_category"),
-    ]:
-        scope_val = adv.get(scope_col)
-        if scope_val is None:
-            continue  # advisory doesn't scope on this dimension
-        customer_val = customer_entities.get(slot)
-        if customer_val is None:
-            # Customer didn't provide this slot but advisory scopes to it — soft mismatch.
-            return False, f"advisory scopes {scope_col}='{scope_val}' but customer {slot} is empty"
-        if str(scope_val).upper() != str(customer_val).upper():
-            return False, f"advisory {scope_col}='{scope_val}' != customer {slot}='{customer_val}'"
-    return True, "ok"
+    reason = _scope_mismatch_advisory(adv, customer_entities)
+    if reason is not None:
+        return False, f"live:{reason}"
+    return True, "live:ok"
 
 
-def _verify_record_id(pack_id: str, record_id: str) -> bool:
-    """Does this historical record_id exist in the domain warehouse?"""
+def _verify_record_id(
+    pack_id: str,
+    record_id: str,
+    customer_entities: dict[str, str | None] | None = None,
+    *,
+    snapshot_row: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Does this record exist AND match the customer's scope (when given)?"""
+    if snapshot_row is not None:
+        if customer_entities:
+            for slot in ("category", "entity_2", "entity_3"):
+                cust = (customer_entities.get(slot) or "").strip()
+                val = str(snapshot_row.get(slot) or "").strip()
+                if cust and val and cust.upper() != val.upper():
+                    return False, (
+                        f"snapshot:record {slot}='{val}' != "
+                        f"customer {slot}='{cust}'"
+                    )
+        return True, "snapshot:ok"
     try:
         with domain_con(pack_id) as con:
             row = con.execute(
-                "SELECT record_id FROM records WHERE record_id = ?", [record_id]
+                "SELECT record_id, category, entity_2, entity_3 FROM records WHERE record_id = ?",
+                [record_id],
             ).fetchone()
-        return row is not None
+            if row is None:
+                return False, "live:record_id not in records table"
+            if customer_entities:
+                cols = [d[0] for d in con.description]
+                rec = dict(zip(cols, row))
+                for slot in ("category", "entity_2", "entity_3"):
+                    cust = (customer_entities.get(slot) or "").strip()
+                    val = str(rec.get(slot) or "").strip()
+                    if cust and val and cust.upper() != val.upper():
+                        return False, f"live:record {slot}='{val}' != customer {slot}='{cust}'"
+        return True, "live:ok"
     except FileNotFoundError:
-        return False
+        return False, "live:domain warehouse not found"
 
 
-def _verify_cluster_id(pack_id: str, cluster_id: int | str) -> bool:
+def _verify_cluster_id(
+    pack_id: str,
+    cluster_id: int | str,
+    *,
+    snapshot_row: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    if snapshot_row is not None:
+        return True, "snapshot:ok"
     try:
         with domain_con(pack_id) as con:
             row = con.execute(
                 "SELECT cluster_id FROM clusters WHERE cluster_id = ? AND pack_id = ?",
                 [int(cluster_id), pack_id],
             ).fetchone()
-        return row is not None
+        return (row is not None), ("live:ok" if row else "live:cluster_id not found")
     except (FileNotFoundError, ValueError, TypeError):
-        return False
+        return False, "live:invalid cluster_id"
 
 
-def _verify_investigation_id(_pack_id: str, investigation_id: str) -> bool:
+def _verify_investigation_id(
+    _pack_id: str,
+    investigation_id: str,
+    *,
+    snapshot_row: dict[str, Any] | None = None,
+) -> bool:
     """Investigations live in the ops warehouse."""
+    if snapshot_row is not None:
+        return True
     with ops_con(read_only=True) as con:
         row = con.execute(
             "SELECT investigation_id FROM investigations WHERE investigation_id = ?",
@@ -177,6 +282,8 @@ def _verify_evidence_id(
     pack_id: str,
     evidence_id: str,
     customer_entities: dict[str, str | None],
+    *,
+    snapshots: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[bool, str]:
     """Dispatch to the right verifier based on the ID's shape.
 
@@ -192,46 +299,55 @@ def _verify_evidence_id(
     eid = str(evidence_id).strip()
     if not eid:
         return False, "empty evidence_id"
+    snap = (snapshots or {}).get(eid)
 
     # Investigation ids: inv_XXXX
     if eid.startswith("inv_"):
-        return _verify_investigation_id(pack_id, eid), "investigation"
+        ok = _verify_investigation_id(pack_id, eid, snapshot_row=snap)
+        return ok, ("snapshot:investigation" if snap is not None
+                    else "live:investigation") if ok else "live:investigation-missing"
 
     # Interaction ids: int_XXXX (rare in evidence_ids, but supported)
     if eid.startswith("int_"):
+        if snap is not None:
+            return True, "snapshot:interaction"
         with ops_con(read_only=True) as con:
             row = con.execute(
                 "SELECT interaction_id FROM interactions WHERE interaction_id = ?", [eid]
             ).fetchone()
-        return row is not None, "interaction"
+        return row is not None, "live:interaction"
 
     # Case ids: case_XXXX
     if eid.startswith("case_"):
+        if snap is not None:
+            return True, "snapshot:case"
         with ops_con(read_only=True) as con:
             row = con.execute(
                 "SELECT case_id FROM cases WHERE case_id = ?", [eid]
             ).fetchone()
-        return row is not None, "case"
+        return row is not None, "live:case"
 
     # Numeric cluster ids (the Investigator emits str(cluster_id) in evidence_ids)
     if eid.isdigit():
-        return _verify_cluster_id(pack_id, eid), "cluster"
+        ok, msg = _verify_cluster_id(pack_id, eid, snapshot_row=snap)
+        return ok, f"cluster:{msg}" if not ok else ("snapshot:cluster" if snap is not None else "live:cluster")
 
     # Advisory ids — common patterns: '19V-12345', 'NHTSA-12345' (recall format).
     # Try advisories first ONLY if the ID looks like an advisory (contains 'V-'
     # or matches the canonical recall pattern).
     import re
     if re.match(r"^\d{2}[A-Z]-\d+$", eid) or "V-" in eid:
-        return _verify_advisory_id(pack_id, eid, customer_entities)
+        return _verify_advisory_id(pack_id, eid, customer_entities, snapshot_row=snap)
 
-    # Otherwise try records (e.g. NHTSA-100001, CFPB-12345).
-    if _verify_record_id(pack_id, eid):
-        return True, "record"
+    # Otherwise try records (e.g. NHTSA-100001, CFPB-12345) WITH scope check.
+    ok, msg = _verify_record_id(pack_id, eid, customer_entities, snapshot_row=snap)
+    if ok:
+        return True, "snapshot:record" if snap is not None else "live:record"
 
     # Last resort: try advisories (covers arbitrary advisory_id formats).
-    ok, msg = _verify_advisory_id(pack_id, eid, customer_entities)
+    ok, msg = _verify_advisory_id(pack_id, eid, customer_entities, snapshot_row=snap)
     if ok:
-        return ok, "advisory"
+        return ok, "snapshot:advisory" if snap is not None else "live:advisory"
     return False, f"unknown evidence_id shape: {eid} ({msg})"
 
 
@@ -250,21 +366,24 @@ def _extract_ids_from_text(text: str) -> list[str]:
     if not text:
         return []
     ids: list[str] = []
-    # Pattern 1: NHTSA/CFPB-style record ids (uppercase letters, dash, digits,
-    # optionally followed by more dash-digit groups, e.g. CFPB-2023-01).
-    for m in re.finditer(r"\b([A-Z]{3,}-\d{3,}(?:-\d{2,})*)\b", text):
-        ids.append(m.group(1))
+    # Pattern 1: NHTSA/CFPB-style record ids (case-insensitive, normalized
+    # to upper for matching; catches 'nhtsa-100' lowercase hallucinations).
+    for m in re.finditer(r"\b([A-Za-z]{3,}-\d{3,}(?:-\d{2,})*)\b", text):
+        ids.append(m.group(1).upper())
     # Pattern 2: recall-style advisory ids like '19V-12345' (2 digits + letter + dash + digits)
-    for m in re.finditer(r"\b(\d{2}[A-Z]-\d{3,})\b", text):
-        ids.append(m.group(1))
+    for m in re.finditer(r"\b(\d{2}[A-Za-z]-\d{3,})\b", text):
+        ids.append(m.group(1).upper())
     # Pattern 3: inv_XXXX (and similar prefixes like int_XXXX, case_XXXX)
-    for m in re.finditer(r"\b(inv_\d{4,})\b", text):
+    for m in re.finditer(r"\b(inv_\d+)\b", text, flags=re.IGNORECASE):
+        ids.append(m.group(1).lower())
+    # Pattern 3b: int_XXXX (interaction hallucinations must not pass as grounded)
+    for m in re.finditer(r"\b(int_[A-Za-z0-9]+)\b", text, flags=re.IGNORECASE):
         ids.append(m.group(1))
     # Pattern 4: case_XXXX
-    for m in re.finditer(r"\b(case_[A-Za-z0-9]{6,})\b", text):
+    for m in re.finditer(r"\b(case_[A-Za-z0-9]{4,})\b", text, flags=re.IGNORECASE):
         ids.append(m.group(1))
-    # Pattern 5: 'cluster #14' → '14'
-    for m in re.finditer(r"\bcluster #(\d+)\b", text, flags=re.IGNORECASE):
+    # Pattern 5: 'cluster #14' → '14' (also bare 'cluster 14')
+    for m in re.finditer(r"\bcluster\s*#?\s*(\d+)\b", text, flags=re.IGNORECASE):
         ids.append(m.group(1))
     return ids
 
@@ -285,12 +404,28 @@ def _check_severity_sanity(case_row: dict[str, Any], safety_flags: dict[str, boo
 # ── Main audit ────────────────────────────────────────────────────────────────
 
 
-async def audit_interaction(interaction_id: str, *, write_report: bool = True) -> AuditResult:
+async def audit_interaction(
+    interaction_id: str,
+    *,
+    write_report: bool = True,
+    as_of: str | None = None,
+) -> AuditResult:
     """Run the post_contact_audit playbook for a single interaction.
 
     Returns an AuditResult; if `write_report` is True, also writes the markdown
     report to `reports/qubot/contacts/{interaction_id}.md`.
+
+    Snapshot semantics (item 3): evidence existence/scope is verified against
+    the historical rows pinned at action-write time (the ``as_of`` snapshot),
+    not the live warehouse. ``as_of`` defaults to the audit time and is
+    recorded on the result. Re-running an audit after source edits reproduces
+    the historical verdict; live-vs-pin differences are reported separately as
+    source drift. Live state is consulted only for evidence IDs that were
+    never pinned, and those verdicts are labeled ``live:``.
     """
+    from src.data.timeutil import utc_now
+
+    as_of = as_of or utc_now().replace(tzinfo=None).isoformat()
     data = contact_audit(interaction_id)
     interaction = data["interaction"]
     turns = data["turns"]
@@ -312,6 +447,7 @@ async def audit_interaction(interaction_id: str, *, write_report: bool = True) -
         pack_version=pack_version,
         total_actions=len(actions),
         peak_frustration=interaction.get("peak_frustration") or 0.0,
+        as_of=as_of,
     )
 
     # ── Groundedness audit per action ────────────────────────────────────────
@@ -327,7 +463,11 @@ async def audit_interaction(interaction_id: str, *, write_report: bool = True) -
     result.severity_safety_flags = safety_flags
 
     for action in actions:
-        verdict = _audit_single_action(pack_id, action, customer_entities)
+        verdict = _audit_single_action(
+            pack_id, action, customer_entities, as_of=as_of
+        )
+        result.snapshot_verified += verdict.evidence_confirmed_snapshot
+        result.live_verified += verdict.evidence_confirmed_live
         result.action_verdicts.append(verdict)
         if verdict.verdict == "grounded":
             result.grounded_actions += 1
@@ -424,8 +564,16 @@ def _audit_single_action(
     pack_id: str,
     action: dict[str, Any],
     customer_entities: dict[str, str | None],
+    *,
+    as_of: str | None = None,
 ) -> ActionVerdict:
-    """Audit one agent_actions row."""
+    """Audit one agent_actions row.
+
+    Evidence is verified against the ``as_of`` snapshot (pinned rows) first;
+    the live warehouse is only a fallback for never-pinned IDs. ``as_of`` is
+    recorded for provenance; pins are immutable so any re-audit reproduces the
+    historical verdict.
+    """
     action_id = action.get("action_id", "")
     agent = action.get("agent", "")
     action_type = action.get("action_type", "")
@@ -444,26 +592,41 @@ def _audit_single_action(
     )
 
     # ── Check that every cited evidence ID exists + matches the scope ──────
+    # Snapshot-first (item 3): historical pins, not live state.
+    snapshots = _snapshot_rows_for_action(action_id)
     mismatched: list[str] = []
     confirmed = 0
+    confirmed_snapshot = 0
+    confirmed_live = 0
     for eid in evidence_ids:
-        ok, msg = _verify_evidence_id(pack_id, str(eid), customer_entities)
+        ok, msg = _verify_evidence_id(
+            pack_id, str(eid), customer_entities, snapshots=snapshots
+        )
         if ok:
             confirmed += 1
+            if msg.startswith("snapshot:"):
+                confirmed_snapshot += 1
+            else:
+                confirmed_live += 1
         else:
             mismatched.append(f"{eid} ({msg})")
     verdict.evidence_confirmed = confirmed
+    verdict.evidence_confirmed_snapshot = confirmed_snapshot
+    verdict.evidence_confirmed_live = confirmed_live
     verdict.mismatched_ids = mismatched
 
     # ── Check that every ID mentioned in the output is also in evidence_ids ──
     output_text = (action.get("output_summary") or "") + " " + (action.get("input_summary") or "")
     cited_in_text = _extract_ids_from_text(output_text)
     evidence_set = {str(e) for e in evidence_ids}
-    # The action's own case_id (if any) is recorded on the row, not in evidence_ids;
-    # exclude it from the uncited list to avoid false positives on case_created.
+    # The action's own case_id and interaction_id are recorded on the row, not in evidence_ids;
+    # exclude them from the uncited list to avoid false positives.
     own_case_id = action.get("case_id")
     if own_case_id:
         evidence_set.add(str(own_case_id))
+    own_interaction_id = action.get("interaction_id")
+    if own_interaction_id:
+        evidence_set.add(str(own_interaction_id))
     uncited = [c for c in cited_in_text if c not in evidence_set]
     verdict.uncited_ids_in_output = uncited
 
@@ -519,14 +682,42 @@ def _audit_single_action(
 
 
 def _mark_case_needs_review(case_id: str) -> None:
-    """Mark a case needs_review (only if it's currently 'open' or 'pending_followup')."""
+    """Mark a case needs_review (only if it's currently 'open' or 'pending_followup').
+
+    Also tags case_kind='audit_review' (audit 7.2) so fleet statistics —
+    anomaly counts, cluster rebuilds, economics, the customer funnel — never
+    mistake an audit finding for a customer complaint — and opens a
+    review-queue row with an SLA + null owner so the finding has someone and
+    somewhen (board #10).
+    """
     with ops_con() as con:
         # Use status='pending_followup' to signal needs_review; the original
         # status is preserved via the followup_draft (deterministic in v2).
-        con.execute(
-            "UPDATE cases SET status = 'pending_followup' WHERE case_id = ? AND status = 'open'",
-            [case_id],
-        )
+        try:
+            con.execute(
+                "UPDATE cases SET status = 'pending_followup', case_kind = 'audit_review'"
+                " WHERE case_id = ? AND status = 'open'",
+                [case_id],
+            )
+        except Exception:
+            # Pre-case_kind schema.
+            con.execute(
+                "UPDATE cases SET status = 'pending_followup' WHERE case_id = ? AND status = 'open'",
+                [case_id],
+            )
+        try:
+            row = con.execute(
+                "SELECT interaction_id FROM cases WHERE case_id = ?", [case_id]
+            ).fetchone()
+            iid = str(row[0]) if row and row[0] else None
+        except Exception:
+            iid = None
+    try:
+        from src.frontline.validation_queue import create_review
+
+        create_review(interaction_id=iid, case_id=case_id, reason="audit_mismatch")
+    except Exception:
+        pass
 
 
 # ── Report writing ──────────────────────────────────────────────────────────
@@ -714,6 +905,33 @@ def write_daily_digest(window_days: int = 1) -> Path:
                 f"{i.get('case_count')} | {i.get('days_open', '—')} | {i.get('title', '')[:60]} |"
             )
         lines.append("")
+
+    lines.append("## Handoffs (audit 2.4)")
+    lines.append("")
+    try:
+        from src.data.warehouse import ops_con as _ops_con
+
+        with _ops_con(read_only=True) as _con:
+            _h = _con.execute(
+                """
+                SELECT action_type, COUNT(*) FROM agent_actions
+                WHERE ts >= now() - INTERVAL (? || ' days')
+                  AND action_type IN (
+                    'handoff_offer_emitted', 'handoff_accepted',
+                    'handoff_unfulfilled')
+                GROUP BY action_type
+                """,
+                [str(window_days)],
+            ).fetchall()
+        _hm = {str(a): int(n) for a, n in _h}
+        lines.append(
+            f"offered={_hm.get('handoff_offer_emitted', 0)} "
+            f"accepted={_hm.get('handoff_accepted', 0)} "
+            f"unfulfilled={_hm.get('handoff_unfulfilled', 0)}"
+        )
+    except Exception:
+        lines.append("_Handoff stats unavailable._")
+    lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

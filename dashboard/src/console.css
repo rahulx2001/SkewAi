@@ -1,44 +1,38 @@
 /* Skew AI console — shell chrome, themes, and UI primitives.
-   Loaded after styles.css so it can extend the base token set.
-   Cool signal themes (no cream/copper). Sora + IBM Plex Mono from index.html. */
+   Light override is warm paper, not the old teal ops daylight. */
 
 /* ── Themes ────────────────────────────────────────────────────────────── */
 
 :root[data-theme="light"] {
-  /* Cool ops daylight — not stock gray-100 slab */
-  --bg: #e9eef5;
-  --bg-raised: #f7f9fc;
-  --bg-panel: #ffffff;
-  --bg-hover: #dde6f0;
-  --edge: #c5d0de;
-  --edge-strong: #9aabc0;
-  --ink: #0c1420;
-  --ink-soft: #3d4d63;
-  --ink-faint: #6b7c92;
-  --accent: #0d9488;
-  --accent-soft: #0f766e;
-  --accent-muted: rgba(13, 148, 136, 0.12);
-  --ok: #15803d;
-  --ok-soft: rgba(21, 128, 61, 0.1);
-  --warn: #b45309;
-  --warn-soft: rgba(180, 83, 9, 0.1);
-  --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.1);
-  --focus: #0f766e;
-  --shadow-soft: 0 1px 0 rgba(15, 23, 36, 0.04) inset;
+  --bg: #f3f1eb;
+  --bg-raised: #faf8f3;
+  --bg-panel: #fffcf6;
+  --bg-hover: #e8e4db;
+  --edge: #d4cfc4;
+  --edge-strong: #b8b2a6;
+  --ink: #1c1b18;
+  --ink-soft: #4a4842;
+  --ink-faint: #7a776f;
+  --accent: #2a2926;
+  --accent-soft: #4a4842;
+  --accent-muted: rgba(28, 27, 24, 0.08);
+  --ok: #3f6b3c;
+  --ok-soft: rgba(63, 107, 60, 0.1);
+  --warn: #8a6a2a;
+  --warn-soft: rgba(138, 106, 42, 0.1);
+  --danger: #9a4540;
+  --danger-soft: rgba(154, 69, 64, 0.1);
+  --focus: #2a2926;
+  --shadow-soft: none;
 }
 :root[data-theme="light"] .main {
-  background:
-    radial-gradient(900px 420px at 8% -8%, rgba(13, 148, 136, 0.07), transparent 55%),
-    linear-gradient(180deg, #e4ebf3 0%, var(--bg) 28%) !important;
+  background: var(--bg) !important;
 }
 :root[data-theme="light"] .sidebar {
-  background: linear-gradient(180deg, #ffffff 0%, #f3f6fa 40%) !important;
+  background: var(--bg) !important;
 }
 :root[data-theme="light"] .cc-hero {
-  background:
-    linear-gradient(135deg, rgba(13, 148, 136, 0.1) 0%, transparent 42%),
-    linear-gradient(180deg, #ffffff 0%, #f7fafc 100%) !important;
+  background: transparent !important;
 }
 :root[data-theme="light"] .cc-pill {
   background: rgba(255, 255, 255, 0.92);
@@ -52,11 +46,11 @@
   color: #166534;
 }
 :root[data-theme="light"] .stat-card {
-  background: linear-gradient(165deg, #ffffff 0%, #f4f7fb 100%);
+  background: var(--bg-panel);
   color: var(--ink);
 }
 :root[data-theme="light"] .readiness-item {
-  background: #ffffff;
+  background: var(--bg-panel);
   color: var(--ink);
 }
 :root[data-theme="light"] .palette-scrim {
@@ -77,7 +71,7 @@
 :root[data-theme="light"] input,
 :root[data-theme="light"] select,
 :root[data-theme="light"] textarea {
-  background: #ffffff;
+  background: var(--bg-raised);
   color: var(--ink);
   border-color: var(--edge-strong);
 }
@@ -292,7 +286,7 @@ kbd {
   padding-left: 7px;
 }
 
-.mobile-nav-btn {
+button.mobile-nav-btn {
   display: none;
 }
 .mobile-nav {
@@ -307,7 +301,7 @@ kbd {
   .sidebar {
     display: none;
   }
-  .mobile-nav-btn {
+  button.mobile-nav-btn {
     display: inline-flex;
   }
   .mobile-nav {

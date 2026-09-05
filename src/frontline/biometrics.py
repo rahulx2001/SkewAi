@@ -131,6 +131,8 @@ def match_caller(
             "entity_key": row[1],
             "greeting": greeting,
             "memory": mem,
+            "stub": True,
+            "note": "Pilot proxy: fingerprint is a hash of ANI/features, not a real speaker model.",
         }
     if mem:
         case_id = mem.get("last_case_id") or mem.get("case_id")
@@ -147,4 +149,4 @@ def match_caller(
             "greeting": greeting,
             "memory": mem,
         }
-    return {"matched": False, "source": None, "greeting": None, "memory": mem}
+    return {"matched": False, "source": None, "greeting": None, "memory": mem, "stub": True}

@@ -1,0 +1,109 @@
+{
+  "total_contacts": 100,
+  "overall_verdict": "green",
+  "metrics": {
+    "slots": {
+      "entity_1": {
+        "name": "slot_accuracy_entity_1",
+        "point_estimate": 0.95,
+        "ci_lower": 0.8882,
+        "ci_upper": 0.9785,
+        "rating": "green",
+        "target": ">= 0.90",
+        "detail": "95/100 matching human record"
+      },
+      "entity_2": {
+        "name": "slot_accuracy_entity_2",
+        "point_estimate": 0.94,
+        "ci_lower": 0.8752,
+        "ci_upper": 0.9722,
+        "rating": "green",
+        "target": ">= 0.90",
+        "detail": "94/100 matching human record"
+      },
+      "entity_3": {
+        "name": "slot_accuracy_entity_3",
+        "point_estimate": 0.96,
+        "ci_lower": 0.9016,
+        "ci_upper": 0.9843,
+        "rating": "green",
+        "target": ">= 0.90",
+        "detail": "96/100 matching human record"
+      },
+      "category": {
+        "name": "slot_accuracy_category",
+        "point_estimate": 0.94,
+        "ci_lower": 0.8752,
+        "ci_upper": 0.9722,
+        "rating": "green",
+        "target": ">= 0.90",
+        "detail": "94/100 matching human record"
+      }
+    },
+    "kill_switch": {
+      "precision": {
+        "name": "kill_switch_precision",
+        "point_estimate": 1.0,
+        "ci_lower": 0.6756,
+        "ci_upper": 1.0,
+        "rating": "green",
+        "target": ">= 0.85",
+        "detail": "TP=8, FP=0"
+      },
+      "recall": {
+        "name": "kill_switch_recall",
+        "point_estimate": 1.0,
+        "ci_lower": 0.6756,
+        "ci_upper": 1.0,
+        "rating": "green",
+        "target": ">= 0.98",
+        "detail": "TP=8, FN=0"
+      }
+    },
+    "severity_agreement": {
+      "name": "severity_agreement_kappa",
+      "point_estimate": 0.8946,
+      "ci_lower": 0.8193,
+      "ci_upper": 0.9699,
+      "rating": "green",
+      "target": "kappa >= 0.70",
+      "detail": "Evaluated across 100 human supervisor ratings"
+    },
+    "cluster_agreement": {
+      "top_1": {
+        "name": "cluster_agreement_top1",
+        "point_estimate": 0.75,
+        "ci_lower": 0.657,
+        "ci_upper": 0.8245,
+        "rating": "green",
+        "target": ">= 0.75 top-1",
+        "detail": "75/100 agreed with RCA engineer"
+      },
+      "top_3": {
+        "name": "cluster_agreement_top3",
+        "point_estimate": 0.94,
+        "ci_lower": 0.8752,
+        "ci_upper": 0.9722,
+        "rating": "green",
+        "target": ">= 0.85 top-3",
+        "detail": "94/100 engineer clusters in top-3 candidates"
+      }
+    },
+    "cost_per_contact": {
+      "name": "cost_per_contact",
+      "point_estimate": 0.0445,
+      "ci_lower": 0.0436,
+      "ci_upper": 0.0453,
+      "rating": "green",
+      "target": "<= $0.45",
+      "detail": "Mean=$0.0445, 95% CI=[$0.0436, $0.0453], p95=$0.0523"
+    }
+  },
+  "meta": {
+    "mode": "batch",
+    "pack_id": "automotive_nhtsa",
+    "sample_size": 100,
+    "seed": 42,
+    "target_cost_usd": 0.45
+  }
+}

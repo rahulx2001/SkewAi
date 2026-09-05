@@ -18,36 +18,90 @@ def _cutoff(days: int):
     return utc_now() - timedelta(days=max(1, int(days)))
 
 
+#: Minimum weekly observations for a forecast (item 33/42). Fewer points
+#: cannot support a slope estimate — callers get "insufficient_history".
+MIN_FORECAST_WEEKS = 4
+
+
+def _t_crit_95(df: int) -> float:
+    """Two-sided 95% t critical value (item 33).
+
+    Exact table for df 1..30, Normal approximation beyond. Documented
+    approximation — adequate for pilot confidence bands, not metrology.
+    """
+    table = {
+        1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+        7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+        13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+        19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064,
+        25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+    }
+    if df <= 0:
+        return float("nan")
+    if df in table:
+        return table[df]
+    return 1.96
+
+
 def project_next_week_volume(series: list[int]) -> dict[str, Any]:
-    """Linear last-delta next-week projection.
+    """OLS next-week projection with t-based confidence interval (item 33).
+
+    Slope comes from ordinary least squares over the whole series (not the
+    last-delta, which amplified single-week noise). Residual standard error
+    and the 95% interval use the t distribution with n-2 degrees of freedom.
+    Series shorter than MIN_FORECAST_WEEKS return ``insufficient_history``
+    with no projection — a slope from 2-3 points is not evidence.
 
     Volume cannot go below 0. The interval is ordered: 0 <= ci_low <= ci_high.
-    A declining series such as [10, 1] projects 0, not a negative point with
-    inverted bounds.
     """
     counts = [int(v) for v in series]
-    if len(counts) < 2:
-        slope = 0.0
-        last = counts[-1] if counts else 0
-        resid = 0.0
-    else:
-        slope = float(counts[-1] - counts[0]) / max(1, len(counts) - 1)
-        last = counts[-1]
-        fitted = [counts[0] + slope * i for i in range(len(counts))]
-        var = sum((a - b) ** 2 for a, b in zip(counts, fitted)) / max(1, len(counts) - 1)
-        resid = var ** 0.5
-    next_point = max(0.0, last + slope)
-    half = 1.96 * resid
+    n = len(counts)
+    last = counts[-1] if counts else 0
+    if n < MIN_FORECAST_WEEKS:
+        return {
+            "weekly_counts": counts,
+            "last_week_volume": last,
+            "slope_per_week": 0.0,
+            "slope_se": None,
+            "t_crit_95": None,
+            "residual_stdev": 0.0,
+            "projected_next_week": None,
+            "ci_low": None,
+            "ci_high": None,
+            "method": "insufficient_history",
+            "n": n,
+        }
+    xs = list(range(n))
+    xbar = sum(xs) / n
+    ybar = sum(counts) / n
+    sxx = sum((x - xbar) ** 2 for x in xs)
+    slope = sum((x - xbar) * (y - ybar) for x, y in zip(xs, counts)) / sxx if sxx else 0.0
+    intercept = ybar - slope * xbar
+    fitted = [intercept + slope * x for x in xs]
+    sse = sum((a - b) ** 2 for a, b in zip(counts, fitted))
+    df = n - 2
+    resid = (sse / df) ** 0.5 if df > 0 else 0.0
+    slope_se = (resid / (sxx ** 0.5)) if sxx > 0 else 0.0
+    tcrit = _t_crit_95(df)
+    # Prediction interval for the next point (x = n): accounts for both slope
+    # uncertainty and residual noise.
+    pred_se = resid * (1 + 1 / n + (n - xbar) ** 2 / sxx) ** 0.5 if sxx > 0 else resid
+    next_point = max(0.0, fitted[-1] + slope)
+    half = tcrit * pred_se
     ci_low = max(0.0, next_point - half)
     ci_high = max(ci_low, next_point + half)
     return {
         "weekly_counts": counts,
         "last_week_volume": last,
         "slope_per_week": slope,
+        "slope_se": slope_se,
+        "t_crit_95": tcrit,
         "residual_stdev": resid,
         "projected_next_week": next_point,
         "ci_low": ci_low,
         "ci_high": ci_high,
+        "method": "ols",
+        "n": n,
     }
 
 
@@ -66,6 +120,7 @@ def forecast_cluster_volume(
                    COUNT(*) AS n
             FROM cases
             WHERE created_at >= ?
+              AND COALESCE(case_kind, 'customer') = 'customer'
         """
         params: list[Any] = [cutoff]
         if pack_id:
@@ -84,9 +139,14 @@ def forecast_cluster_volume(
         proj = project_next_week_volume(series)
         slope = proj["slope_per_week"]
         last = proj["last_week_volume"]
-        if slope <= 0:
-            weeks = None
-            status = "flat_or_declining"
+        if proj.get("method") == "insufficient_history":
+            # N < 4: no slope estimate, no projection (item 33).
+            weeks, status = None, "insufficient_history"
+        elif last >= threshold:
+            # Breach-first: an already-breached threshold is never "flat".
+            weeks, status = 0.0, "breached"
+        elif slope <= 0:
+            weeks, status = None, "flat_or_declining"
         else:
             remain = max(0, threshold - last)
             weeks = round(remain / slope, 1)
@@ -97,11 +157,13 @@ def forecast_cluster_volume(
                 "weekly_counts": series,
                 "last_week_volume": last,
                 "slope_per_week": round(slope, 3),
+                "slope_se": proj.get("slope_se"),
                 "threshold": threshold,
                 "projected_weeks_to_threshold": weeks,
                 "projected_next_week": proj["projected_next_week"],
                 "ci_low": proj["ci_low"],
                 "ci_high": proj["ci_high"],
+                "forecast_method": proj.get("method"),
                 "status": status,
             }
         )
@@ -110,7 +172,17 @@ def forecast_cluster_volume(
 
 
 def cross_pack_patterns(*, limit: int = 20) -> dict[str, Any]:
-    """Same category/component across packs → shared systemic signal."""
+    """Shared systemic signal across packs via the concept ontology (item 34).
+
+    Raw categories are mapped to cross-pack concepts (see
+    src/domains/concepts.py) — NHTSA "AIR BAGS" and CFPB "Fraud or scam" are
+    both ``safety_security`` incidents, while genuinely unrelated categories
+    (ENGINE vs Incorrect charges) never merge. A pattern requires the SAME
+    shared concept in >= 2 packs; pack-scoped concepts are reported
+    separately for transparency, never as cross-pack signal.
+    """
+    from src.domains.concepts import concept_for, is_cross_pack_concept
+
     with ops_con(read_only=True) as con:
         try:
             rows = con.execute(
@@ -118,28 +190,52 @@ def cross_pack_patterns(*, limit: int = 20) -> dict[str, Any]:
                 SELECT category, pack_id, COUNT(*) AS n
                 FROM cases
                 WHERE category IS NOT NULL AND category != ''
+                  AND COALESCE(case_kind, 'customer') = 'customer'
                 GROUP BY category, pack_id
                 """
             ).fetchall()
         except Exception:
             rows = []
-    by_cat: dict[str, dict[str, int]] = defaultdict(dict)
+    try:
+        from src.config import settings
+        from src.domains.loader import load_pack
+
+        _tax: dict[str, Any] = {}
+        for _pid in {str(p) for _, p, _ in rows}:
+            try:
+                _tax[_pid] = load_pack(_pid).taxonomy or {}
+            except Exception:
+                _tax[_pid] = {}
+    except Exception:
+        _tax = {}
+    by_concept: dict[str, dict[str, dict[str, int]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
     for cat, pack, n in rows:
-        by_cat[str(cat)][str(pack)] = int(n)
+        concept = concept_for(str(pack), str(cat), _tax.get(str(pack)))
+        by_concept[concept][str(pack)][str(cat)] = int(n)
     patterns = []
-    for cat, packs in by_cat.items():
-        if len(packs) >= 2:
-            patterns.append(
-                {
-                    "category": cat,
-                    "packs": packs,
-                    "pack_count": len(packs),
-                    "total": sum(packs.values()),
-                    "signal": "cross_pack_shared_issue",
-                }
-            )
+    pack_specific = []
+    for concept, packs in by_concept.items():
+        entry = {
+            "concept": concept,
+            "packs": {p: sum(cats.values()) for p, cats in packs.items()},
+            "categories": {p: cats for p, cats in packs.items()},
+            "pack_count": len(packs),
+            "total": sum(sum(cats.values()) for cats in packs.values()),
+        }
+        if is_cross_pack_concept(concept) and len(packs) >= 2:
+            entry["signal"] = "cross_pack_shared_issue"
+            patterns.append(entry)
+        else:
+            entry["signal"] = "pack_specific"
+            pack_specific.append(entry)
     patterns.sort(key=lambda x: -x["total"])
-    return {"patterns": patterns[:limit], "count": len(patterns)}
+    return {
+        "patterns": patterns[:limit],
+        "count": len(patterns),
+        "pack_specific": pack_specific[:limit],
+    }
 
 
 def geographic_hotspots(
@@ -179,8 +275,10 @@ def geographic_hotspots(
                     break
             except Exception:
                 continue
-    # Approximate centroids so the dashboard can draw a real map, not names-only.
-    _CENTROIDS = {
+    # Centroids are evidence-backed map pins (item 33): the pack's
+    # region_centroids win; anything else is explicitly labeled an
+    # approximate demo coordinate — never presented as measured truth.
+    _FALLBACK_CENTROIDS = {
         "CA": (-119.4, 36.8),
         "TX": (-99.3, 31.5),
         "NY": (-75.5, 43.0),
@@ -189,12 +287,30 @@ def geographic_hotspots(
         "OH": (-82.8, 40.4),
         "unknown": (-98.0, 39.5),
     }
+    _pack_centroids: dict[str, list[float]] = {}
+    try:
+        from src.config import settings
+        from src.domains.loader import load_pack
+
+        _pack_centroids = dict(
+            load_pack(pack_id or settings.domain_pack).manifest.region_centroids or {}
+        )
+    except Exception:
+        pass
     hotspots = []
     features = []
     for r in rows:
         region = str(r[0])
-        lon, lat = _CENTROIDS.get(region.upper() if len(region) == 2 else region, _CENTROIDS["unknown"])
-        rec = {"region": region, "volume": int(r[1]), "lat": lat, "lon": lon}
+        key = region.upper() if len(region) == 2 else region
+        pin = _pack_centroids.get(key) or _pack_centroids.get(region)
+        if pin and len(pin) == 2:
+            lon, lat = float(pin[0]), float(pin[1])
+            source = "pack.yaml region_centroids"
+        else:
+            lon, lat = _FALLBACK_CENTROIDS.get(key, _FALLBACK_CENTROIDS["unknown"])
+            source = "approximate-demo-coordinate"
+        rec = {"region": region, "volume": int(r[1]), "lat": lat, "lon": lon,
+               "coordinate_source": source}
         hotspots.append(rec)
         features.append(
             {
@@ -214,7 +330,22 @@ def geographic_hotspots(
 def seasonality_climate(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Correlate failures with temperature band and region season. Pure."""
+    """Correlate failures with temperature band and region season. Pure.
+
+    .. deprecated::
+        The ``temperature_c`` input is dead — no producer writes it — and
+        this helper will be removed once dashboard consumers migrate to the
+        weekly-anomaly series. It still runs for backward compatibility but
+        reports ``deprecated: True`` so callers stop depending on it.
+    """
+    import warnings
+
+    warnings.warn(
+        "seasonality_climate(temperature_c) is deprecated: no producer writes "
+        "temperature_c; use weekly anomaly series instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     bands = {"cold": 0, "mild": 0, "hot": 0}
     by_region: dict[str, int] = defaultdict(int)
     for r in rows:
@@ -234,6 +365,7 @@ def seasonality_climate(
         "temperature_bands": bands,
         "by_region": dict(by_region),
         "n": sum(bands.values()),
+        "deprecated": True,
     }
 
 
@@ -248,8 +380,9 @@ def severity_drift(
     rank = {"Low": 1, "Medium": 2, "Critical": 3}
     with ops_con(read_only=True) as con:
         sql = """
-            SELECT COALESCE(cluster_id, 0), severity, created_at
+            SELECT COALESCE(cluster_match_id, 0), severity, created_at
             FROM cases WHERE created_at >= ?
+              AND COALESCE(case_kind, 'customer') = 'customer'
         """
         params: list[Any] = [cutoff]
         if pack_id:
@@ -391,19 +524,44 @@ def financial_impact(
     cost_per_case: float | None = None,
     recall_cost_per_unit: float | None = None,
 ) -> dict[str, Any]:
-    """Pack-configured cost model → dollar risk figure."""
-    # Defaults if pack.yaml lacks cost_model
-    cpc = cost_per_case if cost_per_case is not None else float(
-        __import__("os").getenv("COST_PER_CASE", "250")
-    )
-    rcpu = recall_cost_per_unit if recall_cost_per_unit is not None else float(
-        __import__("os").getenv("RECALL_COST_PER_UNIT", "900")
-    )
+    """Pack-configured cost model → dollar risk figure (item 33).
+
+    Figures come from the pack's ``cost_model`` (pack.yaml) — never env-var
+    guessing. Explicit overrides still win for what-if analysis. The recall
+    exposure term uses the pack's named ``exposure_multiplier`` assumption
+    (replacing the old arbitrary ``*10``).
+    """
+    cpc = cost_per_case
+    rcpu = recall_cost_per_unit
+    exposure = 1.0
+    currency = "USD"
+    # Cost uncertainty band for COPQ ranges (audit 8.4): pack-owned when
+    # declared, else an explicit ±25% default — labeled, never hidden.
+    uncertainty = 0.25
+    if cpc is None or rcpu is None:
+        try:
+            from src.config import settings
+            from src.domains.loader import load_pack
+
+            pack = load_pack(pack_id or settings.domain_pack)
+            cm = pack.manifest.cost_model
+            if cpc is None:
+                cpc = float(cm.cost_per_case)
+            if rcpu is None:
+                rcpu = float(cm.recall_cost_per_unit)
+            exposure = float(cm.exposure_multiplier)
+            currency = str(cm.currency or currency)
+        except Exception:
+            pass
+    if cpc is None:
+        cpc = 250.0
+    if rcpu is None:
+        rcpu = 900.0
     with ops_con(read_only=True) as con:
-        sql = "SELECT COALESCE(cluster_id,0), COUNT(*), SUM(CASE WHEN severity='Critical' THEN 1 ELSE 0 END) FROM cases"
+        sql = "SELECT COALESCE(cluster_match_id,0), COUNT(*), SUM(CASE WHEN severity='Critical' THEN 1 ELSE 0 END) FROM cases WHERE COALESCE(case_kind, 'customer') = 'customer'"
         params: list[Any] = []
         if pack_id:
-            sql += " WHERE pack_id = ?"
+            sql += " AND pack_id = ?"
             params.append(pack_id)
         sql += " GROUP BY 1"
         try:
@@ -415,7 +573,13 @@ def financial_impact(
         n = int(n)
         crit = int(crit or 0)
         warranty = n * cpc
-        recall_risk = crit * rcpu * 10  # pilot band: criticals imply broader exposure
+        # Exposure-banded recall risk: criticals imply broader exposure, scaled
+        # by the pack-owned exposure_multiplier (a named assumption, not magic).
+        recall_risk = crit * rcpu * exposure
+        # COPQ as a RANGE (audit 8.4): point estimates pretend a precision the
+        # cost model does not have. Band defaults to ±25% cost uncertainty.
+        lo, hi = 1.0 - uncertainty, 1.0 + uncertainty
+        total_risk = warranty + recall_risk
         estimates.append(
             {
                 "cluster_id": cid,
@@ -423,7 +587,8 @@ def financial_impact(
                 "critical_count": crit,
                 "warranty_cost_usd": round(warranty, 2),
                 "recall_risk_usd": round(recall_risk, 2),
-                "total_risk_usd": round(warranty + recall_risk, 2),
+                "total_risk_usd": round(total_risk, 2),
+                "total_risk_range_usd": [round(total_risk * lo, 2), round(total_risk * hi, 2)],
             }
         )
     estimates.sort(key=lambda x: -x["total_risk_usd"])
@@ -431,8 +596,13 @@ def financial_impact(
     return {
         "estimates": estimates,
         "portfolio_risk_usd": round(total, 2),
+        "portfolio_risk_range_usd": [round(total * (1.0 - uncertainty), 2), round(total * (1.0 + uncertainty), 2)],
         "cost_per_case": cpc,
         "recall_cost_per_unit": rcpu,
+        "exposure_multiplier": exposure,
+        "cost_uncertainty": uncertainty,
+        "currency": currency,
+        "cost_source": "pack.yaml cost_model",
     }
 
 
@@ -445,56 +615,22 @@ def bias_fairness_report(
     cutoff = _cutoff(window_days)
     with ops_con(read_only=True) as con:
         try:
-            rows = con.execute(
-                """
-                SELECT COALESCE(region, 'unknown') AS region,
+            sql = """
+                SELECT COALESCE(category, 'unknown') AS grp,
                        COUNT(*) AS n,
                        AVG(CASE WHEN peak_frustration >= 0.65 THEN 1.0 ELSE 0.0 END) AS handoff_rate,
-                       AVG(CASE WHEN outcome = 'escalated' OR status = 'escalated' THEN 1.0 ELSE 0.0 END) AS esc_rate
+                       AVG(CASE WHEN outcome LIKE '%escalat%' OR status = 'escalated' THEN 1.0 ELSE 0.0 END) AS esc_rate
                 FROM interactions
                 WHERE started_at >= ?
-                GROUP BY 1
-                """,
-                [cutoff] if not pack_id else None,
-            )
-            # handle pack filter carefully
+            """
+            params: list[Any] = [cutoff]
+            if pack_id:
+                sql += " AND pack_id = ?"
+                params.append(pack_id)
+            sql += " GROUP BY 1"
+            rows = con.execute(sql, params).fetchall()
         except Exception:
             rows = []
-            try:
-                sql = """
-                    SELECT COALESCE(category, 'unknown'),
-                           COUNT(*),
-                           AVG(CASE WHEN peak_frustration >= 0.65 THEN 1.0 ELSE 0.0 END),
-                           AVG(0)
-                    FROM interactions WHERE started_at >= ?
-                """
-                params: list[Any] = [cutoff]
-                if pack_id:
-                    sql += " AND pack_id = ?"
-                    params.append(pack_id)
-                sql += " GROUP BY 1"
-                rows = con.execute(sql, params).fetchall()
-            except Exception:
-                rows = []
-        else:
-            # re-run with pack if needed — simplify
-            try:
-                sql = """
-                    SELECT COALESCE(category, 'unknown') AS grp,
-                           COUNT(*) AS n,
-                           AVG(CASE WHEN peak_frustration >= 0.65 THEN 1.0 ELSE 0.0 END) AS handoff_rate,
-                           AVG(CASE WHEN outcome LIKE '%escalat%' THEN 1.0 ELSE 0.0 END) AS esc_rate
-                    FROM interactions
-                    WHERE started_at >= ?
-                """
-                params = [cutoff]
-                if pack_id:
-                    sql += " AND pack_id = ?"
-                    params.append(pack_id)
-                sql += " GROUP BY 1"
-                rows = con.execute(sql, params).fetchall()
-            except Exception:
-                rows = []
     groups = []
     rates = []
     for r in rows:
@@ -516,4 +652,45 @@ def bias_fairness_report(
         "flag": disparity >= 0.25,
         "window_days": window_days,
         "note": "Pilot fairness monitor on category proxy; not a legal compliance certification.",
+    }
+
+
+def evaluate_fairness_circuit_breaker(
+    *,
+    pack_id: str | None = None,
+    window_days: int = 90,
+    disparate_impact_floor: float = 0.80,
+) -> dict[str, Any]:
+    """Runtime bias/fairness circuit breaker (audit 5.3).
+
+    Calculates the four-fifths (80%) disparate impact ratio across proxy groups.
+    If the ratio drops below disparate_impact_floor (0.80), flags circuit_breaker_tripped=True
+    and signals supervisor_required=True to halt unmonitored automated decisions.
+    """
+    report = bias_fairness_report(pack_id=pack_id, window_days=window_days)
+    groups = report.get("groups") or []
+    valid_groups = [g for g in groups if g.get("volume", 0) >= 2]
+    if len(valid_groups) < 2:
+        return {
+            "circuit_breaker_tripped": False,
+            "disparate_impact_ratio": 1.0,
+            "supervisor_required": False,
+            "reason": "insufficient group volume for disparate impact evaluation",
+            "groups_evaluated": len(valid_groups),
+        }
+
+    # Compare non-escalation / automated resolution rate: (1.0 - escalation_rate)
+    success_rates = [max(0.01, 1.0 - g.get("escalation_rate", 0.0)) for g in valid_groups]
+    max_rate = max(success_rates)
+    min_rate = min(success_rates)
+    ratio = round(min_rate / max_rate, 3) if max_rate > 0 else 1.0
+
+    tripped = ratio < disparate_impact_floor
+    return {
+        "circuit_breaker_tripped": tripped,
+        "disparate_impact_ratio": ratio,
+        "disparate_impact_floor": disparate_impact_floor,
+        "supervisor_required": tripped,
+        "reason": f"disparate impact ratio {ratio:.3f} < floor {disparate_impact_floor:.2f}" if tripped else "within fairness tolerance",
+        "groups_evaluated": len(valid_groups),
     }

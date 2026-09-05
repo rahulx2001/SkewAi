@@ -20,11 +20,12 @@ from src.config import settings
 from src.ledger import record_action
 
 
-# ── Mini VADER-style lexicon ──────────────────────────────────────────────
-# Tuned for support-call frustration. Negative values indicate frustration;
-# compound score is normalized to [0, 1] where 1 = maximally frustrated.
+# ── Mini friction lexicon (heuristic, not VADER/ML) ─────────────────────────
+# Tuned for support-call frustration. Scores in [0,1] where 1 = maximally
+# frustrated. Thresholds live in settings.frustration_threshold.
+# NOTE: intensifiers below are MULTIPLIERS ONLY (never standalone hits).
 
-_LEXICON: dict[str, float] = {
+_FRUSTRATION_LEXICON: dict[str, float] = {
     # anger / frustration
     "angry": 0.9, "furious": 1.0, "outraged": 1.0, "mad": 0.8,
     "frustrated": 0.85, "frustrating": 0.85, "annoyed": 0.7, "annoying": 0.7,
@@ -39,13 +40,17 @@ _LEXICON: dict[str, float] = {
     # safety / urgency
     "dangerous": 0.9, "unsafe": 0.9, "scared": 0.8, "terrified": 0.95,
     "could have died": 1.0, "almost crashed": 0.95, "could have been killed": 1.0,
-    # intensifiers (multiplied in scoring)
-    "really": 1.15, "very": 1.15, "extremely": 1.2, "absolutely": 1.2,
-    "completely": 1.15, "totally": 1.1, "incredibly": 1.2,
     # negation dampeners
     "not happy": 0.7, "not satisfied": 0.75, "not impressed": 0.7,
     # exclamation / caps handled separately
 }
+
+_INTENSIFIERS: dict[str, float] = {
+    "really": 1.15, "very": 1.15, "extremely": 1.2, "absolutely": 1.2,
+    "completely": 1.15, "totally": 1.1, "incredibly": 1.2,
+}
+# Back-compat alias (tests/imports may reference _LEXICON)
+_LEXICON = _FRUSTRATION_LEXICON
 
 # Punctuation / caps multipliers
 _EXCLAM_CAPS_BUMP = 0.15
@@ -61,18 +66,13 @@ def score_text(text: str) -> float:
         return 0.0
     lower = text.lower()
 
-    # ── Lexicon hit scoring ──────────────────────────────────────────────
+    # ── Lexicon hit scoring (whole-word always; intensifiers excluded) ────
     hits: list[float] = []
-    for term, score in _LEXICON.items():
-        # Count occurrences of the term (whole-word-ish for short terms).
-        if " " in term or len(term) > 4:
-            count = lower.count(term)
-        else:
-            # word boundary for single words
-            import re
-            count = len(re.findall(rf"\b{re.escape(term)}\b", lower))
+    for term, score in _FRUSTRATION_LEXICON.items():
+        import re
+        count = len(re.findall(rf"\b{re.escape(term)}\b", lower))
         if count:
-            hits.append(score * count)
+            hits.append(min(1.0, score) if count == 1 else min(1.0, score + 0.05 * (count - 1)))
 
     if not hits:
         base = 0.0
@@ -81,6 +81,12 @@ def score_text(text: str) -> float:
         base = max(hits)
         if len(hits) > 1:
             base = min(1.0, base + 0.05 * (len(hits) - 1))
+        # Intensifier multiplier ONLY when co-occurring with a real hit
+        for term, mult in _INTENSIFIERS.items():
+            import re
+            if re.search(rf"\b{re.escape(term)}\b", lower):
+                base = min(1.0, base * mult)
+                break
 
     # ── Punctuation / caps ─────────────────────────────────────────────────
     excl = text.count("!")
@@ -94,9 +100,12 @@ def score_text(text: str) -> float:
         base = min(1.0, base + _ALLCAPS_BUMP * min(len(caps_words), 3) / 3)
 
     # ── Profanity proxy ──────────────────────────────────────────────────
-    # Crude check: presence of "$", "*", "@", "#" in clusters signals redaction
-    # of profanity in customer transcripts. Bump slightly.
-    if any(ch in text for ch in ("$*@#")):
+    # Crude check: 2+ consecutive masking chars (@ or #) suggest redacted
+    # profanity. A single @ (emails) or single # (case #123) must NOT
+    # trigger — the {2,} consecutive-symbol rule is the whole discriminator.
+    import re as _re2
+
+    if _re2.search(r"[@#]{2,}", text):
         base = min(1.0, base + 0.1)
 
     return round(base, 3)
@@ -106,7 +115,16 @@ def score_text(text: str) -> float:
 
 
 class SentimentAgent(Agent):
-    """Scores customer turns and tracks rolling frustration."""
+    """Scores customer turns and tracks rolling frustration.
+
+    Trigger policy (documented for item 28): the handoff fires on the
+    ROLLING 3-turn average crossing the threshold, while ``peak`` records
+    the max single-turn score. A single 1.0 turn therefore raises ``peak``
+    immediately (visible on the console) but pages a human only when
+    frustration is sustained across the window — one angry word is not a
+    page. This preserves the existing rolling-only compatibility behavior
+    deliberately: paging on every spike caused alert fatigue in pilots.
+    """
 
     name = "sentiment"
 
@@ -121,7 +139,7 @@ class SentimentAgent(Agent):
                 turn["frustration_score"] = score
                 break
 
-        # Rolling avg of last 3 customer turns
+        # Rolling avg of last 3 customer turns + true single-turn peak
         recent_scores = [
             t.get("frustration_score", 0.0)
             for t in ctx.turns
@@ -129,10 +147,16 @@ class SentimentAgent(Agent):
         ][-3:]
         rolling = sum(recent_scores) / len(recent_scores) if recent_scores else 0.0
         ctx.frustration_score = round(rolling, 3)
+        # peak = max single-turn score ever (not rolling avg — a single 1.0
+        # must not be diluted to 0.33 by two prior 0.0s).
+        if score > ctx.peak_frustration:
+            ctx.peak_frustration = round(score, 3)
         if rolling > ctx.peak_frustration:
             ctx.peak_frustration = round(rolling, 3)
 
-        # Threshold crossing — fires once per interaction
+        # Threshold crossing — fires once per interaction on rolling avg.
+        # (Single-turn spikes raise peak immediately above but only trip the
+        # handoff when sustained across the 3-turn window — see test_threshold.)
         triggered = (
             not ctx.frustration_flagged
             and rolling >= settings.frustration_threshold

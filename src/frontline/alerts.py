@@ -17,6 +17,7 @@ Events:
   - early_warning_threshold (cluster live-risk crosses threshold)
   - groundedness_mismatch   (from Qubot auditor)
   - takeover_started
+  - job_queue_stuck         (SLO: queue depth / stuck running workers)
 """
 
 from __future__ import annotations
@@ -216,6 +217,7 @@ def _format_slack(event: str, summary: str, ref_id: str, extra: dict[str, Any] |
         "early_warning_threshold": "📈",
         "groundedness_mismatch": "⚠️",
         "takeover_started": "👤",
+        "job_queue_stuck": "🧵",
     }.get(event, "🔔")
     text = f"{icon} *{event.replace('_', ' ').title()}* — {summary}"
     payload: dict[str, Any] = {"text": text}

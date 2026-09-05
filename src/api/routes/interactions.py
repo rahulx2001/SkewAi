@@ -27,11 +27,12 @@ from src.agents.orchestrator import (
     OrchestratorHooks,
     create_interaction,
 )
-from src.api.auth import authenticate_websocket, check_api_key, require_api_key
+from src.api.auth import authenticate_websocket, require_api_key
 from src.api.frontline_gate import frontline_enabled
 from src.api.limiter import limiter
+from src.api.rbac import get_actor, require_perm, require_perm_dep, role_from_websocket
 from src.channels.web_voice import WebVoiceChannel
-from src.data.warehouse import ops_con
+from src.data.warehouse import ops_con, ops_in_thread
 
 router = APIRouter(
     prefix="/api/interactions",
@@ -46,9 +47,28 @@ router = APIRouter(
 
 # ── In-memory registry of active orchestrators (one per interaction) ─────────
 # Exclusive customer WS attach; per-entry lock for turn/takeover races;
-# orphan TTL reaps start-without-WS entries.
+# orphan TTL reaps start-without-WS entries; a reconnect grace window keeps a
+# dropped-but-not-hung-up contact resumable so the browser can re-attach.
 
 _ORPHAN_TTL_S = 300.0  # 5 minutes without customer WS attach
+
+
+def _reconnect_grace_s() -> float:
+    """Seconds a dropped customer WS may stay resumable before the contact is closed.
+
+    The dashboard retries with backoff for ~15s across 5 attempts, so the default
+    leaves plenty of head-room for a tab throttle / wifi blip. Set to 0 to restore
+    the old behaviour (drop == hangup).
+    """
+    import os
+
+    raw = os.getenv("FRONTLINE_WS_RECONNECT_GRACE_S", "").strip()
+    if not raw:
+        return 120.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 120.0
 
 
 @dataclass
@@ -57,6 +77,9 @@ class ActiveEntry:
     created_at: float = field(default_factory=time.monotonic)
     ws_attached: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # monotonic time the customer WS dropped without a hangup (None = never attached
+    # or currently attached). Entries past the reconnect grace are reaped.
+    detached_at: float | None = None
 
 
 _active: dict[str, ActiveEntry] = {}
@@ -70,6 +93,34 @@ def _json_safe(value: Any) -> Any:
     return _js(value)
 
 
+def normalize_activity_payload(
+    payload: dict[str, Any], *, interaction_id: str | None = None
+) -> dict[str, Any]:
+    """One wire shape for live broadcast and DB-poll ``agent_activity`` frames."""
+    summary = (
+        payload.get("output_summary")
+        or payload.get("summary")
+        or payload.get("input_summary")
+        or ""
+    )
+    iid = interaction_id or payload.get("interaction_id") or ""
+    frame = {
+        "type": "agent_activity",
+        "interaction_id": iid,
+        "action_id": payload.get("action_id") or "",
+        "agent": payload.get("agent"),
+        "action_type": payload.get("action_type"),
+        "summary": summary,
+        "output_summary": summary,
+        "input_summary": payload.get("input_summary") or "",
+        "evidence_ids": payload.get("evidence_ids") or [],
+        "ok": payload.get("ok", True),
+        "ts": payload.get("ts"),
+        "duration_ms": payload.get("duration_ms"),
+    }
+    return {k: _json_safe(v) for k, v in frame.items() if v is not None}
+
+
 def activity_frame_from_row(row: dict[str, Any]) -> dict[str, Any]:
     """Build a console ``agent_activity`` payload safe for ``send_json``."""
     r = dict(row)
@@ -79,26 +130,29 @@ def activity_frame_from_row(row: dict[str, Any]) -> dict[str, Any]:
             r["evidence_ids"] = json.loads(ev)
         except json.JSONDecodeError:
             r["evidence_ids"] = []
-    return {"type": "agent_activity", **{k: _json_safe(v) for k, v in r.items()}}
+    return normalize_activity_payload(r, interaction_id=str(r.get("interaction_id") or ""))
 
 
-def fetch_agent_actions_since(since: datetime, limit: int = 50) -> list[dict[str, Any]]:
-    """Load agent_actions newer than ``since`` (real ops path used by console WS)."""
+def fetch_agent_actions_since(
+    since: datetime, limit: int = 50, after_action_id: str = ""
+) -> list[dict[str, Any]]:
+    """Load agent_actions newer than ``(since, after_action_id)`` (console catch-up)."""
     from src.data.timeutil import to_naive_utc
 
     # Compare on naive-UTC basis so session TZ cannot drop recent rows.
     since_n = to_naive_utc(since)
+    after_id = after_action_id or ""
     with ops_con(read_only=True) as con:
         cur = con.execute(
             """
             SELECT action_id, interaction_id, agent, action_type,
                    output_summary, evidence_ids, ts
             FROM agent_actions
-            WHERE ts > ?
-            ORDER BY ts
+            WHERE ts > ? OR (ts = ? AND action_id > ?)
+            ORDER BY ts, action_id
             LIMIT ?
             """,
-            [since_n, limit],
+            [since_n, since_n, after_id, limit],
         )
         cols = [d[0] for d in con.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -139,14 +193,31 @@ def _sweep_stale_active_db_rows(registry_ids: set[str] | None = None) -> list[st
     return closed
 
 
-async def _reap_orphans_unlocked() -> list[str]:
-    """Drop registry entries that never attached a WS within TTL. Caller holds _active_lock."""
+def _is_reapable(entry: ActiveEntry, now: float, grace_s: float) -> bool:
+    """True when an unattached entry has outlived its window.
+
+    Two distinct windows:
+      * never attached a customer WS   → ``_ORPHAN_TTL_S`` from creation
+      * WS dropped without a hangup    → ``grace_s`` from the drop (reconnect window)
+    """
+    if entry.ws_attached:
+        return False
+    if entry.detached_at is not None:
+        return (now - entry.detached_at) > grace_s
+    return (now - entry.created_at) > _ORPHAN_TTL_S
+
+
+async def _reap_orphans_unlocked(*, sweep_db: bool = False) -> list[str]:
+    """Drop registry entries past their orphan TTL / reconnect grace.
+
+    Caller holds ``_active_lock``. In-memory pops stay on the lock; DuckDB
+    writes are scheduled off the loop so ``_attach_customer_ws`` cannot stall
+    between ``websocket.accept()`` and ``ws_attached=True``.
+    """
     now = time.monotonic()
-    dead = [
-        iid
-        for iid, e in _active.items()
-        if (not e.ws_attached) and (now - e.created_at) > _ORPHAN_TTL_S
-    ]
+    grace_s = _reconnect_grace_s()
+    dead = [iid for iid, e in _active.items() if _is_reapable(e, now, grace_s)]
+    db_marks: list[tuple[str, str]] = []
     for iid in dead:
         entry = _active.pop(iid, None)
         if entry is None:
@@ -156,31 +227,52 @@ async def _reap_orphans_unlocked() -> list[str]:
                 await entry.orch.hangup()
         except Exception:
             pass
+        reason = "reconnect_timeout" if entry.detached_at is not None else "orphan_timeout"
+        db_marks.append((iid, reason))
+    live = set(_active.keys())
+    # Handoff SLA sweep (audit 2.4): unclaimed queued handoffs resume the AI.
+    for entry in list(_active.values()):
         try:
-            from src.data.timeutil import utc_now
-
-            with ops_con() as con:
-                con.execute(
-                    """
-                    UPDATE interactions
-                    SET status = 'failed',
-                        ended_at = COALESCE(ended_at, ?),
-                        outcome = COALESCE(outcome, 'orphan_timeout')
-                    WHERE interaction_id = ? AND status = 'active'
-                    """,
-                    [utc_now(), iid],
-                )
+            if entry.orch.ctx.state == "HANDOFF_PENDING":
+                await entry.orch.sweep_handoff_timeout()
         except Exception:
             pass
-    # Also close DB-only zombies that no longer have a registry entry.
-    dead.extend(_sweep_stale_active_db_rows(set(_active.keys())))
+    try:
+        loop = asyncio.get_running_loop()
+        for iid, reason in db_marks:
+            loop.create_task(ops_in_thread(_mark_interaction_failed_sync, iid, reason))
+    except Exception:
+        pass
+    if sweep_db:
+        try:
+            extra = await ops_in_thread(_sweep_stale_active_db_rows, live)
+            dead.extend(extra)
+        except Exception:
+            pass
     return dead
 
 
 async def reap_orphans() -> list[str]:
     """Public reaper (startup / tests): registry TTL + DB active-row sweep."""
     async with _active_lock:
-        return await _reap_orphans_unlocked()
+        return await _reap_orphans_unlocked(sweep_db=True)
+
+
+async def reaper_loop(interval_s: float = 30.0) -> None:
+    """Background sweep so a contact whose client never returns still finalizes.
+
+    Without this the reaper only runs when something else touches the registry,
+    so a dropped call with no follow-up traffic would sit ``status='active'``
+    until the next start/end request.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            await reap_orphans()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
 
 
 async def _get_entry(interaction_id: str) -> ActiveEntry:
@@ -192,10 +284,6 @@ async def _get_entry(interaction_id: str) -> ActiveEntry:
             status_code=404, detail=f"active interaction not found: {interaction_id}"
         )
     return entry
-
-
-async def _get_active(interaction_id: str) -> Orchestrator:
-    return (await _get_entry(interaction_id)).orch
 
 
 async def _register(interaction_id: str, orch: Orchestrator) -> None:
@@ -210,8 +298,15 @@ async def _unregister(interaction_id: str) -> None:
         _active.pop(interaction_id, None)
 
 
-async def _attach_customer_ws(interaction_id: str) -> ActiveEntry:
-    """Exclusive attach: second customer WS is rejected with 409 semantics."""
+async def _attach_customer_ws(interaction_id: str) -> tuple[ActiveEntry, bool]:
+    """Exclusive attach: second *concurrent* customer WS is rejected (409).
+
+    A socket that dropped without a hangup leaves the entry in the registry with
+    ``ws_attached=False``; re-attaching within the reconnect grace resumes the
+    same orchestrator instead of 404-ing the caller.
+
+    Returns ``(entry, resumed)`` where ``resumed`` is True for a re-attach.
+    """
     async with _active_lock:
         await _reap_orphans_unlocked()
         entry = _active.get(interaction_id)
@@ -224,26 +319,69 @@ async def _attach_customer_ws(interaction_id: str) -> ActiveEntry:
                 status_code=409,
                 detail=f"interaction already has an active customer WebSocket: {interaction_id}",
             )
+        if entry.orch.ctx.state in ("DONE", "ABANDONED"):
+            # Finished while the client was away — nothing to resume.
+            _active.pop(interaction_id, None)
+            raise HTTPException(
+                status_code=404, detail=f"interaction already ended: {interaction_id}"
+            )
+        resumed = entry.detached_at is not None
         entry.ws_attached = True
-        return entry
+        entry.detached_at = None
+        return entry, resumed
+
+
+async def _detach_customer_ws(interaction_id: str) -> None:
+    """Release the exclusive attach but keep the contact resumable.
+
+    Used when the socket drops without an explicit hangup (wifi blip, tab
+    throttle, proxy idle timeout). The reconnect grace window in the reaper
+    finalizes the contact if the browser never comes back.
+    """
+    async with _active_lock:
+        entry = _active.get(interaction_id)
+        if entry is None:
+            return
+        entry.ws_attached = False
+        entry.detached_at = time.monotonic()
+
+
+def _mark_interaction_failed_sync(interaction_id: str, reason: str) -> None:
+    from src.data.timeutil import utc_now
+
+    with ops_con() as con:
+        con.execute(
+            """
+            UPDATE interactions
+            SET status = 'failed',
+                ended_at = COALESCE(ended_at, ?),
+                outcome = COALESCE(outcome, ?)
+            WHERE interaction_id = ? AND status = 'active'
+            """,
+            [utc_now(), reason[:200], interaction_id],
+        )
+
+
+def _mark_failed_sync(interaction_id: str, reason: str) -> None:
+    from src.data.timeutil import utc_now
+
+    with ops_con() as con:
+        con.execute(
+            """
+            UPDATE interactions
+            SET status = 'failed',
+                ended_at = COALESCE(ended_at, ?),
+                outcome = ?
+            WHERE interaction_id = ?
+              AND status IN ('active', 'abandoned')
+            """,
+            [utc_now(), reason[:200], interaction_id],
+        )
 
 
 async def _mark_failed(interaction_id: str, reason: str) -> None:
     try:
-        from src.data.timeutil import utc_now
-
-        with ops_con() as con:
-            con.execute(
-                """
-                UPDATE interactions
-                SET status = 'failed',
-                    ended_at = COALESCE(ended_at, ?),
-                    outcome = ?
-                WHERE interaction_id = ?
-                  AND status IN ('active', 'abandoned')
-                """,
-                [utc_now(), reason[:200], interaction_id],
-            )
+        await ops_in_thread(_mark_failed_sync, interaction_id, reason)
     except Exception:
         pass
 
@@ -256,15 +394,92 @@ async def _mark_failed(interaction_id: str, reason: str) -> None:
 async def start_interaction(
     request: Request,
     channel: str = "web_voice",
+    customer_ref: str | None = None,
+    channel_session_id: str | None = None,
     _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("contact:write")),
 ) -> dict[str, Any]:
-    """Create an interaction + return the WS URL + greeting."""
+    """Create an interaction + return the WS URL + greeting.
+
+    Idempotent (audit 1.1): pass ``Idempotency-Key`` (or a stable
+    ``channel_session_id`` from the widget/telephony webhook) and retries
+    return the existing interaction instead of creating a second greeting.
+    The dedup is ledgered as ``start_deduped`` on the original interaction.
+    ``customer_ref`` (phone/email/account, hashed at rest) links returning
+    customers for cross-contact case attach (audit 1.1).
+    """
+    import hashlib as _hashlib
+
+    from src.api.idempotency import check_idempotency, store_idempotent_result
     from src.domains.active_pack import resolve_active_pack_id
     from src.ops.drain import ServiceDrainingError
 
     pack_id = resolve_active_pack_id()
+    raw_ref = (customer_ref or "").strip()
+    ref_hash = _hashlib.sha256(raw_ref.encode()).hexdigest() if raw_ref else None
+    material = f"channel={channel}&pack={pack_id}&session={channel_session_id or ''}&ref={ref_hash or ''}"
+    replay = check_idempotency(request, "interaction_start", material)
+    if replay is not None:
+        try:
+            from src.ledger import AgentAction, record_action
+
+            record_action(AgentAction(
+                interaction_id=replay.get("interaction_id", "unknown"),
+                agent="orchestrator",
+                action_type="start_deduped",
+                input_summary="duplicate start deduplicated",
+                output_summary=f"replayed {replay.get('interaction_id')}",
+            ))
+        except Exception:
+            pass
+        return {**replay, "deduped": True}
+
+    # ── Phase 1 Live Pilot Routing Gate & Circuit Breaker ────────────────────
+    import os
+    from src.routing import get_circuit_breaker, get_traffic_gate
+
+    phase1_active = (
+        request.headers.get("X-Phase1-Live-Pilot") == "1"
+        or request.query_params.get("phase1") == "1"
+        or os.getenv("PHASE1_LIVE_PILOT_ENABLED") == "1"
+    )
+
+    if phase1_active:
+        cb = get_circuit_breaker()
+        if cb.is_tripped:
+            return {
+                "routed_to": "human_control",
+                "admitted": False,
+                "reason": f"circuit_breaker_tripped: {cb.trip_reason}",
+                "phase1_admitted": False,
+                "interaction_id": None,
+            }
+
+        tg = get_traffic_gate()
+        raw_hash = request.headers.get("X-Call-Hash")
+        if raw_hash is not None and raw_hash.strip().isdigit():
+            call_hash = int(raw_hash.strip())
+        else:
+            try:
+                call_hash = int(_hashlib.sha256(call_seed.encode()).hexdigest()[:8], 16)
+            except Exception:
+                call_hash = 0
+
+        admitted, reason = tg.evaluate_ingress(call_hash, domain=pack_id)
+        if not admitted:
+            return {
+                "routed_to": "human_control",
+                "admitted": False,
+                "reason": reason,
+                "phase1_admitted": False,
+                "daily_routed_count": tg.daily_routed_count,
+                "interaction_id": None,
+            }
+
     try:
-        orch, greeting = await create_interaction(channel=channel, pack_id=pack_id)
+        orch, greeting = await create_interaction(
+            channel=channel, pack_id=pack_id, customer_ref=ref_hash,
+        )
     except ServiceDrainingError as e:
         raise HTTPException(
             status_code=503,
@@ -272,7 +487,7 @@ async def start_interaction(
         ) from e
     await _register(orch.ctx.interaction_id, orch)
     pack = orch.ctx.pack
-    return {
+    out = {
         "interaction_id": orch.ctx.interaction_id,
         "ws_url": f"/ws/interaction/{orch.ctx.interaction_id}",
         "greeting_text": greeting,
@@ -283,6 +498,13 @@ async def start_interaction(
             "pack_version": pack.pack_version,
         },
     }
+    if phase1_active:
+        out["phase1_admitted"] = True
+        out["routed_to"] = "live_voice_agent"
+        out["daily_routed_count"] = tg.daily_routed_count
+
+    store_idempotent_result(request, "interaction_start", out)
+    return out
 
 
 @router.post("/ingest")
@@ -291,8 +513,13 @@ async def ingest_interaction(
     request: Request,
     body: dict[str, Any] | None = None,
     _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("contact:write")),
 ) -> dict[str, Any]:
-    """Non-conversational complaint ingest (ticket/webhook path)."""
+    """Non-conversational complaint ingest (ticket/webhook path).
+
+    Idempotent (item 45) via ``Idempotency-Key``: retries return the stored
+    result instead of ingesting twice.
+    """
     from src.frontline.ingest import ingest_complaint
 
     payload = body if isinstance(body, dict) else {}
@@ -301,20 +528,24 @@ async def ingest_interaction(
             payload = await request.json()
         except Exception:
             payload = {}
+    import json as _json
+
+    from src.api.idempotency import check_idempotency, store_idempotent_result
+
+    material = _json.dumps(payload, sort_keys=True, default=str)
+    replay = check_idempotency(request, "ingest", material)
+    if replay is not None:
+        return replay
     try:
         result = await ingest_complaint(payload)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}") from e
-    # Register only if still active (pipeline may already be DONE)
-    if result.get("state") not in ("DONE", "ABANDONED"):
-        try:
-            from src.agents.orchestrator import Orchestrator  # noqa: F401
-
-            # leave unregistered; ingest path is fire-and-finish
-            pass
-        except Exception:
-            pass
-    return result
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid ingest payload") from None
+    except Exception:
+        raise HTTPException(status_code=400, detail="ingest failed") from None
+    if isinstance(result, dict):
+        store_idempotent_result(request, "ingest", result)
+        return result
+    return {"result": result}
 
 
 @router.get("")
@@ -337,10 +568,14 @@ async def list_interactions(
         params.append(status)
     sql += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
     params.extend([lim + 1, off])
-    with ops_con(read_only=True) as con:
-        cur = con.execute(sql, params)
-        cols = [d[0] for d in con.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def _load() -> list[dict[str, Any]]:
+        with ops_con(read_only=True) as con:
+            cur = con.execute(sql, params)
+            cols = [d[0] for d in con.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    rows = await ops_in_thread(_load)
     has_extra = len(rows) > lim
     page = rows[:lim]
     total = None if has_extra else off + len(page)
@@ -352,14 +587,38 @@ async def list_interactions(
 
 
 @router.get("/{interaction_id}")
-async def get_interaction(interaction_id: str) -> dict[str, Any]:
-    """Return the interaction header + turns + actions for replay."""
+@limiter.limit("120 per minute")
+async def get_interaction(
+    request: Request,
+    interaction_id: str,
+    scrub_pii: bool = True,
+    _role: str = Depends(require_perm_dep("case:read")),
+) -> dict[str, Any]:
+    """Return the interaction header + turns + actions for replay.
+
+    Turn text is PII-redacted by default; ``scrub_pii=false`` requires
+    ``dsr:export`` (item 16).
+    """
     from src.qubot.retrievers import contact_audit
+    from src.security.pii import redact_dict, redact_turns
 
     try:
         data = contact_audit(interaction_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"interaction not found: {interaction_id}")
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=404, detail=f"interaction not found: {interaction_id}"
+        ) from e
+    if not scrub_pii:
+        require_perm(_role, "dsr:export")
+        return data
+    data = dict(data)
+    if isinstance(data.get("turns"), list):
+        data["turns"] = redact_turns(data["turns"])
+    if isinstance(data.get("actions"), list):
+        data["actions"] = [
+            redact_dict(a) if isinstance(a, dict) else a
+            for a in data["actions"]
+        ]
     return data
 
 
@@ -367,6 +626,7 @@ async def get_interaction(interaction_id: str) -> dict[str, Any]:
 async def end_interaction(
     interaction_id: str,
     _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("contact:write")),
 ) -> dict[str, Any]:
     """End the interaction (customer hung up via REST instead of WS)."""
     entry = await _get_entry(interaction_id)
@@ -380,22 +640,147 @@ async def end_interaction(
 async def takeover(
     interaction_id: str,
     _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("takeover")),
+    actor: str = Depends(get_actor),
 ) -> dict[str, Any]:
-    """Supervisor takes over the conversation."""
+    """Supervisor takes over the conversation (first claimant wins)."""
     entry = await _get_entry(interaction_id)
     async with entry.lock:
-        await entry.orch.takeover()
+        already = entry.orch.ctx.state == "SUPERVISED"
+        claimed_by = entry.orch.ctx.takeover_claimed_by
+        await entry.orch.takeover(claimed_by=actor)
     return {
         "interaction_id": interaction_id,
         "state": entry.orch.ctx.state,
         "supervised": True,
+        "claimed_by": entry.orch.ctx.takeover_claimed_by,
+        "already_claimed": bool(already and claimed_by and claimed_by != actor),
     }
+
+
+@router.post("/{interaction_id}/handoff/accept")
+async def handoff_accept(
+    interaction_id: str,
+    _auth: bool = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Customer accepts the handoff offer: queue for supervisor pickup (audit 2.4)."""
+    entry = await _get_entry(interaction_id)
+    async with entry.lock:
+        out = await entry.orch.accept_handoff()
+    return {"interaction_id": interaction_id, **out}
+
+
+@router.post("/{interaction_id}/outcome")
+async def record_outcome(
+    interaction_id: str,
+    body: dict[str, Any],
+    _auth: bool = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Post-call outcome signal (board #9): was it actually resolved? CSAT 1-5.
+
+    Ground truth for fix proof on the contact side. Accepted from the widget
+    after close; validated (csat 1-5, resolved bool), stored on the
+    interaction row. Unknown interactions 404.
+    """
+    from src.data.warehouse import ops_con
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    csat = body.get("csat", None)
+    if csat is not None:
+        try:
+            csat = int(csat)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="csat must be 1-5") from None
+        if csat < 1 or csat > 5:
+            raise HTTPException(status_code=400, detail="csat must be 1-5")
+    resolved = body.get("resolved", None)
+    if resolved is not None and not isinstance(resolved, bool):
+        raise HTTPException(status_code=400, detail="resolved must be boolean")
+    with ops_con() as con:
+        try:
+            row = con.execute(
+                "SELECT 1 FROM interactions WHERE interaction_id = ?",
+                [interaction_id],
+            ).fetchone()
+        except Exception:
+            row = None
+        if not row:
+            raise HTTPException(status_code=404, detail="interaction not found")
+        sets, params = [], []
+        if csat is not None:
+            sets.append("csat = ?")
+            params.append(csat)
+        if resolved is not None:
+            sets.append("customer_resolved = ?")
+            params.append(resolved)
+        if not sets:
+            raise HTTPException(status_code=400, detail="csat or resolved required")
+        try:
+            con.execute(
+                f"UPDATE interactions SET {', '.join(sets)} WHERE interaction_id = ?",
+                [*params, interaction_id],
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"outcome not recorded: {type(e).__name__}") from e
+    return {"interaction_id": interaction_id, "csat": csat, "resolved": resolved}
+
+
+@router.patch("/{interaction_id}/override")
+async def human_override(
+    interaction_id: str,
+    body: dict[str, Any],
+    _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("takeover")),
+    actor: str = Depends(get_actor),
+) -> dict[str, Any]:
+    """Supervisor override of slots/severity with a reason (board).
+
+    Overrides are a DISTINCT ledgered action (``human_override`` + reason)
+    so the Stage-7 audit never flags them as agent mismatches: the audit
+    trail shows a human, not the model, set the value.
+    """
+    from src.ledger import AgentAction, record_action
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required for overrides")
+    slots = body.get("slots") if isinstance(body.get("slots"), dict) else {}
+    severity = body.get("severity")
+    if severity is not None and severity not in ("Low", "Medium", "Critical"):
+        raise HTTPException(status_code=400, detail="severity must be Low|Medium|Critical")
+    if not slots and severity is None:
+        raise HTTPException(status_code=400, detail="nothing to override")
+    entry = await _get_entry(interaction_id)
+    async with entry.lock:
+        orch = entry.orch
+        applied: dict[str, Any] = {}
+        for k, v in slots.items():
+            if k in ("entity_1", "entity_2", "entity_3", "category", "description"):
+                orch.ctx.slots[k] = str(v)[:500]
+                applied[k] = orch.ctx.slots[k]
+        if severity is not None:
+            orch.ctx.severity = severity
+            orch.ctx.severity_source = "human"
+            applied["severity"] = severity
+        record_action(AgentAction(
+            interaction_id=interaction_id,
+            agent="supervisor",
+            action_type="human_override",
+            input_summary=f"actor={actor} reason={reason[:200]}",
+            output_summary=f"overrides={applied}",
+            case_id=orch.ctx.case_id,
+        ))
+    return {"interaction_id": interaction_id, "applied": applied, "actor": actor}
 
 
 @router.post("/{interaction_id}/release")
 async def release(
     interaction_id: str,
     _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("takeover")),
 ) -> dict[str, Any]:
     """Supervisor releases; AI resumes."""
     entry = await _get_entry(interaction_id)
@@ -406,6 +791,110 @@ async def release(
         "state": entry.orch.ctx.state,
         "supervised": False,
     }
+
+
+# ── Phase 1 Live Pilot Routing & Circuit Breaker Controls ────────────────────
+
+
+@router.get("/routing/status")
+async def get_routing_status(_auth: bool = Depends(require_api_key)) -> dict[str, Any]:
+    """Inspect current Phase 1 live pilot traffic gate and circuit breaker status."""
+    from src.routing import get_circuit_breaker, get_traffic_gate
+
+    cb = get_circuit_breaker()
+    tg = get_traffic_gate()
+    return {
+        "circuit_breaker": cb.status(),
+        "traffic_gate": {
+            "target_ratio": tg.target_ratio,
+            "daily_max_calls": tg.daily_max_calls,
+            "daily_routed_count": tg.daily_routed_count,
+            "start_hour_utc": tg.start_hour,
+            "end_hour_utc": tg.end_hour,
+            "allowed_domain": tg.allowed_domain,
+        },
+    }
+
+
+@router.post("/routing/panic")
+async def trigger_panic_switch(
+    request: Request,
+    note: str = "",
+    actor: str = Depends(get_actor),
+    _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("routing:control", open_mode_ok=True)),
+) -> dict[str, Any]:
+    """Single-click supervisor panic kill-switch; evacuates 100% of live traffic to human."""
+    from src.routing import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    cb.panic(supervisor_id=actor or "supervisor", note=note)
+    return {"status": "tripped", "is_tripped": True, "reason": cb.trip_reason}
+
+
+@router.post("/routing/reset")
+async def reset_circuit_breaker(
+    request: Request,
+    actor: str = Depends(get_actor),
+    _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("routing:control", open_mode_ok=True)),
+) -> dict[str, Any]:
+    """Supervisor manually resets circuit breaker after incident resolution."""
+    from src.routing import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    cb.reset(supervisor_id=actor or "supervisor")
+    return {"status": "reset", "is_tripped": False}
+
+
+@router.post("/routing/record-latency")
+async def record_latency_metric(
+    latency_ms: float,
+    _auth: bool = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Record turn latency to monitor against 1,000ms ceiling."""
+    from src.routing import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    cb.record_turn_latency(latency_ms)
+    return {"is_tripped": cb.is_tripped, "trip_reason": cb.trip_reason}
+
+
+@router.post("/routing/record-safety")
+async def record_safety_metric(
+    is_false_positive: bool = False,
+    missed_safety: bool = False,
+    _auth: bool = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Record safety evaluation outcomes to enforce zero missed safety and max 3 consecutive false positives."""
+    from src.routing import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    cb.record_safety_evaluation(is_false_positive=is_false_positive, missed_safety=missed_safety)
+    return {"is_tripped": cb.is_tripped, "trip_reason": cb.trip_reason}
+
+
+@router.post("/{interaction_id}/authorize-remedy")
+async def authorize_remedy(
+    interaction_id: str,
+    _auth: bool = Depends(require_api_key),
+    _role: str = Depends(require_perm_dep("approval:decide", open_mode_ok=True)),
+) -> dict[str, Any]:
+    """Stage 5 Remedy Offer HITL: supervisor authorizes proposed remedy before agent speaks it."""
+    entry = await _get_entry(interaction_id)
+    async with entry.lock:
+        orch = entry.orch
+        orch.ctx.remedy_authorized = True
+        pending = getattr(orch.ctx, "pending_remedy_offer", None)
+        if pending and pending.get("customer_text"):
+            await orch.hooks._maybe(
+                orch.hooks.emit_customer_turn,
+                pending["customer_text"],
+                {"speaker": "agent", "fast_path": True, "llm_used": False},
+            )
+            orch.ctx.record_turn("agent", pending["customer_text"], llm_used=False)
+            orch.ctx.pending_remedy_offer = None
+    return {"interaction_id": interaction_id, "authorized": True}
 
 
 # ── WebSocket: per-interaction + console fan-out ─────────────────────────────
@@ -439,8 +928,24 @@ class _WSHooks(OrchestratorHooks):
         self._channel = channel
         self._interaction_id = interaction_id
 
+    @staticmethod
+    async def _to_customer(coro: Any) -> None:
+        """Send to the customer socket, tolerating a dropped/reconnecting client.
+
+        The contact now survives a WS drop (reconnect grace), so the customer
+        channel can legitimately be dead while the orchestrator and the
+        supervisor console keep running. A failed customer send must never
+        abort the turn or kill the console fan-out.
+        """
+        try:
+            await coro
+        except Exception:
+            pass
+
     async def emit_customer_turn(self, text: str, meta: dict[str, Any]) -> None:
-        await self._channel.send_turn(text, speaker=meta.get("speaker", "agent"), meta=meta)
+        await self._to_customer(
+            self._channel.send_turn(text, speaker=meta.get("speaker", "agent"), meta=meta)
+        )
         await _broadcast_console({
             "type": "agent_turn",
             "interaction_id": self._interaction_id,
@@ -449,16 +954,23 @@ class _WSHooks(OrchestratorHooks):
             "ts": datetime.now(timezone.utc).isoformat(),
         })
 
-    async def emit_activity(self, payload: dict[str, Any]) -> None:
-        await self._channel.send_activity(payload)
+    async def emit_heard_turn(self, text: str, meta: dict[str, Any]) -> None:
+        """Fan-out a customer utterance to the supervisor console."""
         await _broadcast_console({
-            "type": "agent_activity",
+            "type": "customer_turn",
             "interaction_id": self._interaction_id,
-            **{k: _json_safe(v) for k, v in payload.items()},
+            "speaker": meta.get("speaker", "customer"),
+            "text": text,
+            "ts": datetime.now(timezone.utc).isoformat(),
         })
 
+    async def emit_activity(self, payload: dict[str, Any]) -> None:
+        frame = normalize_activity_payload(payload, interaction_id=self._interaction_id)
+        await self._to_customer(self._channel.send_activity(frame))
+        await _broadcast_console(frame)
+
     async def emit_slots_update(self, slots: dict[str, str]) -> None:
-        await self._channel.send_slots_update(slots)
+        await self._to_customer(self._channel.send_slots_update(slots))
         await _broadcast_console({
             "type": "slots_update",
             "interaction_id": self._interaction_id,
@@ -466,14 +978,14 @@ class _WSHooks(OrchestratorHooks):
         })
 
     async def emit_handoff_offer(self) -> None:
-        await self._channel.send_handoff_offer()
+        await self._to_customer(self._channel.send_handoff_offer())
         await _broadcast_console({
             "type": "handoff_offer",
             "interaction_id": self._interaction_id,
         })
 
     async def emit_interaction_ended(self, payload: dict[str, Any]) -> None:
-        await self._channel.send_interaction_ended(payload)
+        await self._to_customer(self._channel.send_interaction_ended(payload))
         await _broadcast_console({
             "type": "interaction_ended",
             "interaction_id": self._interaction_id,
@@ -493,7 +1005,14 @@ async def interaction_ws(websocket: WebSocket, interaction_id: str) -> None:
 
     Client → server: optional auth frame, then
       {"type":"user_turn","text":"...","final":true} | barge_in | hangup
-    Server → client: agent_turn | agent_activity | slots_update | handoff_offer | interaction_ended
+    Server → client: agent_turn | agent_activity | slots_update | handoff_offer
+                     | interaction_ended | resumed | error
+
+    Reconnect: a socket that closes **without** a ``hangup`` frame leaves the
+    contact resumable for ``FRONTLINE_WS_RECONNECT_GRACE_S`` (default 120s).
+    Re-attaching within that window replays the server transcript in a
+    ``resumed`` frame; past it the ``error`` frame carries
+    ``recoverable: false`` so the client stops retrying.
 
     Auth: prefer first-message ``{"type":"auth","api_key":"..."}`` or headers.
     Query ``?api_key=`` is deprecated.
@@ -517,46 +1036,99 @@ async def interaction_ws(websocket: WebSocket, interaction_id: str) -> None:
         await websocket.accept()
 
     try:
-        entry = await _attach_customer_ws(interaction_id)
+        entry, resumed = await _attach_customer_ws(interaction_id)
     except HTTPException as e:
         detail = e.detail if isinstance(e.detail, str) else str(e.detail)
-        await websocket.send_json({"type": "error", "detail": detail})
+        await websocket.send_json({
+            "type": "error",
+            "detail": detail,
+            "code": "interaction_busy" if e.status_code == 409 else "interaction_not_resumable",
+            # Tell the client whether retrying can ever succeed, so it does not
+            # spin through its whole reconnect budget on a dead contact.
+            "recoverable": False,
+        })
         await websocket.close(code=1008 if e.status_code == 409 else 1000)
         return
 
     orch = entry.orch
     channel = WebVoiceChannel(websocket)
     orch.hooks = _WSHooks(channel, interaction_id)
+    # Track whether the customer left on purpose; only then do we drop the
+    # registry entry in `finally` (otherwise the contact stays resumable).
+    hung_up = False
+
+    if resumed:
+        # Re-sync the client after a drop. The server transcript is
+        # authoritative: the client may have missed turns while it was away,
+        # so it replaces its local list rather than appending to it.
+        try:
+            await websocket.send_json({
+                "type": "resumed",
+                "interaction_id": interaction_id,
+                "state": orch.ctx.state,
+                "turns": [
+                    {
+                        "id": t.get("turn_id"),
+                        "speaker": t.get("speaker"),
+                        "text": t.get("text", ""),
+                    }
+                    for t in (orch.ctx.turns or [])
+                    if t.get("text")
+                ],
+            })
+            await channel.send_slots_update(dict(orch.ctx.slots))
+        except Exception:
+            pass
 
     try:
         while True:
             msg = await websocket.receive_json()
             mtype = msg.get("type")
             if mtype == "user_turn":
+                t0 = time.monotonic()
                 async with entry.lock:
                     await orch.handle_customer_turn(
-                        msg.get("text", ""), final=msg.get("final", True)
+                        msg.get("text", ""), final=msg.get("final", True),
+                        client_turn_id=msg.get("turn_id"),
                     )
+                elapsed_ms = (time.monotonic() - t0) * 1000.0
+                from src.routing import get_circuit_breaker
+                cb = get_circuit_breaker()
+                cb.record_turn_latency(elapsed_ms)
+                if cb.is_tripped:
+                    await websocket.send_json({
+                        "type": "circuit_breaker_tripped",
+                        "action": "redirect_to_human",
+                        "reason": cb.trip_reason,
+                    })
                 if orch.ctx.state in ("DONE", "ABANDONED"):
                     break
             elif mtype == "barge_in":
                 pass
             elif mtype == "hangup":
+                hung_up = True
                 async with entry.lock:
                     await orch.hangup()
                 break
             elif mtype == "human_turn":
+                try:
+                    require_perm(role_from_websocket(websocket), "takeover")
+                except HTTPException:
+                    await websocket.send_json(
+                        {"type": "error", "detail": "role lacks takeover", "code": "forbidden"}
+                    )
+                    continue
                 async with entry.lock:
                     await orch.human_turn(msg.get("text", ""))
     except WebSocketDisconnect:
-        if orch.ctx.state not in ("DONE", "ABANDONED"):
-            try:
-                async with entry.lock:
-                    await orch.hangup()
-            except Exception:
-                pass
+        # Socket dropped without a hangup. Do NOT end the contact here: the
+        # dashboard reconnects with backoff, and tearing the orchestrator down
+        # made every reconnect 404 ("active interaction not found"). The reaper
+        # closes it if the browser never re-attaches within the grace window.
+        pass
     except Exception as e:
         # H1: any agent/turn crash must not leave status='active' forever.
+        hung_up = True
         try:
             if orch.ctx.state not in ("DONE", "ABANDONED"):
                 async with entry.lock:
@@ -565,13 +1137,19 @@ async def interaction_ws(websocket: WebSocket, interaction_id: str) -> None:
             pass
         await _mark_failed(interaction_id, f"ws_error:{type(e).__name__}")
         try:
-            await websocket.send_json(
-                {"type": "error", "detail": f"server error: {type(e).__name__}"}
-            )
+            await websocket.send_json({
+                "type": "error",
+                "detail": f"server error: {type(e).__name__}",
+                "code": "server_error",
+                "recoverable": False,
+            })
         except Exception:
             pass
     finally:
-        await _unregister(interaction_id)
+        if hung_up or orch.ctx.state in ("DONE", "ABANDONED"):
+            await _unregister(interaction_id)
+        else:
+            await _detach_customer_ws(interaction_id)
         try:
             await websocket.close()
         except Exception:
@@ -608,19 +1186,30 @@ async def console_ws(websocket: WebSocket) -> None:
     # Look back so a console that connects mid-call still sees recent activity
     # (and so tests that ledger-then-connect are not deadlocked waiting forever).
     last_ts: datetime = datetime.now(timezone.utc) - timedelta(hours=1)
+    last_action_id = ""
     try:
         while True:
-            rows = await asyncio.to_thread(fetch_agent_actions_since, last_ts, 50)
+            rows = await asyncio.to_thread(
+                fetch_agent_actions_since, last_ts, 50, last_action_id
+            )
             for r in rows:
                 raw_ts = r.get("ts")
                 if isinstance(raw_ts, datetime):
                     last_ts = raw_ts
+                    last_action_id = str(r.get("action_id") or "")
                 # C1: never pass raw datetime into send_json (kills the socket).
                 await websocket.send_json(activity_frame_from_row(r))
 
             try:
                 msg = await asyncio.wait_for(websocket.receive_json(), timeout=0.5)
                 if msg.get("type") == "human_turn":
+                    try:
+                        require_perm(role_from_websocket(websocket), "takeover")
+                    except HTTPException:
+                        await websocket.send_json(
+                            {"type": "error", "detail": "role lacks takeover", "code": "forbidden"}
+                        )
+                        continue
                     iid = msg.get("interaction_id")
                     text = msg.get("text", "")
                     try:
@@ -633,7 +1222,16 @@ async def console_ws(websocket: WebSocket) -> None:
                         )
             except asyncio.TimeoutError:
                 pass
-            await asyncio.sleep(0.2)
+            # Live broadcast is authoritative; this poll is a slow catch-up.
+            # FRONTLINE_CONSOLE_POLL_S (default 2s) keeps the global DuckDB
+            # lock off the hot path; tests may set 0.05.
+            import os
+
+            try:
+                poll_s = float(os.getenv("FRONTLINE_CONSOLE_POLL_S", "2") or "2")
+            except ValueError:
+                poll_s = 2.0
+            await asyncio.sleep(max(0.05, poll_s))
     except WebSocketDisconnect:
         return
     finally:
@@ -647,10 +1245,16 @@ __all__ = [
     "console_ws",
     "_active",
     "reap_orphans",
+    "reaper_loop",
     "_sweep_stale_active_db_rows",
     "ActiveEntry",
     "_ORPHAN_TTL_S",
+    "_reconnect_grace_s",
+    "_is_reapable",
+    "_attach_customer_ws",
+    "_detach_customer_ws",
     "_json_safe",
     "activity_frame_from_row",
+    "normalize_activity_payload",
     "fetch_agent_actions_since",
 ]

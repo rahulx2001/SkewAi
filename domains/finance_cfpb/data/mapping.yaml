@@ -15,6 +15,7 @@ records:
   severity_label: ""  # CFPB has no severity label; derived from Timely response? / Consumer disputed?
   region: State
   source: "CFPB"
+  entity_key: "{Company}|{Product}|{Issue}"
 
 advisories:
   advisory_id: advisory_id  # curated; not a direct CFPB CSV column

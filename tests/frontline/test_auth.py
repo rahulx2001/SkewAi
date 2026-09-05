@@ -65,6 +65,18 @@ def test_start_rejects_wrong_key(client):
     assert r.status_code == 401
 
 
+def test_auth_session_json_body_does_not_mint(open_client):
+    """HTTP JSON subject is not an IdP. No usable token."""
+    minted = open_client.post(
+        "/api/frontline/auth/session",
+        json={"subject": "Rahul", "role": "admin"},
+    )
+    assert minted.status_code == 403
+    body = minted.json()
+    assert "token" not in body or not body.get("token")
+    assert "OIDC" in (body.get("detail") or "") or "Google" in (body.get("detail") or "")
+
+
 def test_simulate_requires_key(client):
     r = client.post("/api/frontline/simulate", params={"count": 1})
     assert r.status_code == 401

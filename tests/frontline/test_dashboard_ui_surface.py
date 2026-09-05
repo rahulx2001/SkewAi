@@ -73,6 +73,17 @@ def test_shell_has_nav_groups_and_no_emoji_nav():
     assert "📞" not in app
 
 
+def test_pilot_metrics_does_not_spill_iso_timestamp():
+    """TS must not render as a wrapping ISO tile (2026-08- / 16T…)."""
+    cc = (ROUTES / "CommandCenter.jsx").read_text(encoding="utf-8")
+    helper = (SRC / "ui" / "formatTime.js").read_text(encoding="utf-8")
+    assert "formatSnapshotTs" in cc
+    assert 'k !== "ts"' in cc or "k !== 'ts'" in cc
+    assert "pilot-asof" in cc
+    assert "formatSnapshotTs" in helper
+    assert "UTC" in helper
+
+
 def test_styles_use_design_tokens_not_google_fonts():
     css = (SRC / "styles.css").read_text(encoding="utf-8")
     assert "--accent" in css

@@ -30,12 +30,17 @@ class WebVoiceChannel(ChannelAdapter):
             self.channel_name = "web_text"
 
     def capabilities(self) -> ChannelCapabilities:
+        from src.voice.policy import silence_timeout_ms, tts_latency_budget_ms
         return ChannelCapabilities(
             voice=not self._text_only,
             text=True,
             barge_in=not self._text_only,
             server_tts=False,               # browser does TTS
             supervisor_takeover=True,
+            dtmf=True,                      # widget offers keypad fallback
+            asr_confidence=False,           # Web Speech gives no confidence → readback on re-ask
+            silence_timeout_ms=silence_timeout_ms(),
+            tts_budget_ms=tts_latency_budget_ms(),
         )
 
     async def _send(self, payload: dict[str, Any]) -> None:

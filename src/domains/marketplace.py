@@ -13,6 +13,19 @@ from typing import Any
 
 from src.config import REPO_ROOT
 
+
+def registry_path() -> Path:
+    """Pack registry JSON. ``PACK_REGISTRY_PATH`` isolates pytest from git."""
+    import os
+
+    raw = (os.getenv("PACK_REGISTRY_PATH") or "").strip()
+    if not raw:
+        return REPO_ROOT / "domains" / "registry.json"
+    p = Path(raw).expanduser()
+    return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+
+# Default on-disk path (tests should use registry_path() / PACK_REGISTRY_PATH).
 REGISTRY_PATH = REPO_ROOT / "domains" / "registry.json"
 
 
@@ -29,8 +42,9 @@ def _semver_tuple(v: str) -> tuple[int, ...]:
 
 
 def load_registry() -> dict[str, Any]:
-    if REGISTRY_PATH.is_file():
-        return json.loads(REGISTRY_PATH.read_text())
+    path = registry_path()
+    if path.is_file():
+        return json.loads(path.read_text())
     # Bootstrap from on-disk packs
     packs = []
     domains = REPO_ROOT / "domains"
@@ -54,8 +68,9 @@ def load_registry() -> dict[str, Any]:
 
 
 def save_registry(reg: dict[str, Any]) -> None:
-    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REGISTRY_PATH.write_text(json.dumps(reg, indent=2) + "\n")
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(reg, indent=2) + "\n")
 
 
 def list_marketplace() -> list[dict[str, Any]]:

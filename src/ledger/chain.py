@@ -47,6 +47,11 @@ def verify_chain(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Verify an ordered list of agent_actions rows for one interaction.
 
     Returns {ok, checked, first_bad_action_id, detail}.
+
+    Chain-preserving erasure (audit 7.3): rows flagged ``erased`` had their
+    PII content tombstoned AFTER hashing — content recomputation is skipped
+    for them, but linkage (prev_hash continuity) is still enforced, so an
+    erasure can neither forge history nor break its neighbors.
     """
     prev = GENESIS
     for i, row in enumerate(rows):
@@ -58,6 +63,9 @@ def verify_chain(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "first_bad_action_id": row.get("action_id"),
                 "detail": f"prev_hash mismatch at index {i}",
             }
+        if row.get("erased"):
+            prev = row.get("row_hash") or prev
+            continue
         expected = compute_row_hash(row, expected_prev)
         actual = row.get("row_hash") or ""
         if actual != expected:

@@ -2,6 +2,15 @@
 set -e
 cd /app
 
+# Step 0.1b (audit 0.5): migrations BEFORE seeding/ingest. Ingest scripts
+# refuse to run against a behind-HEAD schema, so ordering is enforced, not
+# just documented.
+echo "→ Applying database migrations…"
+python -m scripts.migrate --db ops || echo "   (ops migrate deferred — app will apply idempotent DDL)"
+for _pack in automotive_nhtsa finance_cfpb; do
+  DOMAIN_PACK="$_pack" python -m scripts.migrate --db domain --pack "$_pack" || true
+done
+
 # Seed fixture warehouses if missing (idempotent enough for pilot demos).
 # Also repair finance_cfpb when it was accidentally seeded with NHTSA rows
 # (record_id prefix NHTSA- → all simulates abandon on the finance pack).
@@ -35,6 +44,14 @@ if [ "${ENV:-}" = "production" ] || [ "${ENV:-}" = "prod" ] \
     echo "ERROR: FRONTLINE_API_KEY required when ENV=production/staging or PILOT_HARDENED/SOC2_MODE=1" >&2
     exit 1
   fi
+  if [ "${#FRONTLINE_API_KEY}" -lt 32 ]; then
+    echo "ERROR: FRONTLINE_API_KEY must be at least 32 bytes in hardened/production mode" >&2
+    exit 1
+  fi
+  if [ -n "${SESSION_SECRET:-}" ] && [ "${#SESSION_SECRET}" -lt 32 ]; then
+    echo "ERROR: SESSION_SECRET must be at least 32 bytes in hardened/production mode" >&2
+    exit 1
+  fi
   if [ "${FRONTLINE_OPEN_MODE:-0}" = "1" ]; then
     echo "ERROR: FRONTLINE_OPEN_MODE=1 is not allowed in hardened/production mode" >&2
     exit 1
@@ -44,8 +61,23 @@ if [ "${ENV:-}" = "production" ] || [ "${ENV:-}" = "prod" ] \
   echo "→ Hardened mode: auth required, open mode off"
 fi
 
+# Fail-closed wildcard bind (item 1): API_HOST=0.0.0.0 without explicit auth
+# refuses to start, even outside hardened mode. Loopback-only dev keeps the
+# intentional open escape hatch; acknowledged local pilots opt in explicitly.
+case "${API_HOST:-0.0.0.0}" in
+  0.0.0.0|::)
+    if [ "${FRONTLINE_AUTH_REQUIRED:-0}" != "1" ] && [ "${FRONTLINE_OPEN_BIND_ACK:-0}" != "1" ]; then
+      echo "ERROR: API_HOST=${API_HOST:-0.0.0.0} binds beyond loopback but FRONTLINE_AUTH_REQUIRED=1 is not set." >&2
+      echo "Refusing to start open on a shared network. Set FRONTLINE_AUTH_REQUIRED=1 + a 32-byte FRONTLINE_API_KEY," >&2
+      echo "bind API_HOST=127.0.0.1 for local dev, or set FRONTLINE_OPEN_BIND_ACK=1 for an acknowledged local pilot." >&2
+      exit 1
+    fi
+    ;;
+esac
+
 echo "→ Starting Skew AI API on ${API_HOST:-0.0.0.0}:${API_PORT:-8000}"
 echo "   Dashboard (if built): http://localhost:${API_PORT:-8000}/ui/"
+echo "   Workers: 1 (in-process call registry — do not pass --workers / do not scale replicas)"
 if [ -n "${FRONTLINE_API_KEY:-}" ]; then
   echo "   Auth: FRONTLINE_API_KEY is set"
 else

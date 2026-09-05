@@ -33,8 +33,8 @@ def test_startup_fails_closed_in_production_without_key(monkeypatch):
 def test_startup_ok_when_hardened_with_secrets(monkeypatch):
     monkeypatch.setenv("PILOT_HARDENED", "1")
     monkeypatch.setenv("FRONTLINE_AUTH_REQUIRED", "1")
-    monkeypatch.setenv("FRONTLINE_API_KEY", "soc2-test-key-at-least-16")
-    monkeypatch.setenv("SESSION_SECRET", "soc2-session-secret-32bytes!!!!")
+    monkeypatch.setenv("FRONTLINE_API_KEY", "soc2-test-key-at-least-32-bytes-long!")
+    monkeypatch.setenv("SESSION_SECRET", "soc2-session-secret-32bytes!!!!!!")
     monkeypatch.delenv("FRONTLINE_OPEN_MODE", raising=False)
     status = validate_startup_security()
     assert status["ok"] is True
@@ -79,8 +79,8 @@ def test_security_headers_on_health(reset_ops_db, monkeypatch):
 def test_hsts_when_production_like(reset_ops_db, monkeypatch):
     monkeypatch.setenv("PILOT_HARDENED", "1")
     monkeypatch.setenv("FRONTLINE_AUTH_REQUIRED", "1")
-    monkeypatch.setenv("FRONTLINE_API_KEY", "hsts-test-key-16chars")
-    monkeypatch.setenv("SESSION_SECRET", "hsts-session-secret-32bytes!!!!")
+    monkeypatch.setenv("FRONTLINE_API_KEY", "hsts-test-key-32-bytes-long!!!!!!")
+    monkeypatch.setenv("SESSION_SECRET", "hsts-session-secret-32bytes!!!!!!")
     monkeypatch.delenv("FRONTLINE_OPEN_MODE", raising=False)
     with TestClient(app) as c:
         r = c.get("/health")
@@ -116,17 +116,14 @@ def test_dsr_emits_audit_when_hardened(reset_ops_db, seed_automotive_pack, monke
         log_path.unlink()
     monkeypatch.setenv("SECURITY_AUDIT_LOG_PATH", str(log_path))
     with TestClient(app) as c:
-        mint = c.post(
-            "/api/frontline/auth/session",
-            headers={"X-API-Key": key},
-            json={"subject": "auditor", "role": "admin"},
-        )
-        assert mint.status_code == 200
+        from src.api.rbac import issue_session
+
+        token = issue_session("auditor", "admin", issuer_role="admin")["token"]
         r = c.delete(
             "/api/frontline/dsr/int_audit_test",
             headers={
                 "X-API-Key": key,
-                "X-Frontline-Session": mint.json()["token"],
+                "X-Frontline-Session": token,
             },
         )
     assert r.status_code == 200

@@ -223,6 +223,30 @@ def update_investigation(
     for k, v in list(out.items()):
         if isinstance(v, datetime):
             out[k] = v.isoformat()
+    # Close the fix-effectiveness loop: closing an investigation records a fix
+    # and attaches before/after recurrence so "prove fixes worked" is automatic.
+    if status == "closed":
+        try:
+            from src.enterprise.fix_effectiveness import measure_effectiveness, record_fix
+
+            fix = record_fix(
+                pack_id=str(out.get("pack_id") or "automotive_nhtsa"),
+                fixed_at=out.get("last_case_at") or out.get("opened_at"),
+                category=str(out.get("title") or ""),
+                note=f"investigation {investigation_id} closed by {author}",
+            )
+            try:
+                meas = measure_effectiveness(
+                    pack_id=str(out.get("pack_id") or "automotive_nhtsa"),
+                    fixed_at=out.get("last_case_at") or out.get("opened_at"),
+                    category=str(out.get("title") or ""),
+                    window_days=30,
+                )
+            except Exception:
+                meas = {}
+            out["fix_effectiveness"] = {"fix": fix, "measured": meas}
+        except Exception:
+            pass
     return out
 
 
@@ -232,12 +256,17 @@ def build_cases_csv(
     severity: str | None = None,
     q: str | None = None,
     limit: int = 500,
+    scrub_pii: bool = True,
 ) -> tuple[str, int]:
-    """Return (csv_text, row_count) for case export."""
+    """Return (csv_text, row_count) for case export.
+
+    ``scrub_pii=True`` (default) redacts PII in free-text columns; callers
+    must gate ``scrub_pii=False`` behind ``dsr:export`` (item 16).
+    """
     limit = min(max(int(limit), 1), 2000)
     sql = """
         SELECT case_id, interaction_id, pack_id, created_at, category,
-               description_summary, severity, priority, status,
+               description_summary, severity, priority, status, case_kind,
                cluster_match_id, investigation_id, advisory_match_id
         FROM cases
     """
@@ -269,6 +298,10 @@ def build_cases_csv(
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     writer.writeheader()
+    if scrub_pii:
+        from src.security.pii import redact_dict
+
+        rows = [redact_dict(r) for r in rows]
     for row in rows:
         for k, v in list(row.items()):
             if isinstance(v, datetime):
@@ -346,7 +379,86 @@ def ops_metrics(*, window_days: int = 7) -> dict[str, Any]:
         "alert_dead_letters_pending": int(dl_pending),
         "connector_deliveries_pending": int(conn_pending),
         "case_notes_in_window": int(notes_window),
+        "fix_loop": _fix_loop_stats(window_days=window_days),
         "ts": _now().isoformat(),
+    }
+
+
+def _fix_loop_stats(*, window_days: int = 7) -> dict[str, Any]:
+    """Before/after fix effectiveness + reopen rate (item 37).
+
+    Distinguishes before-fix volume, after-fix volume, resolved (improved),
+    and reopened (fix recorded but investigation open/monitoring again).
+    Bounded: measures at most the 10 most recent fixes.
+    """
+    try:
+        with ops_con(read_only=True) as con:
+            try:
+                fixes = con.execute(
+                    """
+                    SELECT fix_id, pack_id, investigation_id, category,
+                           entity_2, entity_3, fixed_at
+                    FROM recorded_fixes
+                    ORDER BY fixed_at DESC LIMIT 10
+                    """
+                ).fetchall()
+            except Exception:
+                fixes = []
+            open_with_fix = 0
+            try:
+                open_with_fix = con.execute(
+                    """
+                    SELECT COUNT(*) FROM investigations i
+                    WHERE i.status IN ('open', 'monitoring')
+                      AND EXISTS (
+                          SELECT 1 FROM recorded_fixes f
+                          WHERE f.investigation_id = i.investigation_id
+                      )
+                    """
+                ).fetchone()[0]
+            except Exception:
+                open_with_fix = 0
+    except Exception:
+        return {"fixes_recorded": 0, "reopened": 0, "reopen_rate": 0.0,
+                "resolved": 0, "series": []}
+    series = []
+    resolved = 0
+    try:
+        from src.enterprise.fix_effectiveness import measure_effectiveness
+
+        for fix_id, pack_id, _inv, category, e2, e3, fixed_at in fixes:
+            try:
+                meas = measure_effectiveness(
+                    pack_id=str(pack_id or "automotive_nhtsa"),
+                    fixed_at=fixed_at,
+                    category=str(category or ""),
+                    entity_2=str(e2 or "") or None,
+                    entity_3=str(e3 or "") or None,
+                    window_days=30,
+                )
+            except Exception:
+                continue
+            improved = bool(meas.get("improved"))
+            resolved += 1 if improved else 0
+            series.append({
+                "fix_id": fix_id,
+                "category": category,
+                "before_count": meas.get("before_count"),
+                "after_count": meas.get("after_count"),
+                "before_rate": meas.get("before_rate"),
+                "after_rate": meas.get("after_rate"),
+                "improved": improved,
+            })
+    except Exception:
+        pass
+    total = len(fixes)
+    reopened = int(open_with_fix or 0)
+    return {
+        "fixes_recorded": total,
+        "resolved": resolved,
+        "reopened": reopened,
+        "reopen_rate": round(reopened / total, 3) if total else 0.0,
+        "series": series,
     }
 
 

@@ -35,22 +35,33 @@ def lift_for_pair(
     candidate: dict[str, Any],
     population: Sequence[dict[str, Any]],
 ) -> float:
-    """P(cat∧ent) / (P(cat)P(ent)) on the population using query's cat+entity_2."""
-    q_cat, q_ent = _norm(query.get("category")), _norm(query.get("entity_2"))
+    """P(cat∧ent) / (P(cat)P(ent)) using the CANDIDATE's cat+entity_2.
+
+    ``population`` MUST be the full corpus (or the full in-scope corpus),
+    never the candidate shortlist: support counts (n, n_cat, n_ent, n_both)
+    are population denominators, while the pair under test comes from the
+    candidate side. Mixing the two (candidate-side denominators) inflates
+    lift arbitrarily. See :func:`population_support` for the distinct
+    population-side semantics.
+    """
     c_cat, c_ent = _norm(candidate.get("category")), _norm(candidate.get("entity_2"))
-    if not q_cat or not q_ent:
+    if not c_cat or not c_ent:
         return 0.0
-    if q_cat != c_cat or q_ent != c_ent:
+    # Candidate must share at least the pair to earn lift (else 0)
+    q_cat, q_ent = _norm(query.get("category")), _norm(query.get("entity_2"))
+    if q_cat and c_cat != q_cat:
+        return 0.0
+    if q_ent and c_ent != q_ent:
         return 0.0
     n = len(population) or 1
     n_both = n_cat = n_ent = 0
     for row in population:
         cat, ent = _norm(row.get("category")), _norm(row.get("entity_2"))
-        if cat == q_cat:
+        if cat == c_cat:
             n_cat += 1
-        if ent == q_ent:
+        if ent == c_ent:
             n_ent += 1
-        if cat == q_cat and ent == q_ent:
+        if cat == c_cat and ent == c_ent:
             n_both += 1
     p_both = n_both / n
     p_cat = n_cat / n
@@ -65,15 +76,55 @@ def association_score(
     candidate: dict[str, Any],
     population: Sequence[dict[str, Any]],
 ) -> float:
+    import math as _math
+
     shared = 0
     for k in ASSOC_KEYS:
         qv, cv = _norm(query.get(k)), _norm(candidate.get(k))
         if qv and qv == cv:
             shared += 1
     lift = lift_for_pair(query, candidate, population)
-    # Recency is a tiny epsilon so it cannot beat a real co-occurrence.
-    recency = _ts(candidate.get("received_at") or candidate.get("started_at"))
-    return shared * 10.0 + lift + recency * 1e-12
+    # Cap unbounded lift: log1p keeps rare-pair signal without dwarfing
+    # shared-key count (previously lift=1000 beat shared=3).
+    lift_capped = _math.log1p(max(0.0, lift))
+    # Recency intentionally EXCLUDED from relevance (new != related).
+    # Callers sort ties by received_at explicitly; see rank_by_association.
+    return shared * 10.0 + min(lift_capped, 5.0)
+
+
+def population_support(
+    population: Sequence[dict[str, Any]],
+    *,
+    category: str,
+    entity_2: str,
+) -> dict[str, float]:
+    """Population-side support counts for a (category, entity_2) pair.
+
+    Returns ``{n, n_cat, n_ent, n_both, support, p_cat, p_ent}`` — the
+    denominators lift is computed against. Distinct from candidate-side
+    values (the pair under test); callers must not substitute one for
+    the other.
+    """
+    c_cat, c_ent = _norm(category), _norm(entity_2)
+    n = len(population) or 1
+    n_both = n_cat = n_ent = 0
+    for row in population:
+        cat, ent = _norm(row.get("category")), _norm(row.get("entity_2"))
+        if cat == c_cat:
+            n_cat += 1
+        if ent == c_ent:
+            n_ent += 1
+        if cat == c_cat and ent == c_ent:
+            n_both += 1
+    return {
+        "n": float(len(population)),
+        "n_cat": float(n_cat),
+        "n_ent": float(n_ent),
+        "n_both": float(n_both),
+        "support": n_both / n,
+        "p_cat": n_cat / n,
+        "p_ent": n_ent / n,
+    }
 
 
 def rank_by_association(
@@ -84,24 +135,36 @@ def rank_by_association(
     top_k: int = 5,
     id_key: str = "record_id",
 ) -> list[dict[str, Any]]:
-    """Return candidates sorted by association score (adds ``assoc_score``)."""
+    """Return candidates sorted by association score (adds ``assoc_score``).
+
+    Ties broken by recency explicitly (newest first) — recency is NOT mixed
+    into the relevance score.
+
+    ``population`` should be the FULL corpus for honest lift denominators;
+    when omitted it falls back to ``candidates`` and each scored row is
+    marked ``assoc_population='candidates-fallback'`` (vs ``'full-corpus'``)
+    so candidate-side lift can never masquerade as corpus lift.
+    """
     pop = list(population) if population is not None else list(candidates)
+    pop_source = "full-corpus" if population is not None else "candidates-fallback"
     qid = _norm(query.get(id_key) or query.get("interaction_id"))
-    scored: list[tuple[float, dict[str, Any]]] = []
+    scored: list[tuple[float, float, dict[str, Any]]] = []
     for c in candidates:
         cid = _norm(c.get(id_key) or c.get("interaction_id"))
         if qid and cid and qid == cid:
             continue
         row = dict(c)
         row["assoc_score"] = association_score(query, c, pop)
-        scored.append((row["assoc_score"], row))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in scored[:top_k]]
+        row["assoc_population"] = pop_source
+        scored.append((row["assoc_score"], _ts(c.get("received_at") or c.get("started_at")), row))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [r for _, _, r in scored[:top_k]]
 
 
 __all__ = [
     "ASSOC_KEYS",
     "lift_for_pair",
+    "population_support",
     "association_score",
     "rank_by_association",
 ]

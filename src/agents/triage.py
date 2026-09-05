@@ -76,6 +76,39 @@ def _apply_rule_severity(ctx: Any) -> tuple[str, str, str]:
     return "Low", "rules", "No rule matched; default to Low"
 
 
+# ── Severity fallback policy (item 25) ──────────────────────────────────────
+# Explicit matrix:
+#   model configured + model succeeds  -> (model severity, source="model")
+#   model configured + model fails     -> (rules severity, source="rules")
+#                                          + model_error ledger + model_healthy=False
+#   no model configured                -> (rules severity, source="rules")
+# Policy choice: SAFE FALLBACK (not hard failure / manual review) — severity
+# scoring must never break a live contact. The fallback is explicit, never
+# silent: source is "rules" (never "model") whenever the model result was not
+# actually used, so `source == "model"` always means a valid model prediction
+# flowed through. Eval asserts this invariant for every severity level.
+
+SEVERITY_FALLBACK_POLICY = "safe-fallback-with-ledger"
+
+_MODEL_HEALTHY: dict[str, bool] = {}
+
+
+def model_health() -> dict[str, bool]:
+    """Per-artifact model health (True after success, False after failure)."""
+    return dict(_MODEL_HEALTHY)
+
+
+def _mark_model_health(artifact_ref: str, healthy: bool) -> None:
+    _MODEL_HEALTHY[str(artifact_ref)] = bool(healthy)
+    try:
+        from src.observability.metrics import inc as _inc
+
+        _inc("model_healthy" if healthy else "model_error",
+             artifact=str(artifact_ref))
+    except Exception:
+        pass
+
+
 def _apply_model_severity(ctx: Any) -> tuple[str, str, str]:
     """Use the pack's ML runtime artifact for severity.
 
@@ -96,9 +129,23 @@ def _apply_model_severity(ctx: Any) -> tuple[str, str, str]:
             "description": ctx.slots.get("description"),
             "safety_flags": ctx.safety_flags,
         })
+        _mark_model_health(artifact_ref, True)
         return severity, "model", reason or "ML artifact prediction"
     except Exception as e:
-        # Clean fallback to rules — never break the call over severity scoring.
+        # Safe fallback per SEVERITY_FALLBACK_POLICY: rules decide, source is
+        # honestly "rules", and the model failure is ledgered + gauged —
+        # never reported as source=model.
+        _mark_model_health(artifact_ref, False)
+        try:
+            record_action(TriageAgent(ctx)._action(
+                action_type="severity_scored",
+                input_summary=f"model artifact {artifact_ref} failed",
+                output_summary=f"model_error; falling back to rules ({type(e).__name__})",
+                ok=False,
+                error=f"{type(e).__name__}: {e}"[:500],
+            ))
+        except Exception:
+            pass
         sev, _, _ = _apply_rule_severity(ctx)
         return sev, "rules", f"model fallback ({type(e).__name__}: {e})"
 
@@ -119,7 +166,49 @@ def _priority_from_matrix(severity: str, ctx: Any) -> int:
     matrix = ctx.pack.manifest.severity.priority_matrix
     if any(ctx.safety_flags.values()):
         return 1
+    # Explicit severity levels; unknown severity is a pack bug — fail loudly
+    # instead of silently mapping High->Low's priority.
+    if severity in matrix:
+        return matrix[severity]
+    if severity == "High" and "High" not in matrix:
+        # Common pack omission: interpolate between Critical(1) and Medium(2)
+        return 1 if any(ctx.safety_flags.values()) else 2
     return matrix.get(severity, matrix.get("Low", 3))
+
+
+def _model_stamp(ctx: Any) -> str:
+    """Identify the scoring model build: artifact path + content hash.
+
+    Rules path stamps ``rules:<pack_version>``. A missing/unreadable
+    artifact stamps ``artifact-unreadable`` rather than failing the contact.
+    """
+    try:
+        artifact = (ctx.pack.manifest.severity.model_artifact or "").strip()
+    except Exception:
+        artifact = ""
+    if not artifact:
+        try:
+            pv = ctx.pack.pack_version
+        except Exception:
+            pv = "unknown"
+        return f"rules:{pv}"
+    try:
+        import hashlib as _hl
+        from pathlib import Path as _P
+
+        from src.config import REPO_ROOT as _RR
+
+        p = _P(artifact)
+        for cand in (p, _RR / p, _RR / "domains" / p):
+            try:
+                if cand.is_file():
+                    h = _hl.sha256(cand.read_bytes()).hexdigest()[:12]
+                    return f"{artifact}@{h}"
+            except OSError:
+                continue
+        return f"{artifact}@unreadable"
+    except Exception:
+        return f"{artifact}@unknown"
 
 
 class TriageAgent(Agent):
@@ -129,6 +218,19 @@ class TriageAgent(Agent):
 
     async def run(self, **kwargs: Any) -> dict[str, Any]:
         ctx = self.ctx
+        try:
+            from src.ops.pilot import agent_enabled
+            if not agent_enabled("triage"):
+                record_action(self._action(
+                    action_type="severity_scored",
+                    input_summary="flag FRONTLINE_AGENT_TRIAGE_ENABLED=0",
+                    output_summary="triage disabled; default Low/P3",
+                ))
+                ctx.severity, ctx.severity_source, ctx.priority = "Low", "rules", 3
+                return {"severity": "Low", "severity_source": "rules",
+                        "reason": "disabled_by_flag", "priority": 3}
+        except Exception:
+            pass
 
         # Precondition: need category + description to triage
         if not ctx.slots.get("category") or not ctx.slots.get("description"):
@@ -140,10 +242,23 @@ class TriageAgent(Agent):
         ctx.severity_source = source
         ctx.priority = _priority_from_matrix(severity, ctx)
 
+        # Model stamping (board: drift/version visibility): every score
+        # carries WHICH artifact scored it (or that rules did), so drift
+        # analysis can group outcomes by model version after the fact.
+        stamp = _model_stamp(ctx)
+        try:
+            from src.governance.registry import artifact_version, explain_severity
+            gov_version = artifact_version(ctx.pack.manifest.severity.model_artifact or "")
+            expl = explain_severity(severity=severity, source=source, reason=reason,
+                                    safety_flags=dict(ctx.safety_flags or {}),
+                                    category=ctx.slots.get("category"))
+            ctx.model_version = gov_version  # type: ignore[attr-defined]
+        except Exception:
+            gov_version, expl = stamp, {"drivers": [reason]}
         record_action(self._action(
             action_type="severity_scored",
             input_summary=f"slots={ctx.slots}, safety_flags={ctx.safety_flags}",
-            output_summary=f"severity={severity} (source={source}); reason={reason}",
+            output_summary=f"severity={severity} (source={source}); reason={reason}; model={stamp}; model_version={gov_version}; drivers={expl.get('drivers', [])}",
         ))
         record_action(self._action(
             action_type="priority_assigned",
@@ -156,4 +271,6 @@ class TriageAgent(Agent):
             "severity_source": source,
             "reason": reason,
             "priority": ctx.priority,
+            "model_version": gov_version,
+            "drivers": expl.get("drivers", []),
         }

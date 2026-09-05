@@ -49,13 +49,61 @@ slot_frame:
 safety:
   escalation_lexicon:
   - fire
+  - flames
   - smoke
   - crash
-  - injury
   - airbag deployed
+  - airbag exploded
+  - collision
+  - rollover
+  - injury
+  - hurt
+  - hurts
+  - injured
+  - bleeding
+  - hospital
+  - ambulance
+  - paramedic
+  - paramedics
+  - burned
+  - trapped
   - loss of control
   - vehicle stopped in traffic
   - unable to brake
+  - brakes failed
+  - brakes completely failed
+  - brake failure
+  - loss of braking
+  - pedal to floor
+  - zero stopping power
+  - could not stop
+  - brake line ruptured
+  - brake caliper seized
+  - brake booster failed
+  - master cylinder blew out
+  - unintended acceleration
+  - accelerator stuck
+  - accelerator pedal stuck
+  - accelerator pedal became stuck
+  - throttle stuck
+  - stuck wide open
+  - accelerated uncontrollably
+  - took off without input
+  - surged forward
+  - lunged forward
+  - refused to disengage
+  - uncontrollable spin
+  - engaged spontaneously
+  - steering locked
+  - steering wheel locked
+  - steering wheel completely locked
+  - steering wheel jammed
+  - steering wheel frozen
+  - locked up
+  - loss of steering
+  - steering assist failed
+  - steering shaft decoupled
+  - tie rod snapped
   - seatbelt failed
   safety_questions:
   - Is anyone hurt?
@@ -106,3 +154,18 @@ severity:
     Medium: 2
     Low: 3
 taxonomy_ref: taxonomy.yaml
+# Pack-owned cost figures for financial_impact (item 33). Reviewed estimates
+# for pilot ROI math — not audited financials.
+cost_model:
+  cost_per_case: 250.0
+  recall_cost_per_unit: 900.0
+  exposure_multiplier: 3.0
+  currency: USD
+# Evidence-backed region centroids for hotspot maps (item 33).
+region_centroids:
+  CA: [-119.4, 36.8]
+  TX: [-99.3, 31.5]
+  NY: [-75.5, 43.0]
+  FL: [-81.5, 27.8]
+  MI: [-85.6, 44.3]
+  OH: [-82.8, 40.4]

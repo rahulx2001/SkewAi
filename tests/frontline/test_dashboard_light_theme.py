@@ -79,3 +79,24 @@ def test_light_token_block_and_shell_overrides_exist() -> None:
         ':root[data-theme="light"] .stat-card',
     ):
         assert sel in ux or sel in console, f"missing {sel}"
+
+
+def test_house_tokens_are_charcoal_not_teal_sora() -> None:
+    """Drive shipped CSS: Image #1 charcoal system, not the old teal ops pair."""
+    styles = (DASH / "src" / "styles.css").read_text(encoding="utf-8")
+    ux = (DASH / "src" / "ux-v21.css").read_text(encoding="utf-8")
+    prompt = (REPO / "docs" / "design" / "console-prompt.md").read_text(encoding="utf-8")
+    assert "--bg: #141413" in styles
+    assert "#090b10" not in styles
+    assert "#2ec4a7" not in styles
+    assert "Sora" not in styles.split("--sans:")[1][:80]
+    assert "IBM Plex Mono" not in styles.split("--mono:")[1][:80]
+    assert "brand-scan" not in ux
+    assert "near-black warm charcoal" in prompt.lower() or "Near-black **warm charcoal**" in prompt
+    assert "Sora + IBM Plex Mono" in prompt
+    assert "image-718f63a4-a33d-4d6f-aa21-9a49784ef657.png" in prompt
+    cc = (DASH / "routes" / "CommandCenter.jsx").read_text(encoding="utf-8")
+    greet = (DASH / "src" / "ui" / "greeting.js").read_text(encoding="utf-8")
+    assert "dayGreeting" in cc
+    assert "Good afternoon" in greet
+    assert "cc-greeting" in cc

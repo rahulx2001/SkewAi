@@ -1,28 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
-
-function Sparkline({ trend }) {
-  if (!trend || trend.length === 0)
-    return <span className="faint">—</span>;
-  // trend is newest-first from the API; show oldest → newest left→right.
-  const rows = [...trend].reverse();
-  const max = Math.max(1, ...rows.map((r) => r.record_count || 0));
-  return (
-    <div className="spark" title={rows.map((r) => `${r.iso_week}: ${r.record_count}`).join(", ")}>
-      {rows.map((r, i) => {
-        const h = Math.max(2, Math.round((r.record_count / max) * 22));
-        return (
-          <div
-            key={i}
-            className={"bar" + (r.is_anomaly ? " anomaly" : "")}
-            style={{ height: h }}
-            title={`${r.iso_week} · ${r.record_count} · z=${r.z_score?.toFixed(1) || "—"}`}
-          />
-        );
-      })}
-    </div>
-  );
-}
+import WeekSpark from "../src/ui/WeekSpark.jsx";
 
 
 
@@ -93,7 +71,8 @@ export default function EarlyWarningBoard() {
 
   useEffect(() => {
     if (tab === "clusters") loadClusters();
-    else loadInvestigations();
+    else if (tab === "investigations") loadInvestigations();
+    else loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -201,6 +180,15 @@ export default function EarlyWarningBoard() {
         >
           Investigations
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "fixes"}
+          className={"tab" + (tab === "fixes" ? " active" : "")}
+          onClick={() => setTab("fixes")}
+        >
+          Fix loop
+        </button>
       </div>
 
       {loading && (
@@ -263,7 +251,7 @@ export default function EarlyWarningBoard() {
                       </div>
                       <div className={"score" + (composite > 0 ? " hot" : "")}>{composite}</div>
                     </div>
-                    <Sparkline trend={c.weekly_trend} />
+                    <WeekSpark trend={c.weekly_trend} />
                     <div className="meta-line">
                       <span>{c.live_case_count ?? 0} live</span>
                       <span>{c.critical_count ?? 0} critical</span>
@@ -319,7 +307,7 @@ export default function EarlyWarningBoard() {
                         )}
                       </td>
                       <td className="mono"><strong>{composite}</strong></td>
-                      <td><Sparkline trend={c.weekly_trend} /></td>
+                      <td><WeekSpark trend={c.weekly_trend} compact /></td>
                       <td className="mono">{c.lead_time_weeks != null ? `${c.lead_time_weeks}w` : "—"}</td>
                       <td className="mono">
                         {c.matched_advisory ? (
@@ -387,7 +375,7 @@ export default function EarlyWarningBoard() {
                     <td>{inv.title}</td>
                     <td className="mono">{inv.case_count ?? (inv.cases?.length || 0)}</td>
                     <td>
-                      <Sparkline trend={trend} />
+                      <WeekSpark trend={trend} compact />
                     </td>
                     <td className="mono">
                       {inv.days_open != null ? `${inv.days_open}d` : "—"}
@@ -437,8 +425,102 @@ export default function EarlyWarningBoard() {
         </div>
       )}
 
-      {/* ── Simulate modal ──────────────────────────────────────────── */}
-      {simModal && (
+      {/* ── Fix loop tab (item 37): before/after + reopen rate ───────── */}
+      {tab === "fixes" && !loading && (
+        <>
+          {metrics?.fix_loop ? (
+            <>
+              <div className="snapshot-grid">
+                <div className="snapshot-tile">
+                  <div className="k">Fixes recorded</div>
+                  <div className="v">{metrics.fix_loop.fixes_recorded ?? 0}</div>
+                  <div className="h">auto-recorded on close</div>
+                </div>
+                <div className="snapshot-tile accent">
+                  <div className="k">Resolved</div>
+                  <div className="v">{metrics.fix_loop.resolved ?? 0}</div>
+                  <div className="h">after-rate below before-rate</div>
+                </div>
+                <div className="snapshot-tile danger">
+                  <div className="k">Reopened</div>
+                  <div className="v">{metrics.fix_loop.reopened ?? 0}</div>
+                  <div className="h">
+                    reopen rate{" "}
+                    {metrics.fix_loop.reopen_rate != null
+                      ? `${Math.round(metrics.fix_loop.reopen_rate * 100)}%`
+                      : "—"}
+                  </div>
+                </div>
+              </div>
+              <div className="panel" style={{ padding: 0, overflow: "hidden" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>fix</th>
+                      <th>category</th>
+                      <th>before</th>
+                      <th>after</th>
+                      <th>before → after</th>
+                      <th>verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(metrics.fix_loop.series || []).length === 0 && (
+                      <tr>
+                        <td colSpan={6}>
+                          <div className="empty">
+                            No fixes measured yet — close an investigation to record one.
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    {(metrics.fix_loop.series || []).map((s) => {
+                      const before = Number(s.before_count ?? 0);
+                      const after = Number(s.after_count ?? 0);
+                      const max = Math.max(before, after, 1);
+                      return (
+                        <tr key={s.fix_id}>
+                          <td className="mono">{String(s.fix_id).slice(0, 12)}…</td>
+                          <td>{s.category || "—"}</td>
+                          <td className="mono">{before}</td>
+                          <td className="mono">{after}</td>
+                          <td>
+                            <div
+                              className="before-after"
+                              role="img"
+                              aria-label={`before ${before}, after ${after}`}
+                            >
+                              <div
+                                className="ba-bar ba-before"
+                                style={{ width: `${Math.round((before / max) * 100)}%` }}
+                              />
+                              <div
+                                className="ba-bar ba-after"
+                                style={{ width: `${Math.round((after / max) * 100)}%` }}
+                              />
+                            </div>
+                          </td>
+                          <td>
+                            {s.improved ? (
+                              <span className="chip green">resolved</span>
+                            ) : (
+                              <span className="chip orange">watch</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <div className="empty">Fix-loop metrics unavailable.</div>
+          )}
+        </>
+      )}
+
+      {/* ── Simulate modal ──────────────────────────────────────────── */}      {simModal && (
         <div
           className="modal-backdrop"
           onClick={(e) => e.target.className === "modal-backdrop" && setSimModal(false)}

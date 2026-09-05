@@ -145,11 +145,12 @@ async def test_supervised_human_turn_ledgered_before_delivery(orchestrator_facto
 
 
 async def test_release_restores_prior_state(orchestrator_factory):
-    """release() returns to the pre-supervised state, not always COLLECTING."""
+    """release() recomputes from facts (audit 3.3): incomplete slots → COLLECTING."""
     orch, _ = orchestrator_factory()
     await orch.start()
-    await orch.handle_customer_turn("My 2019 Honda CR-V grinds when I brake.")
-    assert orch.ctx.state == COLLECTING  # safety question still pending
+    await orch.handle_customer_turn("My car has a problem.")
+    assert orch.ctx.state == COLLECTING  # slots incomplete
+    assert not orch.ctx.has_required_slots()
     pre_state = orch.ctx.state
     await orch.takeover()
     assert orch.ctx.state == SUPERVISED
@@ -220,6 +221,8 @@ async def test_hangup_with_case_moves_to_closing(orchestrator_factory):
     await orch2.handle_customer_turn("My 2019 Honda CR-V grinds when I brake.")
     await orch2.handle_customer_turn("Nobody is hurt.")
     await orch2.handle_customer_turn("Yes, I'm in a safe location.")
+    if orch2.ctx.slots.get("__confirm_pending__"):
+        await orch2.handle_customer_turn("Yes, that's right.")
     assert orch2.ctx.state == DONE
     assert orch2.ctx.case_id is not None
     # Post-DONE hangup is a no-op — the case survives.
@@ -275,6 +278,8 @@ async def test_enrichment_timeout_falls_back_to_closing(orchestrator_factory):
             await orch.handle_customer_turn("Nobody is hurt.")
             # The second safety question ("Are you in a safe location?") is asked.
             await orch.handle_customer_turn("Yes, I'm safe.")
+            if orch.ctx.slots.get("__confirm_pending__"):
+                await orch.handle_customer_turn("Yes, that's right.")
 
     # Despite the timeout, we must still reach DONE with a case created.
     assert orch.ctx.state == DONE
@@ -336,6 +341,8 @@ async def test_safety_questions_exhausted_then_enriching(orchestrator_factory):
     assert hooks.agent_texts()[-1].lower().startswith("are you in a safe location")
     # Answer the second safety question — now enrichment fires.
     await orch.handle_customer_turn("Yes, I'm in a safe location.")
+    if orch.ctx.slots.get("__confirm_pending__"):
+        await orch.handle_customer_turn("Yes, that's right.")
     assert orch.ctx.state == DONE  # enrichment + closing happen synchronously
     assert orch.ctx.case_id is not None
 

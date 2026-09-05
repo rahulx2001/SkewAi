@@ -46,10 +46,10 @@ async def test_human_turn_ledgered_before_delivery(orchestrator_factory):
 
 
 async def test_release_restores_collecting_with_slots(orchestrator_factory):
-    """After release, the orchestrator returns to COLLECTING with slots intact."""
+    """After release with incomplete slots, COLLECTING resumes with slots intact."""
     orch, _ = orchestrator_factory()
     await orch.start()
-    await orch.handle_customer_turn("My 2019 Honda CR-V grinds when I brake.")
+    await orch.handle_customer_turn("My car has a problem.")
     slots_before = dict(orch.ctx.slots)
     state_before = orch.ctx.state
 
@@ -91,6 +91,8 @@ async def test_supervisor_close_creates_case(orchestrator_factory):
     await orch.handle_customer_turn("My 2019 Honda CR-V grinds when I brake.")
     await orch.handle_customer_turn("Nobody is hurt.")
     await orch.handle_customer_turn("Yes, I'm in a safe location.")
+    if orch.ctx.slots.get("__confirm_pending__"):
+        await orch.handle_customer_turn("Yes, that's right.")
     assert orch.ctx.state == "DONE"
     case_id = orch.ctx.case_id
     assert case_id is not None

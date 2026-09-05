@@ -273,9 +273,11 @@ def test_nl_views_reports_obs_compliance_voice(reset_ops_db, seed_automotive_pac
     assert digest["kpis"]
 
     span = emit_span("pipeline.trust", attributes={"pack": pack.id})
-    assert span["instrumentation"] == "otel-compatible"
+    # Item 47: real SDK label when installed, honest in-house label otherwise.
+    assert span["instrumentation"] in ("opentelemetry-sdk", "in-house")
     ev = capture_event("pipeline test", level="info")
-    assert ev["sdk"] == "skew-sentry-compat"
+    # Item 47: real SDK label when installed, honest in-house label otherwise.
+    assert ev["sdk"] in ("sentry-sdk", "in-house")
     slo = record_slo_sample("audit_grounded", numerator=99, denominator=100)
     assert slo["breached"] is False
     jobs = job_queue_status()
@@ -394,6 +396,8 @@ async def test_intake_low_confidence_lands_in_queue(orchestrator_factory, reset_
     await orch.start()
     n_safety = len(orch.ctx.pack.manifest.safety.safety_questions or [])
     orch.ctx._safety_asked = set(range(n_safety))
+    orch.ctx.slots["__safety_questions_asked__"] = ",".join(str(i) for i in range(n_safety))
+    orch.ctx.slots.pop("__safety_pending__", None)
     for slot in orch.ctx.required_slots_remaining():
         orch.ctx.slot_attempts[slot] = 9
     await orch.handle_customer_turn("no model year in this sentence")

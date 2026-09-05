@@ -153,6 +153,37 @@ class SeveritySpec(BaseModel):
     )
 
 
+# ── Cost model + region centroids (item 33/34) ───────────────────────────────
+
+
+class CostModel(BaseModel):
+    """Pack-configured cost figures for financial_impact (item 33).
+
+    No env-var guessing: every number is declared here, in the pack, where
+    operators can review it. ``exposure_multiplier`` replaces the old
+    arbitrary ``*10`` recall multiplier with a named, pack-owned assumption.
+    """
+
+    cost_per_case: float = 250.0
+    recall_cost_per_unit: float = 900.0
+    exposure_multiplier: float = 1.0
+    currency: str = "USD"
+
+
+class BookingPolicy(BaseModel):
+    """Pack-owned authorization limits for booking (board #10).
+
+    The booking backend is a labeled stub, but the POLICY is real and
+    enforced: at most ``max_per_case`` bookings per case, and any booking
+    when ``require_supervisor`` is true (or the cap is hit) returns
+    ``requires_approval`` instead of booking — a supervisor approves via
+    the normal takeover flow.
+    """
+
+    max_per_case: int = 1
+    require_supervisor: bool = False
+
+
 # ── Top-level manifest ──────────────────────────────────────────────────────
 
 
@@ -180,6 +211,13 @@ class PackManifest(BaseModel):
     taxonomy_ref: str = Field(default="taxonomy.yaml")
     # optional: relative path to the per-pack domain DuckDB (overrides default)
     domain_db: str | None = None
+    # optional: pack-owned cost figures (financial_impact reads these; item 33)
+    cost_model: CostModel = Field(default_factory=CostModel)
+    # optional: booking authorization limits (board #10)
+    booking_policy: BookingPolicy = Field(default_factory=BookingPolicy)
+    # optional: evidence-backed region centroids for hotspot maps
+    # (region -> [lon, lat]); absent regions fall back to labeled demo coords
+    region_centroids: dict[str, list[float]] = Field(default_factory=dict)
 
     @field_validator("slot_frame")
     @classmethod

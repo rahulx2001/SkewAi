@@ -1,4 +1,10 @@
 import { useEffect, useState } from "react";
+import {
+  apiHeaders,
+  getStoredApiKey,
+  notifyAuthChange,
+  setApiKey as storeApiKey,
+} from "../src/apiAuth.js";
 
 export default function Settings() {
   const [packs, setPacks] = useState([]);
@@ -7,9 +13,10 @@ export default function Settings() {
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState(null);
   const [alertWebhook, setAlertWebhook] = useState("");
-  const [apiKey, setApiKey] = useState(
-    () => localStorage.getItem("frontline_api_key") || ""
-  );
+  const [apiKey, setApiKey] = useState(() => getStoredApiKey());
+  // Explicit opt-in persistence (item 20): memory-only by default, disk
+  // only when the operator checks "Remember on this device".
+  const [rememberKey, setRememberKey] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
   const [deadLetters, setDeadLetters] = useState([]);
   const [dlLoading, setDlLoading] = useState(false);
@@ -23,13 +30,8 @@ export default function Settings() {
   const [connMsg, setConnMsg] = useState(null);
   const [connLoading, setConnLoading] = useState(false);
 
-  function apiHeaders() {
-    const h = {};
-    // Prefer live input, fall back to localStorage (shared helper)
-    const key = (apiKey || localStorage.getItem("frontline_api_key") || "").trim();
-    if (key) h["X-API-Key"] = key;
-    return h;
-  }
+  // All requests go through the centralized credential helper
+  // (src/apiAuth.js) — no direct storage reads in components (item 46).
 
   async function load() {
     setLoading(true);
@@ -164,7 +166,11 @@ export default function Settings() {
   }, []);
 
   function saveApiKey() {
-    localStorage.setItem("frontline_api_key", apiKey.trim());
+    // Centralized credential handling: sync the live input into the store
+    // first so saved requests use exactly what the operator typed.
+    storeApiKey(apiKey.trim(), { remember: rememberKey });
+    setApiKey(apiKey.trim());
+    notifyAuthChange();
     // Reload pack list + ops surfaces that require the key when auth is on.
     load();
     loadDeadLetters();
@@ -248,6 +254,14 @@ export default function Settings() {
             Save
           </button>
         </div>
+        <label className="row" style={{ gap: 8, marginTop: 8, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={rememberKey}
+            onChange={(e) => setRememberKey(e.target.checked)}
+          />
+          Remember on this device (otherwise the key lives in memory only)
+        </label>
       </div>
 
       <div className="panel" style={{ marginBottom: 16 }}>

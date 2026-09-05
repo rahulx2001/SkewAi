@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { dayGreeting } from "../src/ui/greeting.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -42,12 +43,46 @@ const consoleCss = read(path.join(srcDir, "console.css"));
 const ux = read(path.join(srcDir, "ux-v21.css"));
 const allSrc = styles + "\n" + consoleCss + "\n" + ux;
 
-// Dark default tokens must remain dark
+function hexLum(hex) {
+  const h = hex.trim().replace("#", "");
+  if (h.length !== 6) return null;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+// Dark default tokens must remain dark (warm charcoal, not teal-slate)
 const darkBg = styles.match(/:root\s*\{[^}]*--bg:\s*([^;]+);/s);
-if (!darkBg || !/#0[0-9a-f]{5}/i.test(darkBg[1].trim())) {
-  fail(`default :root --bg must stay dark, got: ${darkBg && darkBg[1]}`);
+const darkHex = darkBg && darkBg[1].trim();
+const darkLum = darkHex && hexLum(darkHex);
+if (!darkBg || darkLum == null || darkLum > 0.18) {
+  fail(`default :root --bg must stay dark, got: ${darkHex}`);
 } else {
-  ok(`dark :root --bg = ${darkBg[1].trim()}`);
+  ok(`dark :root --bg = ${darkHex} lum=${darkLum.toFixed(3)}`);
+}
+if ((darkHex || "").toLowerCase() === "#090b10") {
+  fail("default --bg must not be the old teal-slate #090b10");
+}
+if (/Sora/i.test(styles) && /--sans:[^;]*Sora/.test(styles)) {
+  fail("house --sans must not be Sora");
+} else {
+  ok("house --sans is not Sora");
+}
+if (/IBM Plex Mono/.test(styles) && /--mono:[^;]*IBM Plex Mono/.test(styles)) {
+  fail("house --mono must not be IBM Plex Mono");
+} else {
+  ok("house --mono is not IBM Plex Mono");
+}
+if (/--accent:\s*#2ec4a7/i.test(styles)) {
+  fail("house --accent must not be teal #2ec4a7");
+} else {
+  ok("house --accent is not #2ec4a7");
+}
+if (/brand-scan/.test(allSrc)) {
+  fail("teal brand-scan lockup still present");
+} else {
+  ok("no brand-scan lockup");
 }
 
 // Light token block must define light bg + dark ink
@@ -110,7 +145,7 @@ for (const sel of requiredLight) {
 ok("required light shell/card overrides present");
 
 // Tokenized shell backgrounds
-if (!/\.sidebar\s*\{[^}]*var\(--bg-(panel|raised)\)/s.test(ux + styles)) {
+if (!/\.sidebar\s*\{[^}]*var\(--bg/s.test(ux + styles)) {
   fail(".sidebar must use theme tokens for background");
 }
 if (!/\.main\s*\{[^}]*var\(--bg/s.test(ux + styles)) {
@@ -145,23 +180,49 @@ if (!distCssFiles.length) {
       fail("dist CSS missing light theme rules");
     }
   }
-  if (!/--bg:\s*#090b10/.test(distCss) && !/--bg:#090b10/.test(distCss)) {
-    // minifier may drop spaces
-    if (!/--bg:\s*#090b10/i.test(distCss) && !distCss.includes("#090b10")) {
-      fail("dist CSS lost dark default --bg");
-    } else {
-      ok("dist retains dark default --bg");
-    }
-  } else {
-    ok("dist retains dark default --bg");
+  if (/#090b10/i.test(distCss)) {
+    fail("dist CSS still contains old teal-slate #090b10");
   }
-  // light bg present
-  if (!/#e9eef5|#f3f5f9|#eef2f7|#e4ebf3/i.test(distCss)) {
+  if (/#2ec4a7/i.test(distCss)) {
+    fail("dist CSS still contains old teal accent #2ec4a7");
+  }
+  if (!/--bg:\s*#141413/.test(distCss) && !distCss.includes("#141413")) {
+    fail("dist CSS lost dark charcoal --bg");
+  } else {
+    ok("dist retains dark charcoal --bg");
+  }
+  // light bg present (warm paper, not old teal daylight)
+  if (!/#f3f1eb|#faf8f3|#fffcf6|#e8e4db/i.test(distCss)) {
     fail("dist CSS missing expected light surface hexes");
   } else {
     ok("dist CSS includes light surface colors");
   }
   ok(`dist CSS checked: ${distCssFiles.join(", ")}`);
+}
+
+const localPm = dayGreeting(new Date(2026, 7, 16, 15, 0, 0));
+if (localPm !== "Good afternoon") {
+  fail(`dayGreeting(15:00 local) must be Good afternoon, got ${localPm}`);
+} else {
+  ok(`dayGreeting afternoon = ${localPm}`);
+}
+const localAm = dayGreeting(new Date(2026, 7, 16, 8, 0, 0));
+if (localAm !== "Good morning") {
+  fail(`dayGreeting(08:00) must be Good morning, got ${localAm}`);
+} else {
+  ok(`dayGreeting morning = ${localAm}`);
+}
+
+const promptPath = path.resolve(root, "..", "docs", "design", "console-prompt.md");
+if (!fs.existsSync(promptPath)) {
+  fail("missing docs/design/console-prompt.md");
+} else {
+  const prompt = read(promptPath);
+  if (!prompt.includes("image-718f63a4-a33d-4d6f-aa21-9a49784ef657.png")) {
+    fail("design prompt does not point at Image #1");
+  } else {
+    ok("design prompt points at Image #1");
+  }
 }
 
 if (process.exitCode) {

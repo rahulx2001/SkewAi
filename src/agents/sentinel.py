@@ -28,6 +28,18 @@ class SentinelAgent(Agent):
 
     async def run(self, trigger: str = "entities_complete", **kwargs: Any) -> dict[str, Any]:
         ctx = self.ctx
+        # 6.4: hot-kill without redeploy
+        try:
+            from src.ops.pilot import agent_enabled
+            if not agent_enabled("sentinel"):
+                record_action(self._action(
+                    action_type="advisory_check",
+                    input_summary="flag FRONTLINE_AGENT_SENTINEL_ENABLED=0",
+                    output_summary="sentinel disabled by flag; skipped",
+                ))
+                return {"skipped": True, "reason": "disabled_by_flag", "advisory_match": None}
+        except Exception:
+            pass
 
         if trigger == "escalation":
             # Kill-switch from Intake. Mark escalated; Case Agent will P1 it.
@@ -76,7 +88,15 @@ class SentinelAgent(Agent):
                 output_summary="no advisories matched",
                 evidence_ids=[],
             ))
-            return {"advisory_match": None}
+            # 1.3: no-match is novelty signal, not silence
+            try:
+                import os as _os
+                from src.agents.investigator import _record_novel_candidate as _nov
+                _thr = float(_os.getenv("FRONTLINE_NOVELTY_MIN_SCORE", "3.0"))
+                _nov(ctx, category, entity_2, entity_3, 0.0)
+            except Exception:
+                pass
+            return {"advisory_match": None, "novel_candidate": True}
 
         # Take the most recent advisory (rows are already ordered by SQL).
         match = dict(zip(cols, rows[0]))

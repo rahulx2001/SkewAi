@@ -74,15 +74,13 @@ def test_hardened_marketplace_install_requires_key(hard_client):
 # ── FIND-002 / FIND-004: session + DSR ───────────────────────────────────────
 
 
-def test_open_mode_session_clamps_to_agent(open_client):
+def test_open_mode_session_json_body_denied(open_client):
     r = open_client.post(
         "/api/frontline/auth/session",
         json={"subject": "attacker", "role": "admin"},
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["role"] == "agent"
-    assert body["token"]
+    assert r.status_code == 403
+    assert not r.json().get("token")
 
 
 def test_hardened_session_rejects_admin_without_issuer(hard_client):
@@ -134,13 +132,7 @@ def test_dsr_delete_service_key_forbidden_without_admin_session(hard_client):
 
 def test_dsr_delete_with_admin_session_ok(hard_client, monkeypatch):
     monkeypatch.setenv("FRONTLINE_BOOTSTRAP_ADMIN", "1")
-    mint = hard_client.post(
-        "/api/frontline/auth/session",
-        headers=_auth_h(),
-        json={"subject": "admin-user", "role": "admin"},
-    )
-    assert mint.status_code == 200
-    token = mint.json()["token"]
+    token = issue_session("admin-user", "admin", issuer_role="admin")["token"]
     r = hard_client.delete(
         "/api/frontline/dsr/int_does_not_exist",
         headers={**_auth_h(), "X-Frontline-Session": token},
@@ -234,13 +226,8 @@ def test_open_mode_registry_install_still_works(open_client):
 
 def _admin_headers(client, monkeypatch):
     monkeypatch.setenv("FRONTLINE_BOOTSTRAP_ADMIN", "1")
-    mint = client.post(
-        "/api/frontline/auth/session",
-        headers=_auth_h(),
-        json={"subject": "admin", "role": "admin"},
-    )
-    assert mint.status_code == 200
-    return {**_auth_h(), "X-Frontline-Session": mint.json()["token"]}
+    token = issue_session("admin", "admin", issuer_role="admin")["token"]
+    return {**_auth_h(), "X-Frontline-Session": token}
 
 
 def test_open_mode_privileged_routes_require_key(open_client):

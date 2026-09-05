@@ -46,6 +46,27 @@ def _ensure(con) -> None:
         )
         """
     )
+    # Server-side plan binding (item 13): the plan an invoice pays for is
+    # recorded at checkout; webhooks must never trust client-supplied plan.
+    for ddl in (
+        "ALTER TABLE billing_invoices ADD COLUMN plan VARCHAR",
+    ):
+        try:
+            con.execute(ddl)
+        except Exception:
+            pass
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS billing_webhook_events (
+            event_id VARCHAR PRIMARY KEY,
+            stripe_session VARCHAR,
+            tenant_id VARCHAR NOT NULL,
+            plan VARCHAR NOT NULL,
+            status VARCHAR NOT NULL,
+            received_at TIMESTAMP NOT NULL
+        )
+        """
+    )
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS tenant_seats (
@@ -140,6 +161,8 @@ def enforce_plan(tenant_id: str, *, metric: str = "contacts", quantity: float = 
 
 
 def usage_dashboard(tenant_id: str = "default") -> dict[str, Any]:
+    from src.frontline.capabilities import list_capabilities
+
     acct = get_account(tenant_id)
     summary = usage_summary(tenant_id=tenant_id)
     return {
@@ -149,7 +172,19 @@ def usage_dashboard(tenant_id: str = "default") -> dict[str, Any]:
         "seats_used": acct["seats_used"],
         "metrics": summary.get("metrics") or {},
         "month": summary.get("month"),
+        # Item 40: stubs are listed with availability=stub here so sales/UI
+        # can never present them as paid production features.
+        "capabilities": list_capabilities(),
     }
+
+
+def plan_includes(plan: str, capability: str) -> bool:
+    """Whether *plan* sells *capability*. Stubs are never included (item 40)."""
+    from src.frontline.capabilities import is_sellable
+
+    if plan not in PLAN_TIERS:
+        raise ValueError(f"unknown plan {plan}")
+    return is_sellable(capability)
 
 
 def stripe_checkout(
@@ -166,14 +201,25 @@ def stripe_checkout(
     session = stripe_session or ("cs_test_" + new_ulid())
     with ops_con() as con:
         _ensure(con)
-        con.execute(
-            """
-            INSERT INTO billing_invoices
-            (invoice_id, tenant_id, amount_cents, currency, status, stripe_session, created_at)
-            VALUES (?, ?, ?, 'usd', 'open', ?, ?)
-            """,
-            [iid, tenant_id, int(amount_cents), session, utc_now()],
-        )
+        try:
+            con.execute(
+                """
+                INSERT INTO billing_invoices
+                (invoice_id, tenant_id, amount_cents, currency, status, stripe_session, plan, created_at)
+                VALUES (?, ?, ?, 'usd', 'open', ?, ?, ?)
+                """,
+                [iid, tenant_id, int(amount_cents), session, plan, utc_now()],
+            )
+        except Exception:
+            # Legacy table without the plan column (pre-item-13 DBs).
+            con.execute(
+                """
+                INSERT INTO billing_invoices
+                (invoice_id, tenant_id, amount_cents, currency, status, stripe_session, created_at)
+                VALUES (?, ?, ?, 'usd', 'open', ?, ?)
+                """,
+                [iid, tenant_id, int(amount_cents), session, utc_now()],
+            )
     return {
         "invoice_id": iid,
         "tenant_id": tenant_id,
@@ -186,26 +232,151 @@ def stripe_checkout(
     }
 
 
-def stripe_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    """Apply a Stripe-like webhook (checkout.session.completed)."""
+def stripe_webhook(
+    payload: dict[str, Any],
+    *,
+    raw_body: bytes | None = None,
+    signature: str | None = None,
+) -> dict[str, Any]:
+    """Apply a Stripe-like webhook (checkout.session.completed).
+
+    Hardening (item 13):
+    - When STRIPE_WEBHOOK_SECRET is set, require a valid
+      ``t=<ts>,v1=hmac_sha256`` signature over the raw body AND a fresh
+      timestamp (``STRIPE_WEBHOOK_TOLERANCE_S``, default 300s) — replay
+      protection. Missing/stale/forged signatures raise PermissionError.
+    - Never trust client-supplied plan/tenant: the plan comes from the
+      checkout invoice row and the tenant must equal the invoice's tenant.
+      Unknown/forged sessions raise LookupError.
+    - Processed Stripe event IDs are recorded (``billing_webhook_events``);
+      a repeated delivery returns the stored result without side effects.
+    """
+    import hashlib
+    import hmac
+    import os
+    import time
+
     event = payload.get("type") or payload.get("event") or ""
+    event_id = str(payload.get("id") or "").strip()
     session = (
         (payload.get("data") or {}).get("object", {}).get("id")
         or payload.get("stripe_session")
         or ""
     )
-    tenant_id = payload.get("tenant_id") or "default"
-    plan = payload.get("plan") or "pilot"
+    claimed_tenant = payload.get("tenant_id") or "default"
+
+    secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+    if secret:
+        if not raw_body or not signature:
+            raise PermissionError("missing webhook signature")
+        # Expected format: t=<unix-ts>,v1=<hex> (Stripe-style). v1 only.
+        ts_raw, v1 = "", ""
+        for part in str(signature).split(","):
+            part = part.strip()
+            if part.startswith("t="):
+                ts_raw = part[2:].strip()
+            elif part.startswith("v1="):
+                v1 = part[3:].strip()
+        if not v1:
+            raise PermissionError("invalid webhook signature")
+        expect = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expect, v1):
+            raise PermissionError("invalid webhook signature")
+        try:
+            tolerance = int(os.getenv("STRIPE_WEBHOOK_TOLERANCE_S") or "300")
+        except ValueError:
+            tolerance = 300
+        try:
+            age = abs(time.time() - int(ts_raw))
+        except (TypeError, ValueError):
+            raise PermissionError("invalid webhook timestamp")
+        if age > tolerance:
+            raise PermissionError("stale webhook signature (replay rejected)")
+
     with ops_con() as con:
         _ensure(con)
-        if session:
+        # Idempotent replay: same Stripe event ID returns the stored result.
+        if event_id:
+            try:
+                prior = con.execute(
+                    "SELECT status, tenant_id, plan FROM billing_webhook_events WHERE event_id = ?",
+                    [event_id],
+                ).fetchone()
+            except Exception:
+                prior = None
+            if prior:
+                return {
+                    "ok": True,
+                    "event": event or "invoice.paid",
+                    "plan": prior[2],
+                    "tenant_id": prior[1],
+                    "event_id": event_id,
+                    "replayed": True,
+                }
+        if not session:
+            raise ValueError("stripe_session required for plan change")
+        try:
+            inv = con.execute(
+                "SELECT invoice_id, tenant_id, status, plan FROM billing_invoices WHERE stripe_session = ?",
+                [session],
+            ).fetchone()
+        except Exception:
+            # Legacy table without plan column.
+            inv = None
+            try:
+                legacy = con.execute(
+                    "SELECT invoice_id, tenant_id, status FROM billing_invoices WHERE stripe_session = ?",
+                    [session],
+                ).fetchone()
+                if legacy:
+                    inv = (legacy[0], legacy[1], legacy[2], None)
+            except Exception:
+                inv = None
+        if not inv:
+            raise LookupError(f"unknown stripe_session: {session[:24]}")
+        invoice_id, invoice_tenant, invoice_status, invoice_plan = inv
+        # The session is bound to its invoice's account — a mismatched
+        # tenant claim is an escalation attempt, not a payment.
+        if claimed_tenant != invoice_tenant:
+            raise PermissionError(
+                f"webhook tenant {claimed_tenant!r} does not match invoice account"
+            )
+        # Server-side plan: the invoice row is authoritative. A client
+        # payload asking for a different plan is ignored (never escalated).
+        plan = invoice_plan or payload.get("plan") or "pilot"
+        if plan not in PLAN_TIERS:
+            raise ValueError(f"unknown plan {plan}")
+        already_paid = (invoice_status == "paid")
+        if not already_paid:
             con.execute(
                 "UPDATE billing_invoices SET status = 'paid' WHERE stripe_session = ?",
                 [session],
             )
+        if event_id:
+            try:
+                con.execute(
+                    """
+                    INSERT INTO billing_webhook_events
+                    (event_id, stripe_session, tenant_id, plan, status, received_at)
+                    VALUES (?, ?, ?, ?, 'paid', ?)
+                    """,
+                    [event_id, session, invoice_tenant, plan, utc_now()],
+                )
+            except Exception:
+                pass
     if event in {"checkout.session.completed", "invoice.paid", ""}:
-        set_plan(tenant_id, plan)
-    return {"ok": True, "event": event or "invoice.paid", "plan": plan, "tenant_id": tenant_id}
+        # set_plan is idempotent; replays converge to the same plan.
+        set_plan(invoice_tenant, plan)
+    out: dict[str, Any] = {
+        "ok": True,
+        "event": event or "invoice.paid",
+        "plan": plan,
+        "tenant_id": invoice_tenant,
+    }
+    if event_id:
+        out["event_id"] = event_id
+        out["replayed"] = already_paid
+    return out
 
 
 def record_metered(metric: str, quantity: float = 1.0, *, tenant_id: str = "default") -> dict[str, Any]:
@@ -223,6 +394,7 @@ __all__ = [
     "assign_seat",
     "enforce_plan",
     "usage_dashboard",
+    "plan_includes",
     "stripe_checkout",
     "stripe_webhook",
     "record_metered",

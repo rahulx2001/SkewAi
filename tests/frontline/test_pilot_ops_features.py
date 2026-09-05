@@ -75,4 +75,6 @@ def test_health_reports_single_worker(reset_ops_db, seed_automotive_pack, monkey
     assert r.status_code == 200
     body = r.json()
     assert body.get("single_worker") is True
-    assert body.get("orchestrator_registry") == "in_process"
+    # WS attach stays process-local; terminal close is fleet-safe via
+    # distributed claims (item 31).
+    assert "in_process" in (body.get("orchestrator_registry") or "")

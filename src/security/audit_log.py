@@ -18,6 +18,13 @@ from src.config import REPO_ROOT
 from src.ids import new_ulid
 
 _log = logging.getLogger("skewai.security_audit")
+try:
+    from src.security.secrets import SecretRedactionFilter
+
+    if not any(isinstance(f, SecretRedactionFilter) for f in _log.filters):
+        _log.addFilter(SecretRedactionFilter())
+except Exception:
+    pass
 _lock = threading.Lock()
 
 _DEFAULT_PATH = REPO_ROOT / "data" / "security_audit.jsonl"

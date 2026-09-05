@@ -252,4 +252,173 @@ def list_queue_all() -> list[dict[str, Any]]:
     return items
 
 
-__all__ = ["list_queue", "list_queue_all", "enqueue_insight"]
+__all__ = ["list_queue", "list_queue_all", "enqueue_insight", "export_audit_regressions",
+           "create_review", "list_reviews", "assign_review", "resolve_review",
+           "REVIEW_SLA_HOURS"]
+
+
+#: Review SLA (board #10): a mismatch gets an owner and a verdict within 72h,
+#: otherwise the queue grows unbounded and findings evaporate.
+REVIEW_SLA_HOURS = 72
+
+
+def create_review(
+    *,
+    interaction_id: str | None = None,
+    case_id: str | None = None,
+    reason: str = "audit_mismatch",
+    sla_hours: int = REVIEW_SLA_HOURS,
+) -> dict[str, Any]:
+    """Open a review-queue row with owner=null (unassigned) and an SLA."""
+    from datetime import timedelta as _td
+
+    from src.data.timeutil import utc_now as _now
+    from src.ids import new_ulid as _ulid
+
+    rid = "rvw_" + _ulid()
+    now = _now()
+    with ops_con() as con:
+        con.execute(
+            """
+            INSERT INTO review_queue
+            (review_id, interaction_id, case_id, reason, status, owner,
+             sla_due_at, verdict, created_at)
+            VALUES (?, ?, ?, ?, 'open', NULL, ?, NULL, ?)
+            """,
+            [rid, interaction_id, case_id, reason, now + _td(hours=sla_hours), now],
+        )
+    return {"review_id": rid, "status": "open", "owner": None,
+            "sla_due_at": (now + _td(hours=sla_hours)).isoformat()}
+
+
+def list_reviews(*, status: str | None = None) -> list[dict[str, Any]]:
+    """Review rows, oldest SLA first (unassigned bubble up)."""
+    with ops_con(read_only=True) as con:
+        try:
+            sql = "SELECT review_id, interaction_id, case_id, reason, status, owner, sla_due_at, verdict, created_at FROM review_queue"
+            params: list[Any] = []
+            if status:
+                sql += " WHERE status = ?"
+                params.append(status)
+            sql += " ORDER BY sla_due_at NULLS LAST, created_at"
+            cur = con.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+
+def assign_review(review_id: str, owner: str) -> dict[str, Any]:
+    """Claim a review: open → assigned (owner recorded)."""
+    owner = (owner or "").strip()
+    if not owner:
+        raise ValueError("owner required")
+    with ops_con() as con:
+        row = con.execute(
+            "SELECT status FROM review_queue WHERE review_id = ?", [review_id]
+        ).fetchone()
+        if not row:
+            raise LookupError(f"review not found: {review_id}")
+        if row[0] not in ("open", "assigned"):
+            raise ValueError(f"review is {row[0]}, cannot assign")
+        con.execute(
+            "UPDATE review_queue SET status = 'assigned', owner = ? WHERE review_id = ?",
+            [owner[:80], review_id],
+        )
+    return {"review_id": review_id, "status": "assigned", "owner": owner[:80]}
+
+
+def resolve_review(review_id: str, verdict: str) -> dict[str, Any]:
+    """Close a review with a verdict (board #9 taxonomy).
+
+    ``ai_wrong`` verdicts are the labeled examples that feed the eval
+    harness (see export_audit_regressions); ``false_alarm`` tunes Qubot
+    precision tracking.
+    """
+    verdict = (verdict or "").strip().lower()
+    if verdict not in ("ai_wrong", "data_drift", "false_alarm"):
+        raise ValueError("verdict must be ai_wrong|data_drift|false_alarm")
+    with ops_con() as con:
+        row = con.execute(
+            "SELECT status FROM review_queue WHERE review_id = ?", [review_id]
+        ).fetchone()
+        if not row:
+            raise LookupError(f"review not found: {review_id}")
+        if row[0] not in ("open", "assigned"):
+            raise ValueError(f"review is {row[0]}, cannot resolve")
+        con.execute(
+            "UPDATE review_queue SET status = 'resolved', verdict = ? WHERE review_id = ?",
+            [verdict, review_id],
+        )
+    return {"review_id": review_id, "status": "resolved", "verdict": verdict}
+
+
+def export_audit_regressions(
+    *,
+    since_days: int = 7,
+    out_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Export review-queue mismatches as eval regression fixtures (board #9).
+
+    Every ``needs_review`` / ``unverifiable`` insight becomes one JSONL case
+    with the contact's customer turns (input) and the flagged summary
+    (expected failure signature). The eval harness consumes this directory
+    to stop the same audit finding from recurring silently. Returns counts.
+    """
+    from datetime import timedelta as _td
+    from pathlib import Path as _Path
+
+    from src.data.timeutil import utc_now as _now
+
+    dest = _Path(out_dir) if out_dir else _Path("eval") / "regression"
+    dest.mkdir(parents=True, exist_ok=True)
+    cutoff = _now() - _td(days=max(1, int(since_days)))
+    with ops_con(read_only=True) as con:
+        try:
+            rows = con.execute(
+                """
+                SELECT queue_id, kind, interaction_id, case_id, action_id,
+                       summary, created_at
+                FROM insight_queue
+                WHERE kind IN ('needs_review', 'unverifiable')
+                  AND created_at >= ?
+                ORDER BY created_at
+                """,
+                [cutoff],
+            ).fetchall()
+        except Exception:
+            rows = []
+    import json as _json
+
+    day = _now().date().isoformat()
+    path = dest / f"audit_{day}.jsonl"
+    written = 0
+    with open(path, "a", encoding="utf-8") as fh:
+        for qid, kind, iid, cid, aid, summary, created in rows:
+            turns: list[str] = []
+            if iid:
+                try:
+                    with ops_con(read_only=True) as con2:
+                        turns = [
+                            str(r[0])
+                            for r in con2.execute(
+                                "SELECT text FROM interaction_turns"
+                                " WHERE interaction_id = ? AND speaker = 'customer'"
+                                " ORDER BY seq",
+                                [iid],
+                            ).fetchall()
+                        ]
+                except Exception:
+                    turns = []
+            fh.write(_json.dumps({
+                "queue_id": qid,
+                "kind": kind,
+                "interaction_id": iid,
+                "case_id": cid,
+                "action_id": aid,
+                "customer_turns": turns,
+                "expected_failure": summary,
+                "exported_at": _now().isoformat(),
+            }) + "\n")
+            written += 1
+    return {"path": str(path), "written": written, "since_days": since_days}

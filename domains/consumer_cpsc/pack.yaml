@@ -49,6 +49,10 @@ safety:
   - emergency
   - urgent
   - dangerous
+  - hurt
+  - injured
+  - bleeding
+  - trapped
   safety_questions:
   - Is anyone in immediate danger?
   - Are you in a safe location right now?

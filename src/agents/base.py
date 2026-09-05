@@ -73,8 +73,20 @@ class InteractionContext:
     llm_calls: int = 0
     supervised: bool = False
     state: str = "GREETING"
+    # sha256 identity for returning-customer case attach (audit 1.1).
+    customer_ref: str | None = None
+    # Supervisor identity holding a takeover (board: simultaneous takeovers).
+    takeover_claimed_by: str | None = None
+    # True when the close was forced while supervised (board: human_resolved).
+    closed_while_supervised: bool = False
     # Pre-close self-critique result (set by Orchestrator._move_to_closing).
     self_critique: dict[str, Any] | None = None
+    # Enrichment ran (even partially) — hangup after this point must close
+    # with a case, never abandon evidence (audit 6.1).
+    enrichment_done: bool = False
+    # Kill-switch script captured while SUPERVISED (audit 3.3): emitted if
+    # the supervisor releases with a safety escalation pending.
+    pending_safety_script: str | None = None
 
     # ── Slot helpers ────────────────────────────────────────────────────
     def required_slots_remaining(self) -> list[str]:

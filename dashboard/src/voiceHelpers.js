@@ -224,3 +224,59 @@ export function shouldResumeListeningOnOpen({ intentionalClose, callEnded, isRec
   // Fresh connect may start with greeting path instead; reconnect always resumes listen.
   return !!isReconnect;
 }
+
+/**
+ * Is a server `error` frame fatal for this call?
+ *
+ * The server tags unrecoverable errors with `recoverable: false` (the contact is
+ * gone, already ended, or held by another socket). Retrying those just burns the
+ * reconnect budget and shows the raw 404 detail to the operator, so the widget
+ * ends the call cleanly instead. Older servers only send `detail` — fall back to
+ * matching the known unrecoverable details.
+ *
+ * @param {{ recoverable?: boolean, code?: string, detail?: string }} msg
+ */
+export function isFatalWsError(msg) {
+  if (!msg || typeof msg !== "object") return false;
+  if (msg.recoverable === false) return true;
+  if (msg.recoverable === true) return false;
+  const detail = String(msg.detail || msg.message || "").toLowerCase();
+  return (
+    detail.includes("active interaction not found") ||
+    detail.includes("interaction already ended") ||
+    detail.includes("already has an active customer websocket") ||
+    detail.startsWith("server error")
+  );
+}
+
+/** Operator-facing copy for a fatal WS error (never the raw interaction id). */
+export function fatalWsErrorMessage(msg) {
+  const code = msg && msg.code;
+  if (code === "interaction_busy") {
+    return "This contact is already open in another tab or window.";
+  }
+  if (code === "server_error") {
+    return "The contact hit a server error and was closed. Start a new call.";
+  }
+  return "This contact could not be resumed — it was closed while you were disconnected.";
+}
+
+/**
+ * Rebuild the transcript from the server's authoritative turn list on resume.
+ * The client may have missed turns while its socket was down, so the server
+ * list replaces the local one rather than being appended to it.
+ *
+ * @param {Array<{id?:string,turn_id?:string,speaker?:string,text?:string}>} turns
+ */
+export function transcriptFromResume(turns) {
+  if (!Array.isArray(turns)) return null;
+  const rows = turns
+    .filter((t) => t && String(t.text || "").trim())
+    .map((t, i) => ({
+      id: t.id || t.turn_id || `r${i + 1}`,
+      speaker: t.speaker || "agent",
+      text: String(t.text),
+      interim: false,
+    }));
+  return rows.length ? rows : null;
+}

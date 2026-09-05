@@ -13,6 +13,7 @@ two-sentence console narration (citation-verified).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.agents.base import Agent
@@ -27,7 +28,7 @@ from src.ledger import record_action
 
 _SIMILAR_SQL = """
 SELECT r.record_id, r.category, r.severity_label, r.received_at,
-       r.text, r.entity_1, r.entity_2, r.entity_3
+       r.text, r.entity_1, r.entity_2, r.entity_3, r.source, r.entity_key
 FROM records r
 WHERE (? IS NULL OR r.category = ?)
   AND (? IS NULL OR r.entity_2 = ?)
@@ -43,7 +44,7 @@ FROM clusters c
 WHERE c.pack_id = ?
   AND (c.category = ? OR ? IS NULL)
 ORDER BY c.record_count DESC
-LIMIT 1
+LIMIT 5
 """
 
 _SPIKE_SQL = """
@@ -58,9 +59,112 @@ LIMIT 4
 _BACKTEST_SQL = """
 SELECT b.cluster_id, b.advisory_id, b.lead_time_weeks, b.matched
 FROM backtest_results b
-WHERE b.cluster_id = ?
+WHERE b.cluster_id = ? AND b.matched = TRUE
 LIMIT 1
 """
+
+
+def _source_mix(similar: list[dict[str, Any]]) -> dict[str, int]:
+    """Per-source count over similar records (Axion slice).
+
+    Shows the engineer which origins corroborate the match (e.g. NHTSA: 3,
+    WARRANTY: 2) instead of a sourceless list.
+    """
+    mix: dict[str, int] = {}
+    for s in similar or []:
+        src = str(s.get("source") or "unknown").upper()
+        mix[src] = mix.get(src, 0) + 1
+    return mix
+
+
+def _cross_source_links(
+    similar: list[dict[str, Any]], *, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Same-entity records appearing in DIFFERENT sources (Axion slice).
+
+    Two tiers, labeled honestly:
+    - ``observed``: rows share the canonical ``entity_key`` (declared per
+      source in mapping.yaml, e.g. VIN/model-year or account/product/issue).
+      This is evidence an engineer can act on.
+    - ``inferred``: rows share only the normalized (category, entity_2,
+      entity_3) triple with no declared key — a heuristic, not evidence.
+    """
+    def _norm(v: Any) -> str:
+        return str(v or "").strip().upper()
+
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    by_triple: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for s in similar or []:
+        ek = _norm(s.get("entity_key"))
+        if ek:
+            by_key.setdefault(ek, []).append(s)
+        triple = (_norm(s.get("category")), _norm(s.get("entity_2")), _norm(s.get("entity_3")))
+        if any(triple):
+            by_triple.setdefault(triple, []).append(s)
+    links: list[dict[str, Any]] = []
+    for ek, rows in by_key.items():
+        sources = sorted({_norm(r.get("source")) or "UNKNOWN" for r in rows})
+        if len(sources) < 2:
+            continue
+        links.append(
+            {
+                "entity_key": ek,
+                "basis": "observed",
+                "sources": sources,
+                "record_ids": [str(r.get("record_id")) for r in rows],
+            }
+        )
+        if len(links) >= limit:
+            return links
+    for (cat, e2, e3), rows in by_triple.items():
+        sources = sorted({_norm(r.get("source")) or "UNKNOWN" for r in rows})
+        if len(sources) < 2:
+            continue
+        if any(str(r.get("entity_key") or "") for r in rows):
+            continue  # keyed rows already linked above as observed
+        links.append(
+            {
+                "category": cat,
+                "entity_2": e2,
+                "entity_3": e3,
+                "basis": "inferred",
+                "sources": sources,
+                "record_ids": [str(r.get("record_id")) for r in rows],
+            }
+        )
+        if len(links) >= limit:
+            break
+    return links
+
+
+def _record_novel_candidate(
+    ctx: Any, category: str | None, entity_2: str | None, entity_3: str | None,
+    top_score: float,
+) -> None:
+    """Queue a below-threshold contact as a novel failure-mode candidate.
+
+    Stores structured fields only (no free text): nightly clustering jobs
+    sweep ``status='open'`` rows and absorb them into real clusters.
+    """
+    try:
+        from src.data.warehouse import ops_con as _ops_con
+        from src.ids import new_ulid as _ulid
+
+        with _ops_con() as _con:
+            _con.execute(
+                """
+                INSERT INTO novel_candidates
+                (novel_id, interaction_id, pack_id, category, entity_2,
+                 entity_3, top_score, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', CURRENT_TIMESTAMP)
+                """,
+                [
+                    "nvl_" + _ulid(), ctx.interaction_id, ctx.pack.id,
+                    category, entity_2, entity_3, float(top_score),
+                ],
+            )
+    except Exception:
+        pass
 
 
 class InvestigatorAgent(Agent):
@@ -70,9 +174,19 @@ class InvestigatorAgent(Agent):
 
     async def run(self, **kwargs: Any) -> dict[str, Any]:
         ctx = self.ctx
-        category = ctx.slots.get("category")
+        try:
+            from src.ops.pilot import agent_enabled
+            from src.ledger import record_action as _ra
+            if not agent_enabled("investigator"):
+                _ra(self._action(action_type="investigation_briefed",
+                                 input_summary="flag disabled",
+                                 output_summary="investigator disabled; skipped"))
+                return {"skipped": True, "reason": "disabled_by_flag"}
+        except Exception:
+            pass
         entity_2 = ctx.slots.get("entity_2")
         entity_3 = ctx.slots.get("entity_3")
+        category = ctx.slots.get("category")
         description = ctx.slots.get("description") or ""
 
         # Extract a keyword from the description for the ILIKE filter.
@@ -95,6 +209,20 @@ class InvestigatorAgent(Agent):
                 ).fetchall()
                 similar_cols = [d[0] for d in con.description]
                 candidates = [dict(zip(similar_cols, r)) for r in candidate_rows]
+                pool: list[dict[str, Any]] = []
+
+                # Full-corpus population for honest lift denominators
+                # (item 23): category/entity_2 projection over ALL records —
+                # never the 40-row candidate shortlist.
+                try:
+                    pop_rows = con.execute(
+                        "SELECT category, entity_2 FROM records"
+                    ).fetchall()
+                    population = [
+                        {"category": r[0], "entity_2": r[1]} for r in pop_rows
+                    ] or candidates
+                except Exception:
+                    population = candidates
 
                 if candidates:
                     try:
@@ -107,7 +235,7 @@ class InvestigatorAgent(Agent):
                             "text": description,
                         }
                         similar = rank_by_association(
-                            query, candidates, candidates, top_k=5
+                            query, candidates, population, top_k=5
                         )
                         retrieval_mode = "association"
                     except Exception:
@@ -165,13 +293,144 @@ class InvestigatorAgent(Agent):
                         "entity_3": entity_3,
                         "text": description,
                     }
-                    similar = rank_by_association(query, pool, pool, top_k=5)
+                    similar = rank_by_association(query, pool, population, top_k=5)
                     retrieval_mode = "association" if similar else "ilike"
 
-                cluster_row = con.execute(
+                # Full candidate pool for source-mix corroboration (Axion
+                # slice): whichever pool the ranking actually drew from.
+                search_pool = list(candidates) if candidates else list(pool)
+
+                cluster_rows = con.execute(
                     _CLUSTER_SQL, [ctx.pack.id, category, category]
-                ).fetchone()
+                ).fetchall()
                 cluster_cols = [d[0] for d in con.description]
+                # Fused cluster relevance (item 26): category fit + term
+                # overlap + ENTITY overlap (modal member values) + semantic
+                # similarity (description vs top terms). record_count is only
+                # a final tie-break — the largest cluster must not win on
+                # size alone. Tie-breaks are fully deterministic
+                # (score desc, cluster_id asc).
+                cluster_row = None
+                if cluster_rows:
+                    try:
+                        _cids = []
+                        for _r in cluster_rows:
+                            try:
+                                _cids.append(int(_r[0]))
+                            except (TypeError, ValueError):
+                                continue
+                        _member_ent: dict[int, tuple[str, str]] = {}
+                        if _cids:
+                            _ph = ",".join("?" * len(_cids))
+                            for _er in con.execute(
+                                f"""
+                                SELECT a.cluster_id AS cid, r.entity_2 AS e2,
+                                       r.entity_3 AS e3, COUNT(*) AS n
+                                FROM cluster_assignments a
+                                JOIN records r ON r.record_id = a.record_id
+                                WHERE a.cluster_id IN ({_ph})
+                                GROUP BY a.cluster_id, r.entity_2, r.entity_3
+                                """,
+                                _cids,
+                            ).fetchall():
+                                try:
+                                    _cc = int(_er[0])
+                                except (TypeError, ValueError):
+                                    continue
+                                _prev = _member_ent.get(_cc)
+                                if _prev is None or int(_er[3] or 0) > int(_prev[2] or 0):
+                                    _member_ent[_cc] = (
+                                        str(_er[1] or ""), str(_er[2] or ""), _er[3],
+                                    )
+                    except Exception:
+                        _member_ent = {}
+                    try:
+                        from src.ml_runtime.embeddings import cosine, embed_text
+
+                        _qvec = embed_text(description or "")
+                        _qok = any(_qvec)
+                    except Exception:
+                        _qvec, _qok = [], False
+
+                    def _cscore(r: tuple) -> tuple:
+                        d = dict(zip(cluster_cols, r))
+                        try:
+                            _cid = int(d.get("cluster_id"))
+                        except (TypeError, ValueError):
+                            _cid = -1
+                        cat_s = 0.0
+                        if category and str(d.get("category") or "").upper() == str(category).upper():
+                            cat_s = 2.0
+                        tt = str(d.get("top_terms") or "").upper()
+                        desc = str(description or "").upper()
+                        overlap = sum(1 for w in tt.replace(",", " ").split() if w and w in desc)
+                        term_s = min(float(overlap), 5.0)
+                        ent_s = 0.0
+                        _me = _member_ent.get(_cid)
+                        if _me:
+                            if entity_2 and _me[0] and str(entity_2).upper() == _me[0].upper():
+                                ent_s += 3.0
+                            if entity_3 and _me[1] and str(entity_3).upper() == _me[1].upper():
+                                ent_s += 2.0
+                        sem_s = 0.0
+                        if _qok:
+                            try:
+                                _raw_terms = d.get("top_terms")
+                                if isinstance(_raw_terms, str):
+                                    try:
+                                        _parsed = json.loads(_raw_terms)
+                                        _terms = (
+                                            " ".join(str(w) for w in _parsed)
+                                            if isinstance(_parsed, list)
+                                            else _raw_terms
+                                        )
+                                    except (json.JSONDecodeError, TypeError):
+                                        _terms = _raw_terms
+                                elif isinstance(_raw_terms, list):
+                                    _terms = " ".join(str(w) for w in _raw_terms)
+                                else:
+                                    _terms = ""
+                                if _terms.strip():
+                                    _cvec = embed_text(_terms)
+                                    sem_s = max(0.0, cosine(_qvec, _cvec)) * 2.0
+                            except Exception:
+                                sem_s = 0.0
+                        import math as _math
+
+                        try:
+                            size_s = _math.log1p(float(d.get("record_count") or 0)) * 0.1
+                        except (TypeError, ValueError):
+                            size_s = 0.0
+                        total = cat_s + term_s + ent_s + sem_s + size_s
+                        return (round(total, 6), -_cid if _cid >= 0 else 0)
+
+                    cluster_rows = sorted(
+                        cluster_rows,
+                        key=lambda r: (_cscore(r), r[3] or 0),
+                        reverse=True,
+                    )
+                    # Novelty gate (board #3): a forced assignment hides
+                    # genuinely NEW failure modes — the most valuable RCA
+                    # signal. Below threshold, no cluster is claimed; the
+                    # contact is queued as a novel candidate instead.
+                    import os as _os
+
+                    try:
+                        _nov_min = float(_os.getenv("FRONTLINE_NOVELTY_MIN_SCORE", "3.0"))
+                    except ValueError:
+                        _nov_min = 3.0
+                    _best = _cscore(cluster_rows[0])[0] if cluster_rows else 0.0
+                    if _best < _nov_min:
+                        cluster_row = None
+                        _record_novel_candidate(
+                            ctx, category, entity_2, entity_3, _best
+                        )
+                    else:
+                        cluster_row = cluster_rows[0]
+                if cluster_row is None and (category or description):
+                    # Empty candidate set is also novelty (no score computed
+                    # above): queue it once with score 0.0.
+                    _record_novel_candidate(ctx, category, entity_2, entity_3, 0.0)
 
                 spike_rows = con.execute(
                     _SPIKE_SQL, [ctx.pack.id, category, category]
@@ -196,6 +455,21 @@ class InvestigatorAgent(Agent):
                 error="domain warehouse missing",
             ))
             return {"skipped": True, "reason": "domain warehouse not built"}
+        except Exception as e:
+            # Any other DB/ML failure must degrade to skipped — never strand
+            # the contact in ENRICHING (item 8). The orchestrator preserves
+            # sibling agents' partial results.
+            record_action(self._action(
+                action_type="similar_search",
+                input_summary=(
+                    f"keyword='{keyword}', category={category}, "
+                    f"entity_2={entity_2}, entity_3={entity_3}"
+                ),
+                output_summary="investigator skipped after failure; partial results kept",
+                ok=False,
+                error=f"{type(e).__name__}: {e}"[:500],
+            ))
+            return {"skipped": True, "reason": f"investigator failed: {type(e).__name__}"}
 
         # ── Ledger: similar_search ───────────────────────────────────────
         similar_ids = [s["record_id"] for s in similar if s.get("record_id")]
@@ -271,6 +545,15 @@ class InvestigatorAgent(Agent):
         ))
 
         # ── InvestigationBrief ────────────────────────────────────────────
+        # Elicitation answers attach here (item 35) with provenance, so the
+        # brief — and any hypotheses derived from it — cite what the customer
+        # actually said, not just slot state.
+        try:
+            from src.frontline.elicitation import answers_for_interaction
+
+            elicitation_answers = answers_for_interaction(ctx.interaction_id)
+        except Exception:
+            elicitation_answers = []
         brief = {
             "similar_records": similar[:5],
             "similar_record_count": len(similar),
@@ -279,6 +562,16 @@ class InvestigatorAgent(Agent):
             "cluster_count": cluster_count,
             "spikes": spikes,
             "lead_time_weeks": lead_time_weeks,
+            "elicitation_answers": elicitation_answers,
+            "sources": _source_mix(similar),
+            # Pool-level corroboration (Axion slice): the cited top-5 is
+            # what the brief claims; the pool mix + cross-source links show
+            # how the FULL candidate set — every origin — corroborates it.
+            "candidate_sources": _source_mix(search_pool),
+            "candidate_count": len(search_pool),
+            "cross_source_links": _cross_source_links(search_pool),
+            "novel_candidate": cluster_id is None,
+            "brief_version": 1,
         }
         ctx.investigation_brief = brief
 

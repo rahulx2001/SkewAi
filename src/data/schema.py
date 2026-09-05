@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS interactions (
     peak_frustration_turn INT,
     -- audit
     llm_calls          INTEGER NOT NULL DEFAULT 0,
+    customer_ref       VARCHAR,                    -- sha256 of phone/email/account (returning-customer link; never raw PII)
+    degraded_ledger    BOOLEAN NOT NULL DEFAULT FALSE,  -- safety output delivered from WAL fallback
+    csat               INTEGER,                        -- post-call outcome signal 1-5 (board #9)
+    customer_resolved  BOOLEAN,                        -- customer says the issue is resolved (board #9)
     schema_version     INTEGER NOT NULL DEFAULT 1
 );
 
@@ -66,7 +70,8 @@ CREATE TABLE IF NOT EXISTS interaction_turns (
     ts                 TIMESTAMP NOT NULL,
     latency_ms         INTEGER,
     llm_used           BOOLEAN NOT NULL DEFAULT FALSE,
-    frustration_score  DOUBLE,                     -- NULL for agent/supervisor turns
+    frustration_score  DOUBLE,                    -- NULL for agent/supervisor turns
+    erased             BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE(interaction_id, seq)
 );
 
@@ -92,6 +97,10 @@ CREATE TABLE IF NOT EXISTS cases (
     investigation_id   VARCHAR,                    -- FK to investigations (nullable)
     status             VARCHAR NOT NULL DEFAULT 'open',  -- open | pending_followup | closed
     followup_draft     TEXT,
+    case_kind          VARCHAR NOT NULL DEFAULT 'customer',
+    -- 'customer' = real contact case (fleet corpus); 'audit_review' = Qubot
+    -- mismatch review (excluded from anomaly/cluster/economics/funnel stats)
+    customer_ref       VARCHAR,                    -- sha256 identity copied from interactions (returning-customer link)
     schema_version     INTEGER NOT NULL DEFAULT 1
 );
 
@@ -174,7 +183,9 @@ CREATE TABLE IF NOT EXISTS agent_actions (
     ts                 TIMESTAMP NOT NULL,
     schema_version     INTEGER NOT NULL DEFAULT 1,
     prev_hash          VARCHAR,                    -- hash chain: previous row_hash (tamper-evident)
-    row_hash           VARCHAR                     -- sha256 of this row + prev_hash
+    row_hash           VARCHAR,                    -- sha256 of this row + prev_hash
+    erased             BOOLEAN NOT NULL DEFAULT FALSE
+    -- chain-preserving erasure (7.3): PII content tombstoned, hashes kept
 );
 
 CREATE INDEX IF NOT EXISTS idx_actions_interaction ON agent_actions(interaction_id, ts);
@@ -385,6 +396,125 @@ CREATE TABLE IF NOT EXISTS interaction_version_stamps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stamps_pack ON interaction_version_stamps(pack_id, stamped_at);
+
+CREATE TABLE IF NOT EXISTS handoff_requests (
+    handoff_id         VARCHAR PRIMARY KEY,        -- 'hfr_' + ULID
+    interaction_id     VARCHAR NOT NULL,
+    status             VARCHAR NOT NULL DEFAULT 'pending',
+    -- pending -> claimed (supervisor took it) | unfulfilled (SLA timeout) |
+    -- done (served) | cancelled (customer hung up)
+    prior_state        VARCHAR,
+    sla_due_at         TIMESTAMP NOT NULL,
+    claimed_by         VARCHAR,
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoff_interaction ON handoff_requests(interaction_id, status);
+CREATE INDEX IF NOT EXISTS idx_handoff_due ON handoff_requests(status, sla_due_at);
+
+CREATE TABLE IF NOT EXISTS callback_requests (
+    callback_id        VARCHAR PRIMARY KEY,        -- 'cbk_' + ULID
+    interaction_id     VARCHAR NOT NULL,
+    partial_slots      JSON,
+    reason             VARCHAR NOT NULL,           -- e.g. 'incomplete_slots_max_turns'
+    status             VARCHAR NOT NULL DEFAULT 'open',
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_callback_status ON callback_requests(status, created_at);
+
+CREATE TABLE IF NOT EXISTS slice_claims (
+    slice_key          VARCHAR PRIMARY KEY,
+    owner              VARCHAR NOT NULL,
+    claimed_at         TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS novel_candidates (
+    novel_id           VARCHAR PRIMARY KEY,        -- 'nvl_' + ULID
+    interaction_id     VARCHAR NOT NULL,
+    pack_id            VARCHAR NOT NULL,
+    category           VARCHAR,
+    entity_2           VARCHAR,
+    entity_3           VARCHAR,
+    top_score          DOUBLE,
+    status             VARCHAR NOT NULL DEFAULT 'open',
+    -- open -> clustered (absorbed by a rebuild) | dismissed (engineer triage)
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_novel_status ON novel_candidates(pack_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS turn_dedup (
+    interaction_id     VARCHAR NOT NULL,
+    client_turn_id     VARCHAR NOT NULL,
+    seen_at            TIMESTAMP NOT NULL,
+    PRIMARY KEY (interaction_id, client_turn_id)
+);
+
+CREATE TABLE IF NOT EXISTS cluster_feedback (
+    feedback_id        VARCHAR PRIMARY KEY,        -- 'cfb_' + ULID
+    cluster_id         INTEGER,
+    cluster_uid        VARCHAR,
+    pack_id            VARCHAR NOT NULL,
+    verdict            VARCHAR NOT NULL,           -- 'wrong' | 'novel' | 'correct'
+    note               TEXT,
+    author             VARCHAR,
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_feedback ON cluster_feedback(pack_id, cluster_id, created_at);
+
+CREATE TABLE IF NOT EXISTS intercept_cooldown (
+    slice_key          VARCHAR PRIMARY KEY,        -- pack|category|entity_2
+    last_fired_at      TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS review_queue (
+    review_id          VARCHAR PRIMARY KEY,        -- 'rvw_' + ULID
+    interaction_id     VARCHAR,
+    case_id            VARCHAR,
+    reason             VARCHAR NOT NULL,           -- e.g. 'audit_mismatch'
+    status             VARCHAR NOT NULL DEFAULT 'open',
+    -- open -> assigned -> resolved | false_alarm
+    owner              VARCHAR,
+    sla_due_at         TIMESTAMP,
+    verdict            VARCHAR,
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status, sla_due_at);
+
+CREATE TABLE IF NOT EXISTS canonical_identity (
+    canonical_id       VARCHAR PRIMARY KEY,        -- 'cid_' + ULID
+    identity_key       VARCHAR NOT NULL UNIQUE,    -- e.g. 'vin:1HGCM82633A004352' or 'serial:...'
+    vin                VARCHAR,
+    make               VARCHAR,
+    model              VARCHAR,
+    year               INTEGER,
+    identity_status    VARCHAR NOT NULL DEFAULT 'unverified', -- 'unverified', 'candidate_checksum_valid', 'customer_confirmed', 'externally_verified'
+    first_observed_at  TIMESTAMP NOT NULL,
+    last_verified_at   TIMESTAMP,
+    source             VARCHAR NOT NULL,           -- 'nhtsa', 'warranty', 'service', 'voice_intake', etc.
+    metadata_json      VARCHAR                     -- arbitrary attributes, warranty date, trim, engine
+);
+
+CREATE INDEX IF NOT EXISTS idx_canonical_vin ON canonical_identity(vin);
+CREATE INDEX IF NOT EXISTS idx_canonical_make_model ON canonical_identity(make, model, year);
+
+CREATE TABLE IF NOT EXISTS entity_observations (
+    observation_id     VARCHAR PRIMARY KEY,        -- 'obs_' + ULID
+    interaction_id     VARCHAR NOT NULL,
+    canonical_id       VARCHAR,                    -- foreign link when resolved
+    raw_spoken_text    VARCHAR,
+    extracted_vin      VARCHAR,
+    confidence         DOUBLE DEFAULT 1.0,
+    vin_status         VARCHAR NOT NULL,           -- 'observed', 'candidate_checksum_valid', 'invalid_checksum', 'confirmed', 'corrected'
+    source_channel     VARCHAR NOT NULL,           -- 'voice', 'text', 'batch'
+    observed_at        TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_obs_interaction ON entity_observations(interaction_id);
+CREATE INDEX IF NOT EXISTS idx_obs_canonical ON entity_observations(canonical_id);
 """
 
 
@@ -409,7 +539,10 @@ CREATE TABLE IF NOT EXISTS records (
     severity_label     VARCHAR,
     region             VARCHAR,
     source             VARCHAR,                    -- NHTSA | CFPB | internal
-    embedding          FLOAT[]                     -- optional bag-of-hash embedding for semantic sim
+    embedding          FLOAT[],                    -- optional bag-of-hash embedding for semantic sim
+    entity_key         VARCHAR,                    -- canonical cross-source join key (declared in mapping.yaml)
+    provenance         VARCHAR NOT NULL DEFAULT 'observed'
+    -- 'observed' = real-world record; 'fixture' = demo seed; 'computed' = derived
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_received ON records(received_at);
@@ -436,6 +569,8 @@ CREATE INDEX IF NOT EXISTS idx_advisories_scope_e1 ON advisories(scope_entity_1,
 CREATE TABLE IF NOT EXISTS clusters (
     cluster_id         INTEGER PRIMARY KEY,
     pack_id             VARCHAR NOT NULL,
+    cluster_uid        VARCHAR,                    -- globally unique identity (item 4: 'clu_'+ULID); legacy integer ids kept for compat
+    signature          VARCHAR,                    -- stable content signature (board #5: category|entity|top-terms sha)
     top_terms          JSON,
     category           VARCHAR,
     record_count       INTEGER NOT NULL DEFAULT 0,
@@ -463,6 +598,10 @@ CREATE TABLE IF NOT EXISTS weekly_anomalies (
     baseline_std       DOUBLE,
     z_score             DOUBLE,
     is_anomaly          BOOLEAN NOT NULL DEFAULT FALSE,
+    p_value             DOUBLE,                     -- one-sided quasi-Poisson tail (item 10)
+    p_bh                DOUBLE,                     -- Benjamini-Hochberg adjusted p (item 10)
+    baseline_weeks      INTEGER,                    -- leave-one-out history depth
+    method              VARCHAR,                    -- quasi-poisson | zero-baseline | low-history-heuristic | insufficient-history
     PRIMARY KEY (pack_id, iso_week, category, entity_2)
 );
 
@@ -473,6 +612,41 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     advisory_id        VARCHAR NOT NULL,           -- FK to advisories (enforced in app code)
     lead_time_weeks    INTEGER,                    -- how many weeks before the advisory the cluster spiked
     matched            BOOLEAN NOT NULL DEFAULT FALSE,
+    pack_id            VARCHAR,                    -- owning pack (item 43: scopes cleanup per pack)
+    provenance         VARCHAR NOT NULL DEFAULT 'computed',
+    -- 'fixture' = seeded demo row, never observed evidence;
+    -- 'computed' = written by run_backtest from warehouse state
+    match_basis        VARCHAR,                    -- e.g. 'category+entity_2+temporal'
     PRIMARY KEY (cluster_id, advisory_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_backtest_pack_matched ON backtest_results(pack_id, matched);
+
+CREATE TABLE IF NOT EXISTS cluster_lineage (
+    old_cluster_uid    VARCHAR NOT NULL,
+    new_cluster_uid    VARCHAR NOT NULL,
+    pack_id            VARCHAR NOT NULL,
+    overlap            DOUBLE NOT NULL,              -- member Jaccard overlap (1.0 = signature-identical)
+    created_at         TIMESTAMP DEFAULT current_timestamp,
+    PRIMARY KEY (old_cluster_uid, new_cluster_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lineage_new ON cluster_lineage(new_cluster_uid);
+
+CREATE TABLE IF NOT EXISTS exposure (
+    pack_id            VARCHAR NOT NULL,
+    iso_week           VARCHAR NOT NULL,           -- e.g. '2026-W22'
+    category           VARCHAR,
+    entity_2           VARCHAR,
+    exposure_units     DOUBLE NOT NULL,            -- vehicles-in-operation / active accounts / units shipped
+    unit               VARCHAR NOT NULL DEFAULT 'units',
+    unit_type          VARCHAR NOT NULL DEFAULT 'vehicles_in_operation', -- 'vehicles_in_operation' | 'units_sold' | 'policy_count'
+    source             VARCHAR NOT NULL DEFAULT 'ihs_polk',              -- 'ihs_polk' | 'internal_sales' | 'telematics_active'
+    updated_at         TIMESTAMP DEFAULT current_timestamp,
+    -- Rates beat raw counts: anomaly z-scores divide by exposure when a row
+    -- exists, and slices without exposure are labeled 'unnormalised'.
+    PRIMARY KEY (pack_id, iso_week, category, entity_2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exposure_pack_week ON exposure(pack_id, iso_week);
 """

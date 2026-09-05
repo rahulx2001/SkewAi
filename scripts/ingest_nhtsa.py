@@ -203,7 +203,10 @@ def run(
     try:
         src, provenance = resolve_complaints_csv(csv_arg=csv_path, limit=limit, work_dir=work)
         result = ingest_mapped_csv(
-            pack_id, src, limit=limit, enforce_trust=False
+            pack_id,
+            src,
+            limit=limit,
+            allow_untrusted_historical_backfill=True,
         )
         result["provenance"] = provenance
         result["limit"] = limit

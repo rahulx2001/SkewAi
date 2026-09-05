@@ -11,10 +11,13 @@ is opened read-only after the pack loader has resolved its path.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator, TypeVar
+
+T = TypeVar("T")
 
 import duckdb
 
@@ -23,7 +26,10 @@ from src.data.schema import DOMAIN_VIEWS_SQL, OPS_SCHEMA_SQL
 
 # ── Connection caching ──────────────────────────────────────────────────────
 
-_ops_lock = threading.Lock()
+# RLock (not Lock): cross-thread exclusion is identical, but same-thread
+# nesting degrades to serialized contention instead of wedging the warehouse
+# forever (audit 4.5 incident). Phased connections are still preferred.
+_ops_lock = threading.RLock()
 _ops_initialized = False
 
 
@@ -37,7 +43,7 @@ def _close_thread_ops_ro() -> None:
 
 
 @contextmanager
-def ops_con(read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
+def ops_con(read_only: bool = False) -> Iterator[Any]:
     """Yield a connection to the ops warehouse. Applies schema on first open.
 
     Single-file DuckDB cannot mix concurrent read_only and read-write handles
@@ -45,7 +51,19 @@ def ops_con(read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
     which broke writers). All access is serialized under ``_ops_lock`` with a
     short-lived write-capable connection. ``read_only`` is accepted for API
     compatibility but does not open a separate RO configuration.
+
+    When FRONTLINE_OPS_DSN is configured for PostgreSQL (audit 6.1), delegates
+    directly to the multi-writer Postgres pool to eliminate lock contention.
     """
+    try:
+        from src.data.postgres_backend import is_production_backend, ops_connection
+        if is_production_backend():
+            with ops_connection(read_only=read_only) as pcon:
+                yield pcon
+            return
+    except Exception:
+        pass
+
     global _ops_initialized
     path = settings.frontline_db_path
     _ensure_parent(path)
@@ -53,8 +71,12 @@ def ops_con(read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
     with _ops_lock:
         if not _ops_initialized:
             con0 = duckdb.connect(str(path))
-            apply_ops_schema(con0)
-            con0.close()
+            try:
+                apply_ops_schema(con0)
+            finally:
+                # Never leak the handle: a failed apply with an open
+                # connection wedges every later connect on the file lock.
+                con0.close()
             _ops_initialized = True
 
         con = duckdb.connect(str(path), read_only=False)
@@ -62,6 +84,17 @@ def ops_con(read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
             yield con
         finally:
             con.close()
+
+
+async def ops_in_thread(fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run a sync function that uses ``ops_con`` off the asyncio event loop.
+
+    DuckDB I/O still serializes on ``_ops_lock``; this just keeps the lock
+    (and the query) from stalling live WebSocket frames.
+    """
+    if kwargs:
+        return await asyncio.to_thread(lambda: fn(*args, **kwargs))
+    return await asyncio.to_thread(fn, *args)
 
 
 @contextmanager
@@ -107,9 +140,17 @@ def init_ops_db() -> None:
     _ensure_parent(path)
     with _ops_lock:
         con = duckdb.connect(str(path))
-        apply_ops_schema(con)
-        con.close()
+        try:
+            apply_ops_schema(con)
+        finally:
+            con.close()
         _ops_initialized = True
+    try:
+        from scripts.migrate import stamp_schema_current
+
+        stamp_schema_current(path, target="ops")
+    except Exception:
+        pass
 
 
 def reset_ops_db() -> None:
@@ -202,6 +243,81 @@ def apply_domain_schema(con) -> None:
         s = stmt.strip()
         if s:
             con.execute(s)
+    # Forward-compatible columns for domain DBs built before items 4/43
+    # (backtest pack scoping + provenance; cluster history table below).
+    # Fixed DDL constants (not user input) — no identifier allowlist needed.
+    for ddl in (
+        "ALTER TABLE backtest_results ADD COLUMN pack_id VARCHAR",
+        "ALTER TABLE backtest_results ADD COLUMN provenance VARCHAR",
+        "ALTER TABLE backtest_results ADD COLUMN match_basis VARCHAR",
+        "ALTER TABLE clusters ADD COLUMN cluster_uid VARCHAR",
+        "ALTER TABLE clusters ADD COLUMN signature VARCHAR",
+        "ALTER TABLE weekly_anomalies ADD COLUMN p_value DOUBLE",
+        "ALTER TABLE weekly_anomalies ADD COLUMN p_bh DOUBLE",
+        "ALTER TABLE weekly_anomalies ADD COLUMN baseline_weeks INTEGER",
+        "ALTER TABLE weekly_anomalies ADD COLUMN method VARCHAR",
+        "ALTER TABLE records ADD COLUMN entity_key VARCHAR",
+        "ALTER TABLE records ADD COLUMN provenance VARCHAR",
+    ):
+        try:
+            con.execute(ddl)
+        except Exception:
+            pass
+    # Legacy rows predate provenance tracking: label them honestly so they
+    # can never masquerade as observed/computed evidence (item 2).
+    try:
+        con.execute(
+            "UPDATE backtest_results SET provenance = 'legacy' "
+            "WHERE provenance IS NULL"
+        )
+    except Exception:
+        pass
+    try:
+        con.execute(
+            "UPDATE records SET provenance = 'legacy' WHERE provenance IS NULL"
+        )
+    except Exception:
+        pass
+    for _idx_ddl in (
+        "CREATE INDEX IF NOT EXISTS idx_records_entity_key ON records(entity_key)",
+        "CREATE INDEX IF NOT EXISTS idx_records_source ON records(source)",
+    ):
+        try:
+            con.execute(_idx_ddl)
+        except Exception:
+            pass
+    try:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_backtest_pack_matched "
+            "ON backtest_results(pack_id, matched)"
+        )
+    except Exception:
+        pass
+    try:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cluster_versions (
+                cluster_uid      VARCHAR PRIMARY KEY,
+                cluster_id       INTEGER,
+                pack_id          VARCHAR NOT NULL,
+                version          INTEGER NOT NULL DEFAULT 1,
+                supersedes_uid   VARCHAR,
+                member_count     INTEGER NOT NULL DEFAULT 0,
+                top_terms        VARCHAR,
+                category         VARCHAR,
+                created_at       TIMESTAMP DEFAULT current_timestamp
+            )
+            """
+        )
+    except Exception:
+        pass
+    try:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cluster_versions_pack "
+            "ON cluster_versions(pack_id, cluster_id)"
+        )
+    except Exception:
+        pass
 
 
 def apply_ops_schema(con) -> None:
@@ -231,6 +347,35 @@ def apply_ops_schema(con) -> None:
             c = safe_ident(col, SAFE_ALTER_COLUMNS, kind="column")
             t = safe_table("investigations")
             con.execute(f"ALTER TABLE {t} ADD COLUMN {c} {typ}")
+        except Exception:
+            pass
+    for table, cols in (
+        ("cases", (("case_kind", "VARCHAR"), ("customer_ref", "VARCHAR"))),
+        (
+            "interactions",
+            (("customer_ref", "VARCHAR"), ("degraded_ledger", "BOOLEAN"),
+             ("csat", "INTEGER"), ("customer_resolved", "BOOLEAN")),
+        ),
+        ("agent_actions", (("erased", "BOOLEAN"),)),
+        ("interaction_turns", (("erased", "BOOLEAN"),)),
+    ):
+        for col, typ in cols:
+            try:
+                c = safe_ident(col, SAFE_ALTER_COLUMNS, kind="column")
+                t = safe_table(table)
+                con.execute(f"ALTER TABLE {t} ADD COLUMN {c} {typ}")
+            except Exception:
+                pass
+    # Version-dependent indexes AFTER the ALTERs above: creating them in the
+    # static DDL would hard-fail apply on pre-column databases (and a failed
+    # apply must never wedge the warehouse).
+    for _idx_ddl in (
+        "CREATE INDEX IF NOT EXISTS idx_cases_customer"
+        " ON cases(customer_ref, category, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_cases_kind ON cases(case_kind, status)",
+    ):
+        try:
+            con.execute(_idx_ddl)
         except Exception:
             pass
     # LLM daily spend ledger (Phase 1 narration cap).

@@ -28,6 +28,11 @@ class ChannelCapabilities:
     barge_in: bool = False             # client supports barge-in detection
     server_tts: bool = False           # server synthesizes audio (False = client TTS)
     supervisor_takeover: bool = True   # supervisor can take over on this channel
+    # 10/10 voice contract (defaults keep old adapters compatible):
+    dtmf: bool = False                 # DTMF fallback ("press 1 if…") supported
+    asr_confidence: bool = False       # channel supplies per-entity confidence
+    silence_timeout_ms: int = 6000     # silence before reprompt/handoff
+    tts_budget_ms: int = 1500          # per-turn TTS latency budget
 
 
 class ChannelAdapter(ABC):

@@ -15,6 +15,7 @@ records:
   severity_label: NUM_CYLS  # placeholder; NHTSA has no severity label
   region: STATE
   source: "NHTSA"
+  entity_key: "{MODEL_YR}|{MAKETXT}|{MODELTXT}"
 
 advisories:
   advisory_id: CAMPNO

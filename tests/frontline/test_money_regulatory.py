@@ -337,16 +337,26 @@ def test_rca_analytics_map_season_ci_thumbs(reset_ops_db, pack):
     assert season["temperature_bands"]["cold"] == 1
     assert season["temperature_bands"]["hot"] == 1
 
-    # Two weeks of cases so forecast has a slope + interval
+    # Four weeks of cases so the OLS forecast has support (item 33: N>=4).
     now = utc_now()
     _case("case_fc1", pack.id, iid="int_fc")
     _case("case_fc2", pack.id, iid="int_fc")
+    _case("case_fc3", pack.id, iid="int_fc")
+    _case("case_fc4", pack.id, iid="int_fc")
     with ops_con() as con:
         con.execute(
             "UPDATE cases SET cluster_match_id = 4, created_at = ? WHERE case_id = 'case_fc1'",
+            [now - timedelta(days=21)],
+        )
+        con.execute(
+            "UPDATE cases SET cluster_match_id = 4, created_at = ? WHERE case_id = 'case_fc2'",
             [now - timedelta(days=14)],
         )
-        con.execute("UPDATE cases SET cluster_match_id = 4 WHERE case_id = 'case_fc2'")
+        con.execute(
+            "UPDATE cases SET cluster_match_id = 4, created_at = ? WHERE case_id = 'case_fc3'",
+            [now - timedelta(days=7)],
+        )
+        con.execute("UPDATE cases SET cluster_match_id = 4 WHERE case_id = 'case_fc4'")
     fc = forecast_cluster_volume(pack_id=pack.id, window_days=28)
     assert fc["forecasts"]
     row = fc["forecasts"][0]
@@ -354,22 +364,38 @@ def test_rca_analytics_map_season_ci_thumbs(reset_ops_db, pack):
     assert row["ci_low"] <= row["ci_high"]
 
     # Declining series must clamp the point at 0 and keep ci_low <= ci_high.
-    declining = project_next_week_volume([10, 1])
+    declining = project_next_week_volume([10, 7, 4, 1])
     assert declining["projected_next_week"] == 0.0
     assert declining["ci_low"] <= declining["ci_high"]
     assert declining["ci_low"] >= 0.0
     assert declining["ci_high"] >= 0.0
+    # Short series are refused, not projected (item 33: N>=4).
+    short = project_next_week_volume([10, 1])
+    assert short["method"] == "insufficient_history"
+    assert short["projected_next_week"] is None
     now = utc_now()
-    for i in range(10):
+    for i in range(6):
         _case(f"case_dec_old_{i}", pack.id, iid="int_dec")
-    _case("case_dec_new", pack.id, iid="int_dec")
+    for i in range(3):
+        _case(f"case_dec_mid_{i}", pack.id, iid="int_dec")
+    for i in range(2):
+        _case(f"case_dec_new_{i}", pack.id, iid="int_dec")
+    _case("case_dec_now", pack.id, iid="int_dec")
     with ops_con() as con:
         con.execute(
             "UPDATE cases SET cluster_match_id = 55, created_at = ? WHERE case_id LIKE 'case_dec_old_%'",
             [now - timedelta(days=21)],
         )
         con.execute(
-            "UPDATE cases SET cluster_match_id = 55, created_at = ? WHERE case_id = 'case_dec_new'",
+            "UPDATE cases SET cluster_match_id = 55, created_at = ? WHERE case_id LIKE 'case_dec_mid_%'",
+            [now - timedelta(days=14)],
+        )
+        con.execute(
+            "UPDATE cases SET cluster_match_id = 55, created_at = ? WHERE case_id LIKE 'case_dec_new_%'",
+            [now - timedelta(days=7)],
+        )
+        con.execute(
+            "UPDATE cases SET cluster_match_id = 55, created_at = ? WHERE case_id = 'case_dec_now'",
             [now],
         )
     dec = forecast_cluster_volume(pack_id=pack.id, window_days=28)

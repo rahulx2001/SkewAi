@@ -69,8 +69,9 @@ def _turn_from_record(record: dict[str, Any]) -> list[str]:
         ]
         parts.append(variations[random.randrange(len(variations))])
 
-    # Safety ack: pretend nobody is hurt (always safe — simulator is for volume)
-    parts.append("Nobody is hurt and I'm in a safe location.")
+    # Safety acks: one turn per pack safety question (answers are now bound).
+    parts.append("Nobody is hurt.")
+    parts.append("Yes, I'm in a safe location.")
 
     return parts
 
@@ -137,6 +138,8 @@ async def _run_one(contact: ScriptedContact, hooks: OrchestratorHooks) -> dict[s
         if orch.ctx.state in ("DONE", "ABANDONED"):
             break
         await orch.handle_customer_turn(turn)
+    if orch.ctx.slots.get("__confirm_pending__") and orch.ctx.state not in ("DONE", "ABANDONED"):
+        await orch.handle_customer_turn("Yes, that's right.")
     if orch.ctx.state != "DONE":
         await orch.hangup()
     return {

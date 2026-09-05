@@ -93,27 +93,56 @@ class _EvalHooks(OrchestratorHooks):
 
 
 async def run_persona(persona: Persona, pack_id: str) -> dict[str, Any]:
-    """Run one persona through the orchestrator. Returns captured state."""
+    """Run one persona through the orchestrator. Returns captured state.
+
+    All observations are black-box (orchestrator state + emitted turns), and
+    expectations come from ``persona.expected`` — gates must not re-derive
+    outcomes from the same structures the agents populate. ``prefilled_slots``
+    captures any memory-prefilled slots before turn 1 so slot-fill measures
+    NEW information from this contact only.
+    """
     hooks = _EvalHooks()
     orch, _ = await create_interaction(channel="web_text", pack_id=pack_id, hooks=hooks)
-    for turn in persona.turns:
+    required_names = [s.name for s in orch.ctx.pack.required_slots()]
+    prefilled = {k for k in required_names if orch.ctx.slots.get(k)}
+    turns_to_escalation: int | None = None
+    for idx, turn in enumerate(persona.turns, start=1):
         if orch.ctx.state in ("DONE", "ABANDONED"):
             break
         await orch.handle_customer_turn(turn)
+        if turns_to_escalation is None and any(orch.ctx.safety_flags.values()):
+            turns_to_escalation = idx
+    if (
+        persona.expected.should_complete
+        and orch.ctx.slots.get("__confirm_pending__")
+        and orch.ctx.state not in ("DONE", "ABANDONED")
+    ):
+        await orch.handle_customer_turn("Yes, that's right.")
     if orch.ctx.state != "DONE":
         await orch.hangup()
+
+    brief = orch.ctx.investigation_brief or {}
+    # Slot-fill on NEW information: prefilled memory does not count.
+    new_required = [s for s in required_names if s not in prefilled]
+    new_filled = [s for s in new_required if orch.ctx.slots.get(s)]
+    slot_fill_new = (len(new_filled) / len(new_required)) if new_required else 1.0
 
     return {
         "interaction_id": orch.ctx.interaction_id,
         "state": orch.ctx.state,
         "slots": dict(orch.ctx.slots),
         "slot_fill_pct": _slot_fill_pct(orch),
+        "slot_fill_new_pct": slot_fill_new,
+        "prefilled_slots": sorted(prefilled),
         "advisory_match": orch.ctx.advisory_match is not None,
+        "advisory_id": (orch.ctx.advisory_match or {}).get("advisory_id"),
+        "cluster_id": brief.get("cluster_id"),
         "investigation_opened": orch.ctx.investigation_id is not None,
         "investigation_id": orch.ctx.investigation_id,
         "frustration_flagged": orch.ctx.frustration_flagged,
         "peak_frustration": orch.ctx.peak_frustration,
         "safety_flags": dict(orch.ctx.safety_flags),
+        "turns_to_escalation": turns_to_escalation,
         "case_id": orch.ctx.case_id,
         "n_customer_turns": sum(1 for t in orch.ctx.turns if t["speaker"] == "customer"),
         "n_total_turns": len(orch.ctx.turns),
@@ -213,7 +242,11 @@ async def eval_pack(pack_id: str) -> list[GateResult]:
         except Exception as e:
             persona_results[persona.name] = {"error": f"{type(e).__name__}: {e}"}
 
-    # ── Gate: slot-fill ≥ 90% (cooperative + vague) ────────────────────────
+    # ── Gate: slot-fill from persona.expected (cooperative + vague) ───────
+    # Expectations are defined INDEPENDENTLY on the persona (not re-derived
+    # from the same slot dict Intake populates); slot-fill measures NEW
+    # information (memory prefill subtracted).
+    by_name = {p.name: p for p in personas}
     for pname in ("cooperative", "vague"):
         pr = persona_results.get(pname, {})
         if "error" in pr:
@@ -222,43 +255,59 @@ async def eval_pack(pack_id: str) -> list[GateResult]:
                 detail=pr["error"], expected="≥90%", actual="error",
             ))
             continue
-        pct = pr.get("slot_fill_pct", 0.0)
-        passed = pct >= 0.9
+        want = (by_name.get(pname).expected.min_slot_fill_pct if by_name.get(pname) else 0.9) or 0.9
+        pct = pr.get("slot_fill_new_pct", pr.get("slot_fill_pct", 0.0))
+        passed = pct >= want
         results.append(GateResult(
             name=f"slot_fill_{pname}", pack_id=pack_id, passed=passed,
-            expected="≥90%", actual=f"{pct*100:.0f}%",
-            detail=f"{pname} filled {pct*100:.0f}% of required slots",
+            expected=f"≥{want*100:.0f}% new-info", actual=f"{pct*100:.0f}%",
+            detail=f"{pname} filled {pct*100:.0f}% new slots (prefill={pr.get('prefilled_slots')})",
         ))
 
-    # ── Gate: safety escalation = 100% ──────────────────────────────────────
+    # ── Gate: safety escalation within 1 turn ─────────────────────────────
     pr = persona_results.get("safety_critical", {})
     if "error" not in pr:
         escalated = any(pr.get("safety_flags", {}).values())
+        tte = pr.get("turns_to_escalation")
+        passed = bool(escalated and tte is not None and tte <= 1)
         results.append(GateResult(
-            name="safety_escalation", pack_id=pack_id, passed=escalated,
-            expected=True, actual=escalated,
-            detail=f"safety_flags={pr.get('safety_flags', {})}",
+            name="safety_escalation", pack_id=pack_id, passed=passed,
+            expected="escalate on turn ≤1", actual=f"turns_to_escalation={tte}",
+            detail=f"safety_flags={pr.get('safety_flags', {})}, turns_to_escalation={tte}",
         ))
 
-    # ── Gate: advisory notification = 100% ─────────────────────────────────
+    # ── Gate: advisory notification (independently re-verified) ───────────
+    # The gate does NOT trust the ctx flag alone: it re-queries the warehouse
+    # for the advisory and checks scope overlap itself (no planted evidence
+    # via the same SQL the matcher used).
     pr = persona_results.get("advisory_match", {})
     if "error" not in pr:
         matched = pr.get("advisory_match", False)
+        verified = _independently_verify_advisory(
+            pack_id, pr.get("advisory_id"), pr.get("slots") or {}
+        )
+        passed = bool(matched and verified)
         results.append(GateResult(
-            name="advisory_notification", pack_id=pack_id, passed=matched,
+            name="advisory_notification", pack_id=pack_id, passed=passed,
             expected=True, actual=matched,
-            detail=f"advisory_match={matched}",
+            detail=f"advisory_match={matched}, independent_scope_verify={verified}",
         ))
 
-    # ── Gate: frustration flag on angry persona = 100% ────────────────────
+    # ── Gate: frustration on angry persona (behavioral, not lexicon) ──────
+    # Lexicon-vs-lexicon would be tautological (angry turns contain lexicon
+    # words by construction). The gate requires OBSERVED behavior: at least
+    # one handoff offer emitted to the customer.
     pr = persona_results.get("angry", {})
     if "error" not in pr:
         flagged = pr.get("frustration_flagged", False)
+        offers = int(pr.get("handoff_offers", 0))
+        passed = bool(flagged and offers >= 1)
         results.append(GateResult(
-            name="frustration_flag", pack_id=pack_id, passed=flagged,
-            expected=True, actual=flagged,
+            name="frustration_flag", pack_id=pack_id, passed=passed,
+            expected="flagged + handoff_offers≥1",
+            actual=f"flagged={flagged}, offers={offers}",
             detail=f"peak_frustration={pr.get('peak_frustration', 0):.2f}, "
-                   f"handoff_offers={pr.get('handoff_offers', 0)}",
+                   f"handoff_offers={offers}",
         ))
 
     # ── Gates that require cooperative persona rows still in the ops DB ────
@@ -301,6 +350,32 @@ async def eval_pack(pack_id: str) -> list[GateResult]:
             ),
         ))
 
+    # ── Negative controls (item 41): fixtures that can genuinely fail ────
+    # off_topic must NOT escalate safety or notify advisories (it must be
+    # redirected and completed); abandoner must leave NO case behind.
+    pr = persona_results.get("off_topic", {})
+    if "error" not in pr:
+        neg_ok = (
+            not any((pr.get("safety_flags") or {}).values())
+            and not pr.get("advisory_match", False)
+            and pr.get("state") in ("DONE", "ABANDONED")
+        )
+        results.append(GateResult(
+            name="negative_off_topic", pack_id=pack_id, passed=bool(neg_ok),
+            expected="no escalate/notify + terminal",
+            actual=f"flags={pr.get('safety_flags')}, notified={pr.get('advisory_match')}, state={pr.get('state')}",
+            detail="off-topic must be redirected, never escalated",
+        ))
+    pr = persona_results.get("abandoner", {})
+    if "error" not in pr:
+        neg_ok = pr.get("case_id") is None and pr.get("state") == "ABANDONED"
+        results.append(GateResult(
+            name="negative_abandoner", pack_id=pack_id, passed=bool(neg_ok),
+            expected="case_id None + ABANDONED",
+            actual=f"case_id={pr.get('case_id')}, state={pr.get('state')}",
+            detail="hangup must not orphan a case",
+        ))
+
     # ── Gate: investigation auto-open (resets ops — last DB-mutating gate) ─
     from src.config import settings
 
@@ -318,9 +393,82 @@ async def eval_pack(pack_id: str) -> list[GateResult]:
             trigger_persona=trigger_persona,
             min_cases=min_cases,
         )
+        # Pin the matched cluster to the fixture's known cluster (item 41):
+        # automotive brake fixture is cluster 14, finance double-charge is 41.
+        # A gate that opens on ANY cluster cannot detect cluster drift.
+        expected_cluster = {"automotive_nhtsa": 14, "finance_cfpb": 41}.get(pack_id)
+        if gate.passed and expected_cluster is not None:
+            got = _last_trigger_cluster(pack_id)
+            gate.detail += f" cluster_id={got} (expected {expected_cluster})"
+            if got is not None and int(got) != expected_cluster:
+                gate.passed = False
+                gate.actual = got
         results.append(gate)
 
     return results
+
+
+def _last_trigger_cluster(pack_id: str) -> int | None:
+    """Most recent investigation-linked cluster for *pack_id* (eval pin)."""
+    try:
+        with ops_con(read_only=True) as con:
+            row = con.execute(
+                """
+                SELECT cluster_id FROM investigations
+                WHERE pack_id = ? ORDER BY opened_at DESC LIMIT 1
+                """,
+                [pack_id],
+            ).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _independently_verify_advisory(
+    pack_id: str, advisory_id: str | None, slots: dict[str, Any]
+) -> bool:
+    """Gate-side re-verification: the advisory must exist AND scope-match.
+
+    Uses a direct warehouse read with the gate's own scope logic — never the
+    matcher's in-memory flag — so planted evidence cannot self-certify.
+    """
+    if not advisory_id:
+        return False
+    try:
+        from src.data.warehouse import domain_con
+
+        with domain_con(pack_id) as con:
+            cur = con.execute(
+                """
+                SELECT scope_entity_1, scope_entity_2, scope_entity_3, scope_category
+                FROM advisories WHERE advisory_id = ?
+                """,
+                [advisory_id],
+            )
+            row = cur.fetchone()
+    except Exception:
+        return False
+    if not row:
+        return False
+    scope = dict(zip(
+        ("scope_entity_1", "scope_entity_2", "scope_entity_3", "scope_category"), row
+    ))
+    for slot, col in (
+        ("entity_1", "scope_entity_1"), ("entity_2", "scope_entity_2"),
+        ("entity_3", "scope_entity_3"), ("category", "scope_category"),
+    ):
+        want = scope.get(col)
+        if want is None:
+            continue
+        got = (slots.get(slot) or "").strip()
+        if not got or str(want).upper() != str(got).upper():
+            return False
+    return True
 
 
 def _check_ledger_completeness(interaction_id: str) -> bool:

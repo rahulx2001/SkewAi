@@ -152,6 +152,8 @@ def test_call_widget_imports_helpers_and_map_ended():
     assert "shouldAcceptSpeechResult" in text
     # Must not only use nested payload
     assert "mapInteractionEnded(msg)" in text
+    # P1-4: typing during greeting must reset speakPhase or STT never restarts.
+    assert "speakPhaseRef.current = \"normal\"" in text or "speakPhaseRef.current = 'normal'" in text
 
 
 def test_shipped_helpers_via_node():

@@ -20,6 +20,8 @@ async def _run_complete_contact(orchestrator_factory):
     await orch.handle_customer_turn("My 2019 Honda CR-V grinds when I brake.")
     await orch.handle_customer_turn("Nobody is hurt and I'm safe.")
     await orch.handle_customer_turn("Yes, I'm in a safe location.")
+    if orch.ctx.slots.get("__confirm_pending__"):
+        await orch.handle_customer_turn("Yes, that's right.")
     assert orch.ctx.state == "DONE"
     return orch.ctx.interaction_id
 

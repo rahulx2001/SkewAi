@@ -3,6 +3,17 @@
 Produces fixed-dim float vectors from text via hashed character n-grams.
 Stored in ``records.embedding`` when present; investigator ranks by cosine
 similarity and falls back to ILIKE when embeddings are missing.
+
+Weighting (item 21): sublinear TF (``1 + log(tf)``) × corpus IDF, preserving
+the whole-token (2.0) / char-bigram (0.5) vote ratio. IDF comes from
+:func:`fit_idf` over the pack corpus (called by cluster rebuilds); without a
+fitted table, uniform IDF is used so ``embed_text`` stays deterministic and
+dependency-free. L2 normalization removes document-length bias; sublinear TF
+additionally damps repetition inside long documents.
+
+Migration: :data:`_DIM` is 512. Vectors stored at another dimension are
+stale — :func:`rank_by_similarity` and cluster rebuilds recompute them from
+text instead of comparing across dimensions (never a false 0-tie).
 """
 
 from __future__ import annotations
@@ -12,8 +23,56 @@ import math
 import re
 from typing import Sequence
 
-_DIM = 64
+_DIM = 512
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
+
+_TOKEN_VOTE = 2.0
+_BIGRAM_VOTE = 0.5
+
+# Corpus IDF table: feature ("tok:x" / "bi:xy") -> idf weight. Empty means
+# "unfitted": embed_text falls back to uniform weights (deterministic).
+_IDF: dict[str, float] = {}
+_IDF_DOCS = 0
+
+
+def embedding_dim() -> int:
+    """Current embedding dimension (512)."""
+    return _DIM
+
+
+def fit_idf(texts: Sequence[str], *, dim: int = _DIM) -> dict[str, float]:
+    """Fit the process-wide IDF table from a corpus (deterministic).
+
+    Returns the fitted table (feature -> ``log((N+1)/(df+1)) + 1``).
+    Call before bulk embedding (cluster rebuilds do this) so frequent
+    bigrams (th/he/in) and corpus-dominant tokens don't dominate the norm.
+    """
+    global _IDF, _IDF_DOCS
+    df: dict[str, int] = {}
+    docs = [t for t in (texts or []) if t]
+    for text in docs:
+        seen: set[str] = set()
+        for tok in _TOKEN_RE.findall(text.lower()):
+            seen.add(f"tok:{tok}")
+            for i in range(max(0, len(tok) - 1)):
+                seen.add(f"bi:{tok[i:i+2]}")
+        for feat in seen:
+            df[feat] = df.get(feat, 0) + 1
+    n = max(1, len(docs))
+    _IDF = {feat: math.log((n + 1) / (c + 1)) + 1.0 for feat, c in df.items()}
+    _IDF_DOCS = n
+    return dict(_IDF)
+
+
+def reset_idf() -> None:
+    """Clear the fitted IDF table (tests / corpus switches)."""
+    global _IDF, _IDF_DOCS
+    _IDF = {}
+    _IDF_DOCS = 0
+
+
+def idf_status() -> dict[str, int]:
+    return {"features": len(_IDF), "docs": _IDF_DOCS}
 
 
 def _stable_bucket(gram: str, dim: int) -> int:
@@ -23,26 +82,77 @@ def _stable_bucket(gram: str, dim: int) -> int:
 
 
 def embed_text(text: str, dim: int = _DIM) -> list[float]:
-    """Hashing trick embedding — deterministic across processes, no model download."""
+    """Hashing trick embedding — deterministic across processes, no model download.
+
+    Whole-token votes 2.0, char-bigram votes 0.5 (ratio preserved from the
+    original weighting), scaled by sublinear TF × fitted IDF when available.
+    Empty input -> zero vector (callers treat it as "no signal", never a
+    false-identical match).
+    """
     vec = [0.0] * dim
     tokens = _TOKEN_RE.findall((text or "").lower())
     if not tokens:
         return vec
-    for tok in tokens:
-        # char bigrams + whole token
-        grams = [tok] + [tok[i : i + 2] for i in range(max(0, len(tok) - 1))]
-        for g in grams:
-            h = _stable_bucket(g, dim)
-            vec[h] += 1.0
-    # L2 normalize
+    from collections import Counter
+
+    counts = Counter(tokens)
+    for tok, tf_raw in counts.items():
+        tf = 1.0 + math.log(tf_raw)  # sublinear: repetition damps out
+        h = _stable_bucket(f"tok:{tok}", dim)
+        vec[h] += _TOKEN_VOTE * tf * _IDF.get(f"tok:{tok}", 1.0)
+        for i in range(max(0, len(tok) - 1)):
+            gram = tok[i:i+2]
+            hb = _stable_bucket(f"bi:{gram}", dim)
+            vec[hb] += _BIGRAM_VOTE * tf * _IDF.get(f"bi:{gram}", 1.0)
+    # L2 normalize — removes document-length bias (long docs don't outrank
+    # short ones by magnitude; only direction matters for cosine).
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
 
 
+def measure_collisions(
+    texts: Sequence[str], *, threshold: float = 0.99
+) -> dict[str, float]:
+    """Collision benchmark: share of DISTINCT text pairs with cosine >= threshold.
+
+    Hashing-trick vectors collide by construction; this quantifies it for the
+    fitted corpus so dimension/weighting regressions are caught. Lower is
+    better; identical texts are excluded (self-similarity is 1.0 by design).
+    """
+    items = [t for t in (texts or []) if (t or "").strip()]
+    vecs = [embed_text(t) for t in items]
+    pairs = hits = 0
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if items[i].strip().lower() == items[j].strip().lower():
+                continue
+            pairs += 1
+            try:
+                if cosine(vecs[i], vecs[j]) >= threshold:
+                    hits += 1
+            except ValueError:
+                continue
+    return {
+        "pairs": float(pairs),
+        "collisions": float(hits),
+        "collision_rate": (hits / pairs) if pairs else 0.0,
+        "threshold": float(threshold),
+        "dim": float(len(vecs[0])) if vecs else 0.0,
+    }
+
+
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    if not a or not b or len(a) != len(b):
+    """True cosine similarity. Raises on dim mismatch (fail loudly, not 0-tie)."""
+    if not a or not b:
         return 0.0
-    return float(sum(x * y for x, y in zip(a, b)))
+    if len(a) != len(b):
+        raise ValueError(f"embedding dim mismatch: {len(a)} != {len(b)}")
+    dot = float(sum(x * y for x, y in zip(a, b)))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return max(-1.0, min(1.0, dot / (na * nb)))
 
 
 def rank_by_similarity(
@@ -53,8 +163,16 @@ def rank_by_similarity(
     embedding_key: str = "embedding",
     top_k: int = 5,
 ) -> list[dict]:
-    """Return candidates sorted by cosine sim to query (adds ``sim_score``)."""
+    """Return candidates sorted by cosine sim to query (adds ``sim_score``).
+
+    Empty/whitespace query -> [] (never return input-order as "similar").
+    Stale embeddings with wrong dim are recomputed from text (fail safe).
+    """
+    if not (query or "").strip():
+        return []
     q = embed_text(query)
+    if not any(q):
+        return []
     scored: list[tuple[float, dict]] = []
     for c in candidates:
         emb = c.get(embedding_key)
@@ -62,9 +180,14 @@ def rank_by_similarity(
             emb = embed_text(str(c.get(text_key) or ""))
         elif isinstance(emb, (list, tuple)):
             emb = list(emb)
+            if len(emb) != len(q) or not any(emb):
+                emb = embed_text(str(c.get(text_key) or ""))
         else:
             emb = embed_text(str(c.get(text_key) or ""))
-        score = cosine(q, emb)
+        try:
+            score = cosine(q, emb)
+        except ValueError:
+            score = cosine(q, embed_text(str(c.get(text_key) or "")))
         row = dict(c)
         row["sim_score"] = score
         scored.append((score, row))
@@ -72,4 +195,15 @@ def rank_by_similarity(
     return [r for _, r in scored[:top_k]]
 
 
-__all__ = ["embed_text", "cosine", "rank_by_similarity", "_DIM", "_stable_bucket"]
+__all__ = [
+    "embed_text",
+    "cosine",
+    "rank_by_similarity",
+    "fit_idf",
+    "reset_idf",
+    "idf_status",
+    "embedding_dim",
+    "measure_collisions",
+    "_DIM",
+    "_stable_bucket",
+]

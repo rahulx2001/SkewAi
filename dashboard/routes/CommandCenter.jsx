@@ -6,6 +6,8 @@ import {
   openConsole,
   simulateTraffic,
 } from "../src/ui/opsActions.js";
+import { dayGreeting } from "../src/ui/greeting.js";
+import { formatSnapshotTs } from "../src/ui/formatTime.js";
 
 /**
  * Command Center — flagship wallboard.
@@ -82,38 +84,18 @@ export default function CommandCenter({ refreshKey }) {
   const openCases = wall?.open_cases ?? 0;
   const draining = Boolean(drain?.draining);
 
-  const clock = tick.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-
   return (
     <div className="page-enter">
       <section className="cc-hero" aria-label="Command center overview">
         <div className="cc-hero-copy">
-          <div className="cc-kicker">
-            <span className="live-pulse" aria-hidden="true" />
-            Live operations · UI v2.1
-          </div>
-          <h1>Command center</h1>
-          <p className="sub">
-            One glance at live contacts, P1 pressure, pack health, and deploy drain — refreshed every
-            12 seconds. Jump into voice or the live console when something needs a human.
-          </p>
+          <h1 className="cc-greeting">{dayGreeting(tick)}</h1>
         </div>
         <div className="cc-hero-meta">
-          <div className="cc-pill">
-            Pack <strong>{health?.active_pack || "—"}</strong>
-          </div>
-          <div className="cc-pill">
-            Clock <strong>{clock}</strong>
-          </div>
-          <div className="cc-pill">
-            Mode{" "}
-            <strong>{health?.llm_available ? "LLM + deterministic" : "deterministic"}</strong>
-          </div>
-          <button type="button" onClick={load} disabled={loading}>
+          <button type="button" className="ghost" onClick={load} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh"}
           </button>
           <button type="button" onClick={runSimulate} disabled={simBusy}>
-            {simBusy ? "Simulating…" : "Simulate 15 contacts"}
+            {simBusy ? "Simulating…" : "Simulate 15"}
           </button>
           <button
             type="button"
@@ -133,29 +115,6 @@ export default function CommandCenter({ refreshKey }) {
         </div>
       )}
 
-      <div className="jump-grid" aria-label="Quick jumps">
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "call")}>
-          <span className="jt-kicker">Operate</span>
-          <span className="jt-title">Voice agent</span>
-          <span className="jt-hint">Start a browser contact with STT / TTS</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "console")}>
-          <span className="jt-kicker">Operate</span>
-          <span className="jt-title">Live console</span>
-          <span className="jt-hint">Watch frustration · take over mid-call</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "cases")}>
-          <span className="jt-kicker">Queue</span>
-          <span className="jt-title">Case queue</span>
-          <span className="jt-hint">Filter by severity · export CSV</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "warning")}>
-          <span className="jt-kicker">Risk</span>
-          <span className="jt-title">Early warning</span>
-          <span className="jt-hint">Clusters, funnel, simulate traffic</span>
-        </button>
-      </div>
-
       {err && (
         <div className="banner banner-error" role="alert">
           Could not load command center: <span className="mono">{err}</span>
@@ -171,8 +130,8 @@ export default function CommandCenter({ refreshKey }) {
         </div>
       )}
 
-      <div className="stat-grid" style={{ marginBottom: 8 }}>
-        <div className="stat-card accent">
+      <div className="stat-grid" style={{ marginBottom: 16 }}>
+        <div className="stat-card">
           <div className="label">Live contacts</div>
           <div className="value">{liveCount}</div>
           <div className="hint">status = active right now</div>
@@ -195,13 +154,36 @@ export default function CommandCenter({ refreshKey }) {
         <div className={`stat-card ${draining ? "danger" : "ok"}`}>
           <div className="label">Deploy drain</div>
           <div className="value" style={{ fontSize: 24, letterSpacing: "-0.04em" }}>
-            {draining ? "DRAINING" : "READY"}
+            {draining ? "Draining" : "Ready"}
           </div>
           <div className="hint">
             active slots: {drain?.active_count ?? 0}
             {drain?.ready_to_exit ? " · ready to exit" : ""}
           </div>
         </div>
+      </div>
+
+      <div className="jump-grid" aria-label="Quick jumps">
+        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "call")}>
+          <span className="jt-kicker">Operate</span>
+          <span className="jt-title">Voice agent</span>
+          <span className="jt-hint">Start a browser contact with STT / TTS</span>
+        </button>
+        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "console")}>
+          <span className="jt-kicker">Operate</span>
+          <span className="jt-title">Live console</span>
+          <span className="jt-hint">Watch frustration · take over mid-call</span>
+        </button>
+        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "cases")}>
+          <span className="jt-kicker">Queue</span>
+          <span className="jt-title">Case queue</span>
+          <span className="jt-hint">Filter by severity · export CSV</span>
+        </button>
+        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "warning")}>
+          <span className="jt-kicker">Risk</span>
+          <span className="jt-title">Early warning</span>
+          <span className="jt-hint">Clusters, funnel, simulate traffic</span>
+        </button>
       </div>
 
       <div className="cc-section-label">
@@ -411,11 +393,16 @@ export default function CommandCenter({ refreshKey }) {
         </section>
 
         <section className="panel">
-          <h2>Pilot metrics</h2>
+          <div className="pilot-head">
+            <h2>Pilot metrics</h2>
+            {metrics?.ts ? (
+              <span className="pilot-asof">{formatSnapshotTs(metrics.ts)}</span>
+            ) : null}
+          </div>
           {metrics ? (
             <div className="kv-grid">
               {Object.entries(metrics)
-                .filter(([, v]) => v !== null && typeof v !== "object")
+                .filter(([k, v]) => k !== "ts" && v !== null && typeof v !== "object")
                 .slice(0, 12)
                 .map(([k, v]) => (
                   <div className="kv-tile" key={k}>

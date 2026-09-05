@@ -13,11 +13,13 @@ import FeatureStudio from "../routes/FeatureStudio.jsx";
 import TrustPipeline from "../routes/TrustPipeline.jsx";
 import PackBuilder from "../routes/PackBuilder.jsx";
 import QualityEconomics from "../routes/QualityEconomics.jsx";
+import SignIn from "../routes/SignIn.jsx";
 import CommandPalette from "./ui/CommandPalette.jsx";
 import { ToastProvider, useToast } from "./ui/Toast.jsx";
 import { ErrorBoundary } from "./ui/Feedback.jsx";
 import { useHotkeys, useLocalStorage } from "./ui/hooks.js";
-import { apiHeaders } from "./apiAuth.js";
+import { AUTH_EVENT, apiHeaders, completeGoogleHandoff, fetchMe } from "./apiAuth.js";
+import AccountSignIn from "./ui/AccountSignIn.jsx";
 import { goHash, openCases, openConsole, simulateTraffic } from "./ui/opsActions.js";
 import {
   IconAlert,
@@ -68,10 +70,15 @@ const NAV_GROUPS = [
 const ALL_NAV = NAV_GROUPS.flatMap((g) => g.items);
 const THEMES = ["dark", "light"];
 
+function hashRouteId() {
+  const raw = window.location.hash.slice(1) || "command";
+  return raw.split("?")[0] || "command";
+}
+
 function useHashRoute() {
-  const [hash, setHash] = useState(() => window.location.hash.slice(1) || "command");
+  const [hash, setHash] = useState(() => hashRouteId());
   useEffect(() => {
-    const on = () => setHash(window.location.hash.slice(1) || "command");
+    const on = () => setHash(hashRouteId());
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
@@ -130,9 +137,11 @@ function Shell() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [me, setMe] = useState(null);
   const toast = useToast();
 
-  const active = ALL_NAV.find((n) => n.id === route) || ALL_NAV[0];
+  const extra = route === "signin" ? { id: "signin", label: "Sign in", route: SignIn } : null;
+  const active = extra || ALL_NAV.find((n) => n.id === route) || ALL_NAV[0];
   const Page = active.route;
 
   // Drop retired wallboard theme if still stored
@@ -165,6 +174,30 @@ function Shell() {
     const t = setInterval(loadHealth, 20000);
     return () => clearInterval(t);
   }, [loadHealth, route]);
+
+  useEffect(() => {
+    const raw = window.location.hash.slice(1);
+    const q = raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "";
+    const params = new URLSearchParams(q);
+    const handoff = params.get("handoff");
+    if (handoff) {
+      completeGoogleHandoff(handoff)
+        .then(() => {
+          window.location.hash = raw.split("?")[0] || "command";
+        })
+        .catch(() => {});
+    }
+    fetchMe()
+      .then(setMe)
+      .catch(() => setMe({ signed_in: false }));
+    const on = () => {
+      fetchMe()
+        .then(setMe)
+        .catch(() => setMe({ signed_in: false }));
+    };
+    window.addEventListener(AUTH_EVENT, on);
+    return () => window.removeEventListener(AUTH_EVENT, on);
+  }, []);
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -334,6 +367,31 @@ function Shell() {
   const statusTone = healthError ? "danger" : health?.status === "ok" ? "ok" : "warn";
   const statusText = healthError ? "unreachable" : health?.status || "connecting";
 
+  if (route === "signin") {
+    return (
+      <div className="signin-shell">
+        <header className="signin-top">
+          <button
+            type="button"
+            className="brand-mark signin-brand-btn"
+            onClick={() => setRoute("command")}
+          >
+            Skew <em>AI</em>
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={cycleTheme}
+            title={`Theme: ${activeTheme} (t)`}
+          >
+            {activeTheme === "light" ? "Dark" : "Light"}
+          </button>
+        </header>
+        <SignIn />
+      </div>
+    );
+  }
+
   const navList = (
     <>
       {NAV_GROUPS.map((g) => (
@@ -372,20 +430,24 @@ function Shell() {
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
           <div className="brand-row">
-            <div className="brand-logo" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M4 14c2-6 6-9 8-9s6 3 8 9" />
-                <path d="M4 14h16" />
-                <circle cx="12" cy="14" r="2.2" fill="currentColor" stroke="none" />
-              </svg>
-            </div>
             <div className="brand-copy">
               <div className="brand-mark">
                 Skew <em>AI</em>
               </div>
-              <div className="brand-sub">skewai · live VOC ops</div>
             </div>
           </div>
+          <button type="button" className="rail-pack" title={health?.active_pack || "pack"}>
+            <span>{health?.active_pack || "automotive_nhtsa"}</span>
+          </button>
+          <button
+            type="button"
+            className="rail-search"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+          >
+            <span>Search Console…</span>
+            <kbd>⌘K</kbd>
+          </button>
         </div>
 
         {navList}
@@ -398,11 +460,9 @@ function Shell() {
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={collapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)"}
           >
-            {collapsed ? "»" : "« Collapse"}
+            {collapsed ? "»" : "Collapse"}
           </button>
-          <div className="sidebar-meta">
-            API on this host · <kbd>⌘K</kbd> for commands
-          </div>
+          <AccountSignIn pack={health?.active_pack} authRequired={health?.auth_required} />
         </div>
       </aside>
 
@@ -429,10 +489,21 @@ function Shell() {
           </div>
 
           <div className="topbar-right">
-            <span className="build-stamp" title="UI build stamp — hard refresh if missing">
-              UI v2.1
-            </span>
-
+            {route !== "signin" && (
+              me?.signed_in ? (
+                <span className="topbar-who" title={me.subject || ""}>
+                  {me.subject}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setRoute("signin")}
+                >
+                  Sign in
+                </button>
+              )
+            )}
             <button
               type="button"
               className="ghost palette-trigger"
@@ -466,7 +537,7 @@ function Shell() {
               title={`Theme: ${activeTheme} (t)`}
               aria-label={`Change theme, currently ${activeTheme}`}
             >
-              {activeTheme === "light" ? "☀" : "☾"}
+              {activeTheme === "light" ? "Dark" : "Light"}
             </button>
           </div>
         </header>

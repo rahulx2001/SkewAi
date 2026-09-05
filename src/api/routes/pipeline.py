@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_api_key
@@ -15,6 +15,66 @@ router = APIRouter(
     tags=["pipeline"],
     dependencies=[Depends(require_api_key)],
 )
+
+
+# ── Pack-builder CSV jail (arbitrary local file read fix) ────────────────────
+# csv_path must live under data/uploads/ or data/builder_packs/ (or the
+# isolated test DOMAIN_DB_PATH equivalent). Absolute paths outside the jail,
+# symlink escapes, and missing files are rejected with 400/404 — never read.
+def _resolve_builder_csv(csv_path: str) -> "Path":
+    from pathlib import Path
+
+    raw = (csv_path or "").strip()
+    if not raw:
+        raise HTTPException(400, "csv_path required")
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (REPO_ROOT / p).resolve()
+    else:
+        # resolve() follows symlinks so symlink escapes are caught below
+        try:
+            p = p.resolve()
+        except OSError:
+            raise HTTPException(400, "invalid csv_path")
+    allowed_roots: list["Path"] = []
+    for cand in (REPO_ROOT / "data" / "uploads", REPO_ROOT / "data" / "builder_packs"):
+        try:
+            allowed_roots.append(cand.resolve())
+        except OSError:
+            allowed_roots.append(cand)
+    # Hermetic tests may point DOMAIN_DB_PATH elsewhere — allow the
+    # configured uploads dir if it exists outside the repo (test isolation).
+    try:
+        import os as _os
+
+        alt = _os.getenv("BUILDER_UPLOAD_DIR", "").strip()
+        if alt:
+            allowed_roots.append(Path(alt).expanduser().resolve())
+    except Exception:
+        pass
+    try:
+        is_allowed = any(p.is_relative_to(r) for r in allowed_roots)
+    except AttributeError:
+        # py<3.9 fallback
+        is_allowed = any(str(p).startswith(str(r) + "/") or p == r for r in allowed_roots)
+    if not is_allowed:
+        raise HTTPException(400, "csv_path outside uploads jail")
+    if p.suffix.lower() != ".csv":
+        raise HTTPException(400, "csv_path must be a .csv file")
+    if not p.is_file():
+        raise HTTPException(404, "csv file not found")
+    # 10 MB cap on insight reads (uploads are capped tighter at write time)
+    try:
+        if p.stat().st_size > 10 * 1024 * 1024:
+            raise HTTPException(400, "csv too large (max 10 MB)")
+    except HTTPException:
+        raise
+    except OSError:
+        raise HTTPException(404, "csv file not found")
+    return p
+
+
+MAX_BUILDER_UPLOAD_BYTES = 5 * 1024 * 1024
 
 
 @router.get("/trust/kpis")
@@ -43,10 +103,41 @@ async def provenance_kpi(kpi_id: str, record_id: str | None = None, pack_id: str
 
 @router.get("/validation-queue")
 async def validation_queue() -> dict[str, Any]:
-    from src.frontline.validation_queue import list_queue_all
+    from src.frontline.validation_queue import list_queue_all, list_reviews
 
     items = list_queue_all()
-    return {"items": items, "count": len(items)}
+    return {"items": items, "count": len(items),
+            "reviews": list_reviews(status="open")}
+
+
+@router.post("/reviews/{review_id}/assign")
+async def review_assign(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Claim a review-queue row (board #10): open → assigned with an owner."""
+    from src.frontline.validation_queue import assign_review
+
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON object required")
+    try:
+        return assign_review(review_id, str(body.get("owner") or ""))
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/reviews/{review_id}/resolve")
+async def review_resolve(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Close a review with verdict ai_wrong|data_drift|false_alarm (board #9)."""
+    from src.frontline.validation_queue import resolve_review
+
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON object required")
+    try:
+        return resolve_review(review_id, str(body.get("verdict") or ""))
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.post("/sandbox/boot")
@@ -60,29 +151,73 @@ async def sandbox_boot(body: dict[str, Any] | None = None) -> dict[str, Any]:
 @router.post("/pack-builder/profile")
 async def pack_builder_profile(file: UploadFile = File(...)) -> dict[str, Any]:
     """Upload a CSV: save it, propose column mapping, lint."""
+    import secrets as _secrets
     from pathlib import Path
     from src.domains.builder.pack_builder import lint_mapping, profile_csv
 
     dest_dir = REPO_ROOT / "data" / "uploads"
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe = Path(file.filename or "upload.csv").name or "upload.csv"
-    dest = dest_dir / safe
-    dest.write_bytes(await file.read())
-    profile = profile_csv(dest)
+    # Enforce .csv only (blocks .exe/.html/.svg stored-XSS + polyglots)
+    if Path(safe).suffix.lower() != ".csv":
+        raise HTTPException(400, "only .csv uploads are accepted")
+    # Basic filename hygiene: no empty / dotfiles / overlong names
+    if safe in {".", ".."} or safe.startswith(".") or len(safe) > 128:
+        raise HTTPException(400, "invalid filename")
+    # Never trust the user-supplied filename for storage: randomize the
+    # server-side name (prevents overwrite/predictable-path attacks) while
+    # keeping the .csv suffix.
+    stem = Path(safe).stem[:48]
+    cleaned = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem) or "upload"
+    dest = dest_dir / f"{cleaned}_{_secrets.token_hex(8)}.csv"
+    # Stream with an enforced cap BEFORE unbounded memory consumption
+    # (item 15): never await a full unbounded file.read().
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            piece = await file.read(64 * 1024)
+            if not piece:
+                break
+            total += len(piece)
+            if total > MAX_BUILDER_UPLOAD_BYTES:
+                raise HTTPException(400, "csv too large (max 5 MB)")
+            chunks.append(piece)
+        raw = b"".join(chunks)
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+    if not raw.strip():
+        raise HTTPException(400, "csv is empty")
+    # Refuse obvious non-CSV binaries (NUL bytes / MZ header)
+    if b"\x00" in raw[:4096] or raw[:2] == b"MZ":
+        raise HTTPException(400, "not a csv file")
+    dest.write_bytes(raw)
+    try:
+        profile = profile_csv(dest)
+    except Exception:
+        # Malformed CSV must not leave orphaned upload files behind.
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     lint = lint_mapping(profile["proposed_mapping"], profile["columns"])
     return {**profile, "lint": lint, "csv_path": str(dest)}
 
 
 @router.post("/pack-builder/insight")
 async def pack_builder_insight(body: dict[str, Any]) -> dict[str, Any]:
-    from pathlib import Path
     from src.domains.builder.pack_builder import first_insight_from_csv
 
     csv_path = body.get("csv_path")
     if not csv_path:
         raise HTTPException(400, "csv_path required")
+    resolved = _resolve_builder_csv(str(csv_path))
     return first_insight_from_csv(
-        Path(csv_path),
+        resolved,
         mapping=body.get("mapping"),
         pack_id=str(body.get("pack_id") or "builder_preview"),
         display_name=str(body.get("display_name") or "Preview pack"),
@@ -119,10 +254,25 @@ async def billing_checkout(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/billing/webhook")
-async def billing_webhook(body: dict[str, Any]) -> dict[str, Any]:
+async def billing_webhook(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     from src.frontline.billing import stripe_webhook
 
-    return stripe_webhook(body)
+    raw: bytes | None = None
+    try:
+        raw = await request.body()
+    except Exception:
+        raw = None
+    sig = request.headers.get("stripe-signature") or request.headers.get(
+        "Stripe-Signature"
+    )
+    try:
+        return stripe_webhook(body, raw_body=raw, signature=sig)
+    except PermissionError as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/seats")
@@ -199,9 +349,9 @@ async def reports_digest(body: dict[str, Any] | None = None) -> dict[str, Any]:
 
 @router.get("/ops/slo")
 async def ops_slo() -> dict[str, Any]:
-    from src.observability.slo import job_queue_status, slo_dashboard
+    from src.observability.slo import evaluate_slos, job_queue_status, slo_dashboard
 
-    return {"slo": slo_dashboard(), "jobs": job_queue_status()}
+    return {"slo": slo_dashboard(), "jobs": job_queue_status(), "eval": evaluate_slos()}
 
 
 @router.get("/ops/workers")

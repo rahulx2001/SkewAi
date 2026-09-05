@@ -117,24 +117,24 @@ def notify_affected_owners(
                 reason="proactive_cluster_notify",
             )
         selected.append({"owner_id": oid, "notice_id": nid, "channel": channel})
+    ledger_recorded = False
     if selected:
-        try:
-            record_action(
-                AgentAction(
-                    interaction_id=iid,
-                    agent="orchestrator",
-                    action_type="alert_sent",
-                    input_summary=f"cluster {cluster_id} proactive notify",
-                    output_summary=f"owners={len(selected)}",
-                )
+        record_action(
+            AgentAction(
+                interaction_id=iid,
+                agent="orchestrator",
+                action_type="alert_sent",
+                input_summary=f"cluster {cluster_id} proactive notify",
+                output_summary=f"owners={len(selected)}",
             )
-        except Exception:
-            pass
+        )
+        ledger_recorded = True
     return {
         "cluster_id": cluster_id,
         "selected": selected,
         "count": len(selected),
         "before_inbound_call": True,
+        "ledger_recorded": ledger_recorded,
     }
 
 

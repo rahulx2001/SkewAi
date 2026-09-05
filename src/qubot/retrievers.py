@@ -87,11 +87,17 @@ def agent_performance(window_days: int = 1) -> list[dict[str, Any]]:
 
 # ── 3. live_risk ─────────────────────────────────────────────────────────────
 
-def live_risk(window_days: int = 7) -> list[dict[str, Any]]:
+def live_risk(window_days: int = 7, *, as_of: str | None = None) -> list[dict[str, Any]]:
     """Cases grouped by matched cluster, joined to weekly anomalies + backtest.
 
     Surfaces clusters that are heating up right now, with the historical
     lead-time (the "did spikes precede advisories" moat) attached.
+
+    Trend scope (item 27): each cluster's trend is its OWN
+    (category, entity_2) slice — entity_2 resolved as the modal member-record
+    value — over matched-lead history. A global or category-only trend is
+    never returned for an unrelated cluster. ``as_of`` (ISO week or full
+    timestamp) caps the series for reproducible historical reads.
     """
     sql = """
     SELECT
@@ -103,6 +109,7 @@ def live_risk(window_days: int = 7) -> list[dict[str, Any]]:
     FROM cases c
     WHERE c.cluster_match_id IS NOT NULL
       AND c.created_at >= now() - INTERVAL (? || ' days')
+      AND COALESCE(c.case_kind, 'customer') = 'customer'
     GROUP BY c.cluster_match_id, c.pack_id
     ORDER BY live_case_count DESC
     """
@@ -110,32 +117,149 @@ def live_risk(window_days: int = 7) -> list[dict[str, Any]]:
         clusters = _rows(con, sql, [str(window_days)])
 
     # Enrich each cluster with corpus trend + lead-time from the domain warehouse.
+    # Batched per pack (item 27): one domain connection per pack, one trend
+    # query per pack — never N+1 opens. Trends are scoped to the cluster's own
+    # (category, entity_2) slice with matched-only lead.
+    try:
+        _pack_ids = sorted({c["pack_id"] for c in clusters})
+        _lead_by_cid: dict[tuple[str, int], dict[str, Any]] = {}
+        _slice_by_cid: dict[tuple[str, int], tuple[str | None, str | None]] = {}
+        _trend_by_slice: dict[tuple[str, str | None, str | None], list[dict[str, Any]]] = {}
+        for _pid in _pack_ids:
+            try:
+                with domain_con(_pid) as _dcon:
+                    for _lr in _rows(
+                        _dcon,
+                        "SELECT cluster_id, advisory_id, lead_time_weeks, matched FROM backtest_results WHERE matched = TRUE",
+                    ):
+                        try:
+                            _lead_by_cid[(_pid, int(_lr["cluster_id"]))] = _lr
+                        except (TypeError, ValueError):
+                            continue
+                    # Cluster slices: category from clusters, entity_2 as the
+                    # modal member-record value (record-level, not inferred).
+                    try:
+                        for _crow in _rows(
+                            _dcon,
+                            "SELECT cluster_id, category FROM clusters WHERE pack_id = ?",
+                            [_pid],
+                        ):
+                            try:
+                                _cid_int = int(_crow["cluster_id"])
+                            except (TypeError, ValueError):
+                                continue
+                            _slice_by_cid[(_pid, _cid_int)] = (
+                                _crow.get("category"),
+                                None,
+                            )
+                        try:
+                            _modes = _rows(
+                                _dcon,
+                                """
+                                SELECT a.cluster_id AS cluster_id, r.entity_2 AS entity_2,
+                                       COUNT(*) AS n
+                                FROM cluster_assignments a
+                                JOIN records r ON r.record_id = a.record_id
+                                WHERE r.entity_2 IS NOT NULL
+                                GROUP BY a.cluster_id, r.entity_2
+                                """,
+                            )
+                            _best: dict[int, tuple[int, str]] = {}
+                            for _m in _modes:
+                                try:
+                                    _mc = int(_m["cluster_id"])
+                                except (TypeError, ValueError):
+                                    continue
+                                _n = int(_m["n"] or 0)
+                                if _mc not in _best or _n > _best[_mc][0]:
+                                    _best[_mc] = (_n, str(_m["entity_2"]))
+                            for _mc, (_, _ent) in _best.items():
+                                _cat, _ = _slice_by_cid.get((_pid, _mc), (None, None))
+                                _slice_by_cid[(_pid, _mc)] = (_cat, _ent)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # One trend query per pack across all needed slices.
+                    try:
+                        _asof_clause = ""
+                        _asof_params: list[Any] = [_pid]
+                        if as_of:
+                            _asof_clause = "AND iso_week <= ?"
+                            _asof_params.append(str(as_of)[:8])
+                        for _tr in _rows(
+                            _dcon,
+                            f"""
+                            SELECT category, entity_2, iso_week,
+                                   SUM(record_count) AS record_count,
+                                   MAX(z_score) AS z_score,
+                                   MAX(CASE WHEN is_anomaly THEN 1 ELSE 0 END) = 1 AS is_anomaly
+                            FROM weekly_anomalies
+                            WHERE pack_id = ? {_asof_clause}
+                            GROUP BY category, entity_2, iso_week
+                            ORDER BY iso_week DESC
+                            """,
+                            _asof_params,
+                        ):
+                            _key = (_pid, _tr.get("category"), _tr.get("entity_2"))
+                            _trend_by_slice.setdefault(_key, []).append(_tr)
+                    except Exception:
+                        pass
+            except FileNotFoundError:
+                continue
+    except Exception:
+        _lead_by_cid = {}
+        _slice_by_cid = {}
+        _trend_by_slice = {}
     for cl in clusters:
         pack_id = cl["pack_id"]
         cid = cl["cluster_id"]
         try:
-            with domain_con(pack_id) as dcon:
-                lead = _rows(
-                    dcon,
-                    "SELECT advisory_id, lead_time_weeks, matched FROM backtest_results WHERE cluster_id = ? LIMIT 1",
-                    [cid],
-                )
-                cl["lead_time_weeks"] = lead[0]["lead_time_weeks"] if lead else None
-                cl["matched_advisory"] = lead[0]["advisory_id"] if lead else None
-                trend = _rows(
-                    dcon,
-                    """
-                    SELECT iso_week, record_count, z_score, is_anomaly
-                    FROM weekly_anomalies
-                    WHERE pack_id = ?
-                    ORDER BY iso_week DESC LIMIT 4
-                    """,
-                    [pack_id],
-                )
-                cl["weekly_trend"] = trend
-        except FileNotFoundError:
-            cl["lead_time_weeks"] = None
-            cl["weekly_trend"] = []
+            _cid = int(cid) if str(cid).lstrip("-").isdigit() else None
+        except (TypeError, ValueError):
+            _cid = None
+        lead = _lead_by_cid.get((pack_id, _cid)) if _cid is not None else None
+        cl["lead_time_weeks"] = (lead or {}).get("lead_time_weeks")
+        cl["matched_advisory"] = (lead or {}).get("advisory_id")
+        ccat, cent = _slice_by_cid.get((pack_id, _cid), (None, None)) if _cid is not None else (None, None)
+        trend = list(_trend_by_slice.get((pack_id, ccat, cent), []))
+        scope = "category+entity_2"
+        if not trend and ccat:
+            # Category-only fallback when the entity slice has no history:
+            # aggregate the category across entities IN PYTHON from the
+            # already-fetched per-pack rows (no extra queries), and label it
+            # so callers never mistake it for entity-scoped truth.
+            by_week: dict[str, dict[str, Any]] = {}
+            for (p, c, _e), rows in _trend_by_slice.items():
+                if p != pack_id or c != ccat:
+                    continue
+                for t in rows:
+                    w = str(t.get("iso_week"))
+                    cell = by_week.setdefault(w, {
+                        "category": ccat, "entity_2": None,
+                        "iso_week": w, "record_count": 0,
+                        "z_score": None, "is_anomaly": False,
+                    })
+                    try:
+                        cell["record_count"] += int(t.get("record_count") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        z = t.get("z_score")
+                        if z is not None and (cell["z_score"] is None or float(z) > float(cell["z_score"])):
+                            cell["z_score"] = z
+                    except (TypeError, ValueError):
+                        pass
+                    if t.get("is_anomaly"):
+                        cell["is_anomaly"] = True
+            trend = [dict(v, trend_scope="category-only-fallback")
+                     for _, v in sorted(by_week.items(), reverse=True)]
+            scope = "category-only-fallback" if trend else "no-history"
+        if not ccat:
+            scope = "pack-unscoped"
+        cl["trend_scope"] = scope
+        cl["trend_entity_2"] = cent
+        cl["weekly_trend"] = (trend or [])[:8]
     return clusters
 
 
@@ -190,6 +314,7 @@ def case_funnel(window_days: int = 7) -> dict[str, Any]:
     SELECT COUNT(*) AS case_count
     FROM cases
     WHERE created_at >= now() - INTERVAL (? || ' days')
+      AND COALESCE(case_kind, 'customer') = 'customer'
     """
     with ops_con(read_only=True) as con:
         funnel = _rows(con, sql, [str(window_days)])[0]

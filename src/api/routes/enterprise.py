@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.auth import require_api_key
 from src.api.jsonutil import json_safe
+from src.api.rbac import require_perm_dep
 
 router = APIRouter(
     prefix="/api/frontline/enterprise",
@@ -35,7 +36,10 @@ async def recent_interactions(
 
 
 @router.get("/timeline/{interaction_id}")
-async def get_timeline(interaction_id: str) -> dict[str, Any]:
+async def get_timeline(
+    interaction_id: str,
+    _role: str = Depends(require_perm_dep("ledger:read", open_mode_ok=True)),
+) -> dict[str, Any]:
     from src.enterprise.timeline import build_incident_timeline
 
     try:

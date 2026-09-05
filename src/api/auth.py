@@ -195,8 +195,35 @@ async def require_ws_api_key(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> bool:
-    """FastAPI dependency for WebSocket routes (headers preferred; query deprecated)."""
-    check_api_key(authorization=authorization, x_api_key=x_api_key, api_key=api_key)
+    """FastAPI dependency for WebSocket routes (headers preferred; query deprecated).
+
+    Mirrors HTTP ``require_api_key`` (item 11): query-string keys are rejected
+    by default and accepted only when ``FRONTLINE_ALLOW_QUERY_KEY=1`` is set
+    explicitly — so hardened deploys never accept keys from URLs (logs/proxy
+    history). Prefer the ``authenticate_websocket`` first-message frame path
+    for browser clients.
+    """
+    allow_query = _env_bool("FRONTLINE_ALLOW_QUERY_KEY", False)
+    header_present = bool(
+        (x_api_key and x_api_key.strip())
+        or (authorization and authorization.strip())
+    )
+    if api_key and not allow_query and not header_present:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "API key in query string is disabled; use X-API-Key, "
+                "Authorization: Bearer, or the WebSocket auth frame "
+                "(set FRONTLINE_ALLOW_QUERY_KEY=1 only for tests)."
+            ),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    check_api_key(
+        authorization=authorization,
+        x_api_key=x_api_key,
+        api_key=api_key if allow_query else None,
+        allow_query_key=allow_query,
+    )
     return True
 
 
@@ -205,23 +232,41 @@ async def authenticate_websocket(websocket: WebSocket) -> None:
 
     Order:
       1. Open mode → allow
-      2. Header / deprecated query key
+      2. Header (preferred for non-browser clients)
       3. Accept + first-message ``{"type":"auth","api_key":"..."}`` (preferred for browsers)
+
+    Query ``?api_key=`` is deprecated and rejected unless
+    ``FRONTLINE_ALLOW_QUERY_KEY=1`` (mirrors HTTP ``require_api_key``) so
+    hardened deploys don't leak keys via logs/proxy history.
 
     Raises HTTPException on failure (caller should close with 1008).
     """
     if is_open_mode():
         return
 
-    # Headers (non-browser clients) + deprecated query
+    allow_query = _env_bool("FRONTLINE_ALLOW_QUERY_KEY", False)
+    q = websocket.query_params.get("api_key")
+    # Headers first (no query involved)
     try:
         check_api_key(
             authorization=websocket.headers.get("authorization"),
             x_api_key=websocket.headers.get("x-api-key"),
-            api_key=websocket.query_params.get("api_key"),
+            api_key=None,
         )
         return
     except HTTPException:
+        pass
+
+    # Deprecated query fallback — only when explicitly opted in for tests.
+    if q and allow_query:
+        try:
+            check_api_key(api_key=q)
+            return
+        except HTTPException:
+            pass
+    elif q and not allow_query:
+        # Do not silently accept: force header/first-message path below.
+        # Fall through to first-message auth (which will 401 without a key).
         pass
 
     # Browser path: first message after accept

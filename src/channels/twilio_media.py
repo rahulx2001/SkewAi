@@ -44,12 +44,17 @@ class TwilioMediaChannel(ChannelAdapter):
         return bool(self._account_sid and self._auth_token)
 
     def capabilities(self) -> ChannelCapabilities:
+        from src.voice.policy import silence_timeout_ms, tts_latency_budget_ms
         return ChannelCapabilities(
             voice=True,
             text=True,
             barge_in=True,
             server_tts=True,
             supervisor_takeover=True,
+            dtmf=True,
+            asr_confidence=True,
+            silence_timeout_ms=silence_timeout_ms(),
+            tts_budget_ms=tts_latency_budget_ms(),
         )
 
     def stream_url(self, public_base: str, interaction_id: str) -> str:
@@ -92,6 +97,36 @@ class TwilioMediaChannel(ChannelAdapter):
 
     async def send_interaction_ended(self, payload: dict[str, Any]) -> None:
         await self._emit({"type": "interaction_ended", **payload})
+
+    async def send_clear_stream(self, stream_sid: str) -> None:
+        """Twilio Media Streams: cancel buffered audio packets on barge-in (audit 2.4)."""
+        await self._emit({"event": "clear", "streamSid": stream_sid})
+
+    def generate_transfer_twiml(
+        self,
+        target: str,
+        *,
+        method: str = "sip",
+        caller_id: str | None = None,
+    ) -> str:
+        """Generate compliant TwiML for warm transfer via SIP REFER or Conference (audit 2.4)."""
+        cid_attr = f' callerId="{caller_id}"' if caller_id else ""
+        if method.lower() == "conference":
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Response><Dial{cid_attr}><Conference>{target}</Conference></Dial></Response>'
+            )
+        elif method.lower() == "sip":
+            sip_uri = target if target.startswith("sip:") else f"sip:{target}"
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Response><Dial{cid_attr}><Sip>{sip_uri}</Sip></Dial></Response>'
+            )
+        else:
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                f'<Response><Dial{cid_attr}><Number>{target}</Number></Dial></Response>'
+            )
 
     async def hangup(self) -> None:
         self._closed = True

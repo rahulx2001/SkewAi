@@ -24,6 +24,8 @@ dashboard/dist/
 data/**/*.duckdb
 data/**/*.duckdb.wal
 data/connectors/outbox/
+data/uploads/demo_*.csv
+data/uploads/evil_*.csv
 reports/qubot/contacts/
 reports/qubot/digests/
 # Keep eval report dir but ignore generated dated files if desired:
@@ -35,6 +37,7 @@ reports/qubot/digests/
 !.env.example
 *.pem
 *.key
+data/oidc_local.json
 
 # Local runtime / machine state
 data/uvicorn-local.pid

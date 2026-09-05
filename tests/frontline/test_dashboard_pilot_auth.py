@@ -26,8 +26,32 @@ def test_api_auth_helper_exports_expected_symbols():
     assert "export function withApiKeyQuery" in src
     assert "export function sendWsAuth" in src
     assert "X-API-Key" in src
+    assert "SESSION_STORAGE" not in src
+    assert "X-Frontline-Session" not in src
+    assert "export async function signIn" not in src
+    assert "export async function signOut" in src
+    assert "export async function completeGoogleHandoff" in src
+    assert "/api/frontline/auth/oidc/complete" in src
+    assert "/api/frontline/auth/me" in src
+    assert "server leaked session token" in src
     # WS auth frame uses api_key field (not URL query leakage)
     assert '"auth"' in src or "type: \"auth\"" in src or "type: 'auth'" in src
+
+
+def test_sidebar_account_uses_shared_web_signin() -> None:
+    app = (DASH / "src" / "App.jsx").read_text(encoding="utf-8")
+    acc = (DASH / "src" / "ui" / "AccountSignIn.jsx").read_text(encoding="utf-8")
+    assert "AccountSignIn" in app
+    assert "SignIn" in app
+    assert "signin" in acc
+    assert "Sign in" in acc
+    page = (DASH / "routes" / "SignIn.jsx").read_text(encoding="utf-8")
+    assert "Continue with Google" in page
+    assert "/api/frontline/auth/oidc/start" in page
+    assert "saveGoogleProvider" in page
+    auth = AUTH_JS.read_text(encoding="utf-8")
+    assert "export async function saveGoogleProvider" in auth
+    assert "/api/frontline/auth/oidc/config" in auth
 
 
 def test_callwidget_wires_api_key_on_start_end_and_ws():

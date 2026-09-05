@@ -33,18 +33,20 @@ def _as_dt(val: Any) -> datetime | None:
         return None
 
 
+_SCHEMA_OK_EXTRA = frozenset({"embedding", "pack_id"})
+
+
 def schema_contract_ok(row: dict[str, Any]) -> tuple[bool, str]:
     for f in REQUIRED_FIELDS:
         if not str(row.get(f) or "").strip():
             return False, f"schema: missing {f}"
-    extra_ok = True
     for k in row:
-        if k not in CANONICAL_RECORD_FIELDS and k not in {"embedding", "pack_id"}:
-            extra_ok = True
+        if k not in CANONICAL_RECORD_FIELDS and k not in _SCHEMA_OK_EXTRA:
+            return False, f"schema: unknown field {k}"
     received = row.get("received_at")
     if received is not None and _as_dt(received) is None and not isinstance(received, datetime):
         return False, "schema: received_at not a timestamp"
-    return extra_ok, "schema: ok"
+    return True, "schema: ok"
 
 
 def completeness_ok(row: dict[str, Any], *, required: Iterable[str] = ("record_id", "text", "source")) -> tuple[bool, str]:

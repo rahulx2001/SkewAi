@@ -78,7 +78,7 @@ _CATEGORY_SYNONYMS: dict[str, str] = {
     "wipers": "VISIBILITY",
     "visibility": "VISIBILITY",
     "child seat": "CHILD SEAT",
-    "car seat": "CHILD SEAST",
+    "car seat": "CHILD SEAT",
     "structure": "STRUCTURE",
     "frame": "STRUCTURE",
     "speed control": "VEHICLE SPEED CONTROL",
@@ -151,19 +151,160 @@ def _extract_via_gazetteer(text: str, ctx: InteractionContext, slot_name: str) -
 
 # ── Kill-switch ─────────────────────────────────────────────────────────────
 
+_SAFETY_ASKED_KEY = "__safety_questions_asked__"
+_SAFETY_PENDING_KEY = "__safety_pending__"
+
+# Spoken yes/no safety is a live-call protocol. Ticket ingest is not a caller
+# and must not be fed canned "nobody is hurt" answers (or force-enriched while
+# those questions are still pending).
+_NON_INTERACTIVE_CHANNELS = frozenset({"webhook", "ticket", "email_batch"})
+
+
+def _asks_spoken_safety(ctx: InteractionContext) -> bool:
+    ch = (getattr(ctx, "channel", None) or "web_text").strip().lower()
+    return ch not in _NON_INTERACTIVE_CHANNELS
+
+# Injury-family lexicon terms that are also the vocabulary of "is anyone hurt?"
+# Negated forms ("nobody is hurt") must not fire the kill-switch.
+_NEGATABLE_LEXICON = frozenset({
+    "hurt", "hurts", "injured", "injury", "bleeding", "burned", "trapped",
+})
+
+# Negation/hedge window (audit 2.3): a negator or hedge within N tokens
+# BEFORE any kill-switch term downgrades the hit to a safety question
+# instead of an escalation. False P1s burn supervisor trust and pollute the
+# safety base rate; a question still keeps the contact safe.
+_NEGATORS = frozenset({
+    "no", "not", "nobody", "none", "never", "n't", "without",
+    "hardly", "barely", "scarcely", "didn't", "didnt", "did not",
+    "wasn't", "wasnt", "was not", "weren't", "werent", "were not",
+    "isn't", "isnt", "is not", "aren't", "arent", "are not",
+    "haven't", "havent", "hasn't", "hasnt", "no-one", "nothing",
+})
+_HEDGES = frozenset({
+    "might", "may", "could", "worried", "afraid", "concerned", "wondering",
+    "if", "whether", "almost", "nearly", "possible", "possibly",
+})
+_HEDGE_WINDOW_TOKENS = 6
+
+
+def classify_yes_no(text: str) -> str | None:
+    """Map a free-text safety reply to yes / no. None = unclear."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if re.search(r"\b(nobody|no one|no-one|none)\b.{0,32}\b(hurt|hurts|injured|harmed|bleeding)\b", t):
+        return "no"
+    if re.search(r"\b(not|n't|isnt|isn't)\s+(hurt|injured|bleeding|safe)\b", t):
+        return "no"
+    if re.search(r"\b(unsafe|in danger|not safe)\b", t):
+        return "no"
+    if re.match(r"^(no|nope|nah|negative)\b", t):
+        return "no"
+    if re.match(r"^(yes|yeah|yep|yup|yea|affirmative)\b", t):
+        return "yes"
+    if re.search(r"\b(hurt|hurts|injured|bleeding|ambulance|hospital|burned|trapped)\b", t):
+        return "yes"
+    if re.search(r"\b(safe|i'm fine|im fine|okay|ok)\b", t):
+        return "yes"
+    return None
+
+
+def escalate_on_for_prompt(prompt: str) -> str | None:
+    """Which polarity of a yes/no answer should escalate this safety question.
+
+    ``yes`` — "Is anyone hurt?" / "Has money been taken?"
+    ``no``  — "Are you in a safe location?"
+    ``None`` — informational (e.g. "Have you contacted the fraud department?").
+    """
+    p = (prompt or "").strip().lower()
+    if "safe location" in p or re.search(r"\bare you (safe|in a safe)\b", p):
+        return "no"
+    if any(w in p for w in ("hurt", "injur", "danger", "taken", "stolen", "emergency")):
+        return "yes"
+    return None
+
+
+def _parse_asked_indices(raw: Any) -> set[int]:
+    out: set[int] = set()
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.add(int(part))
+    return out
+
+
+def _store_asked_indices(ctx: InteractionContext, asked: set[int]) -> None:
+    ctx.slots[_SAFETY_ASKED_KEY] = ",".join(str(i) for i in sorted(asked))
+
+
+def _lexicon_term_negated(cleaned: str, term: str) -> bool:
+    """True when *term* appears only inside a negated injury phrase."""
+    if term.lower() not in _NEGATABLE_LEXICON:
+        return False
+    esc = re.escape(term.lower())
+    if re.search(rf"\b(no|not|nobody|no one|no-one|none|never|n't)\b.{{0,32}}\b{esc}\b", cleaned):
+        return True
+    return False
+
+
+def _term_hedged_or_negated(text: str, term: str) -> bool:
+    """True when a negator/hedge sits within the token window before *term*.
+
+    Covers every lexicon term (not just the injury family): "no fire, just
+    a smell", "I'm worried it might catch fire", "without any smoke", "I didn't crash",
+    "nobody went to the hospital".
+    """
+    t_lower = (text or "").lower()
+    esc = re.escape(term.lower())
+    m = re.search(rf"\b{esc}\b", t_lower)
+    if m:
+        prefix = t_lower[:m.start()]
+        toks = re.findall(r"[a-z0-9'-]+", prefix)
+        if toks:
+            window = toks[-_HEDGE_WINDOW_TOKENS:]
+            if any(w in _NEGATORS or w in _HEDGES for w in window):
+                return True
+            win_str = " ".join(window)
+            if any(ph in win_str for ph in ("no one", "no fire", "not on fire", "didn't", "did not", "no injuries", "no accident")):
+                return True
+        return False
+
+    toks = re.findall(r"[a-z0-9']+", t_lower)
+    targets = set(term.lower().split())
+    for i, tok in enumerate(toks):
+        if tok not in targets:
+            continue
+        window = toks[max(0, i - _HEDGE_WINDOW_TOKENS):i]
+        if any(w in _NEGATORS or w in _HEDGES for w in window):
+            return True
+        win_str = " ".join(window)
+        if any(ph in win_str for ph in ("no one", "no fire", "not on fire", "didn't", "did not")):
+            return True
+    return False
+
 
 def _check_kill_switch(text: str, ctx: InteractionContext) -> str | None:
     """If `text` matches the pack's escalation lexicon, return the matched term.
 
     Excludes common safe contexts (e.g. 'fraud department', 'fraud alert') so
     that answering safety questions doesn't false-trigger the kill-switch.
+    Injury-family terms are skipped when the utterance is a negation
+    ("nobody is hurt") — those answers are bound by the safety-question path.
     """
     text_lower = text.lower()
-    # Common safe phrases that contain kill-switch terms but aren't escalations.
-    # The customer is answering a safety question, not reporting an incident.
+    # Common safe phrases and metaphorical idioms that contain kill-switch terms
+    # but aren't actual safety emergencies (prevents supervisor alert burnout).
     safe_phrases = [
         "fraud department", "fraud alert", "fraud division", "fraud team",
         "fraud prevention", "fraud protection",
+        "killing me", "killing my", "killing us", "killing the",
+        "dying to", "dying of", "heart attack", "scared to death",
+        "worried to death", "bored to death", "sick to death",
+        "smoke and mirrors", "fire drill", "crash course",
+        "burn through", "burning through", "burning a hole",
+        "spitting fire", "burned out", "burning out", "burn out",
+        "grass fire", "reading light burned", "bulb burned",
     ]
     cleaned = text_lower
     for safe in safe_phrases:
@@ -171,6 +312,8 @@ def _check_kill_switch(text: str, ctx: InteractionContext) -> str | None:
     for term in ctx.pack.manifest.safety.escalation_lexicon:
         # whole-word-ish match on the cleaned text
         if re.search(rf"\b{re.escape(term.lower())}\b", cleaned):
+            if _term_hedged_or_negated(cleaned, term) or _lexicon_term_negated(cleaned, term):
+                continue
             return term
     return None
 
@@ -195,6 +338,44 @@ class IntakeAgent(Agent):
         """
         ctx = self.ctx
         extracted: dict[str, str] = {}
+
+        # ── 10/10: ASR confidence → readback + DTMF + identity (pilot voice) ─
+        # kwargs: asr_confidence={slot: 0..1}, dtmf="1", identity={"verified": bool}
+        # Low-confidence entities never silently accept: force readback turn.
+        try:
+            from src.voice.policy import (
+                asr_confidence_threshold, dtmf_fallback_prompt, parse_dtmf,
+                readback_prompt,
+            )
+            _conf = kwargs.get("asr_confidence") or {}
+            if isinstance(_conf, dict) and _conf:
+                _thr = asr_confidence_threshold()
+                _low = [(s, float(c)) for s, c in _conf.items()
+                        if isinstance(c, (int, float)) and float(c) < _thr]
+                if _low and customer_turn:
+                    _slot, _c = _low[0]
+                    _q = readback_prompt(_slot, customer_turn.strip()[:120])
+                    record_action(self._action(
+                        action_type="question_asked",
+                        input_summary=f"low asr confidence slot='{_slot}' conf={_c:.2f}<{_thr:.2f}",
+                        output_summary=_q[:500],
+                    ))
+                    return {"extracted": {}, "question": _q, "fast_path": True,
+                            "kill_switch": None, "slots_filled_now": False,
+                            "readback": True, "readback_slot": _slot,
+                            "asr_confidence": _c}
+            _dtmf = parse_dtmf(customer_turn or "")
+            if _dtmf and not ctx.has_required_slots():
+                record_action(self._action(
+                    action_type="slot_extracted",
+                    input_summary=f"dtmf fallback: '{_dtmf}'",
+                    output_summary="dtmf digit captured; mapped by orchestrator menu",
+                ))
+                return {"extracted": {}, "question": dtmf_fallback_prompt(["continue", "speak to someone"]),
+                        "fast_path": True, "kill_switch": None,
+                        "slots_filled_now": False, "dtmf": _dtmf}
+        except Exception:
+            pass
 
         # ── Case-status lookup (returning caller with case number) ────────
         if customer_turn:
@@ -222,8 +403,40 @@ class IntakeAgent(Agent):
         # ── Prefill from entity memory (dynamic slot skip) ───────────────
         self._prefill_from_memory()
 
+        # ── Bind the pending safety-question answer BEFORE the lexicon ───
+        # The pack asks "Is anyone hurt?" then used to ignore the reply.
+        # Affirmative/negative answers are interpreted against escalate_on.
+        if customer_turn and not ctx.safety_flags.get("escalation"):
+            safety_hit = self._evaluate_pending_safety_answer(customer_turn)
+            if safety_hit:
+                return safety_hit
+
         # ── Kill-switch check FIRST ──────────────────────────────────────
         kill_term = _check_kill_switch(customer_turn, ctx) if customer_turn else None
+        if kill_term and customer_turn and _term_hedged_or_negated(customer_turn, kill_term):
+            # Downgrade (audit 2.3): negated/hedged mention ("no fire, just a
+            # smell", "worried it might catch fire") becomes a safety
+            # QUESTION, not a Critical/P1 escalation — still ledgered, still
+            # safe, without burning supervisor trust.
+            record_action(self._action(
+                action_type="safety_flag_raised",
+                input_summary=f"hedged/negated lexicon mention: '{kill_term}'",
+                output_summary="downgraded to safety_question (no escalation flag)",
+                evidence_ids=[],
+                ok=True,
+            ))
+            safety_q = self._next_safety_question() or (
+                "Are you in a safe location right now?"
+            )
+            return {
+                "extracted": {},
+                "question": safety_q,
+                "fast_path": True,
+                "kill_switch": None,
+                "slots_filled_now": False,
+                "safety_question": True,
+                "safety_downgraded": kill_term,
+            }
         if kill_term:
             ctx.safety_flags["escalation"] = True
             ctx.safety_flags[kill_term] = True
@@ -261,24 +474,29 @@ class IntakeAgent(Agent):
 
         # ── Pick the next question ────────────────────────────────────────
         # Always ask safety questions first if pack defines them AND no
-        # escalation flag has been raised.
-        safety_q = self._next_safety_question()
-        if safety_q:
-            record_action(self._action(
-                action_type="question_asked",
-                input_summary="safety question required by pack",
-                output_summary=safety_q,
-            ))
-            return {
-                "extracted": extracted,
-                "question": safety_q,
-                "fast_path": True,
-                "kill_switch": None,
-                "slots_filled_now": bool(extracted),
-            }
+        # escalation flag has been raised. The global turn cap still wins:
+        # unanswered safety questions must not loop past FRONTLINE_MAX_TURNS.
+        customer_turn_count = sum(1 for t in ctx.turns if t["speaker"] == "customer")
+        if customer_turn_count < settings.max_turns:
+            safety_q = self._next_safety_question()
+            if safety_q:
+                record_action(self._action(
+                    action_type="question_asked",
+                    input_summary="safety question required by pack",
+                    output_summary=safety_q,
+                ))
+                return {
+                    "extracted": extracted,
+                    "question": safety_q,
+                    "fast_path": True,
+                    "kill_switch": None,
+                    "slots_filled_now": bool(extracted),
+                    "safety_question": True,
+                }
+        else:
+            ctx.slots.pop(_SAFETY_PENDING_KEY, None)
 
         # Global turn cap: stop collecting and signal orchestrator to wrap up.
-        customer_turn_count = sum(1 for t in ctx.turns if t["speaker"] == "customer")
         if customer_turn_count >= settings.max_turns and not ctx.has_required_slots():
             record_action(self._action(
                 action_type="intake_completed",
@@ -460,20 +678,25 @@ class IntakeAgent(Agent):
         if slot.validation == "year-range":
             return _extract_year(text, slot.year_range)
         if slot.validation == "gazetteer":
-            # 1. Try direct gazetteer match (whole-word substring).
-            v = _extract_via_gazetteer(text, self.ctx, slot.name)
-            if v:
-                return v
-            # 2. For category slots, try the synonym map.
+            # 2. For category slots, try the synonym map and capture secondary issues.
             if slot.name == "category":
                 lower = text.lower()
+                matched_categories: list[str] = []
+                # Direct gazetteer match if any
+                v = _extract_via_gazetteer(text, self.ctx, slot.name)
+                if v:
+                    matched_categories.append(v)
+                gaz = self.ctx.pack.gazetteer_for_slot(slot.name)
                 for syn, canonical in _CATEGORY_SYNONYMS.items():
                     if re.search(rf"\b{re.escape(syn)}\b", lower):
-                        # Verify the canonical form is in the gazetteer.
-                        gaz = self.ctx.pack.gazetteer_for_slot(slot.name)
-                        if gaz and gaz.lookup(canonical):
-                            return canonical
-            return None
+                        if gaz and gaz.lookup(canonical) and canonical not in matched_categories:
+                            matched_categories.append(canonical)
+                if matched_categories:
+                    if len(matched_categories) > 1:
+                        self.ctx.slots["secondary_categories"] = matched_categories[1:]
+                    return matched_categories[0]
+                return None
+            return _extract_via_gazetteer(text, self.ctx, slot.name)
         if slot.validation == "regex" and slot.regex:
             m = re.search(slot.regex, text)
             if m:
@@ -484,22 +707,83 @@ class IntakeAgent(Agent):
         return None
 
     # ── Dialogue policy ──────────────────────────────────────────────────
+    def _evaluate_pending_safety_answer(self, text: str) -> dict[str, Any] | None:
+        """Interpret `text` as the reply to the pending safety question.
+
+        Returns an intake result dict when the answer escalates; otherwise
+        records the answer and returns None so the rest of the turn proceeds.
+        Unclear replies leave the question pending (it will be re-asked).
+        """
+        ctx = self.ctx
+        raw_pending = ctx.slots.get(_SAFETY_PENDING_KEY)
+        if raw_pending is None or str(raw_pending).strip() == "":
+            return None
+        try:
+            idx = int(str(raw_pending).strip())
+        except ValueError:
+            ctx.slots.pop(_SAFETY_PENDING_KEY, None)
+            return None
+        questions = ctx.pack.manifest.safety.safety_questions or []
+        if idx < 0 or idx >= len(questions):
+            ctx.slots.pop(_SAFETY_PENDING_KEY, None)
+            return None
+        prompt = questions[idx]
+        polarity = classify_yes_no(text)
+        escalate_on = escalate_on_for_prompt(prompt)
+        if polarity is None:
+            # Keep pending; _next_safety_question will re-ask this index.
+            return None
+        asked = _parse_asked_indices(ctx.slots.get(_SAFETY_ASKED_KEY))
+        asked.add(idx)
+        _store_asked_indices(ctx, asked)
+        ctx.slots.pop(_SAFETY_PENDING_KEY, None)
+        if escalate_on and polarity == escalate_on:
+            flag = f"safety_q_{idx}"
+            ctx.safety_flags["escalation"] = True
+            ctx.safety_flags[flag] = True
+            record_action(self._action(
+                action_type="safety_flag_raised",
+                input_summary=f"safety question {idx} ({prompt!r}) answered {polarity!r}",
+                output_summary=f"escalate_on={escalate_on}; intake will skip remaining slots",
+                evidence_ids=[],
+            ))
+            return {
+                "extracted": {},
+                "question": ctx.pack.manifest.safety.escalation_script,
+                "fast_path": True,
+                "kill_switch": flag,
+                "slots_filled_now": False,
+            }
+        return None
+
     def _next_safety_question(self) -> str | None:
         """Return the next unanswered safety question, if any.
 
-        Safety questions are asked once each, in order, before regular slots.
-        We track which have been asked via the `safety_questions_asked` set
-        on the context (not in slot_attempts since these aren't slots).
+        Asked-question state lives in ``ctx.slots`` so a rebuilt orchestrator
+        (process restart / resume) does not replay the full safety script.
+        A question is marked asked only after its answer is bound.
         """
-        asked = self.ctx.slots.setdefault("__safety_questions_asked__", "")  # misuse; see note
-        # Store the set of asked indices in a slot-like key to keep ctx serializable.
-        # NOTE: for clarity, we use a private attribute on ctx instead.
-        already = getattr(self.ctx, "_safety_asked", set())
-        questions = self.ctx.pack.manifest.safety.safety_questions
+        if not _asks_spoken_safety(self.ctx):
+            return None
+        questions = self.ctx.pack.manifest.safety.safety_questions or []
+        if not questions:
+            return None
+        raw_pending = self.ctx.slots.get(_SAFETY_PENDING_KEY)
+        if raw_pending is not None and str(raw_pending).strip() != "":
+            try:
+                i = int(str(raw_pending).strip())
+            except ValueError:
+                i = -1
+            if 0 <= i < len(questions):
+                return questions[i]
+        asked = _parse_asked_indices(self.ctx.slots.get(_SAFETY_ASKED_KEY))
+        # Honour leftover in-memory attr from older contacts (best-effort).
+        legacy = getattr(self.ctx, "_safety_asked", None)
+        if isinstance(legacy, set):
+            asked |= {int(x) for x in legacy if str(x).isdigit() or isinstance(x, int)}
         for i, q in enumerate(questions):
-            if i not in already:
-                already.add(i)
-                setattr(self.ctx, "_safety_asked", already)
+            if i not in asked:
+                self.ctx.slots[_SAFETY_PENDING_KEY] = str(i)
                 return q
         return None
 
@@ -519,3 +803,32 @@ class IntakeAgent(Agent):
                 return None
             return slot
         return None
+
+    def reextract_overwrite(self, text: str) -> dict[str, str]:
+        """Correction policy (board #4): re-extract ALLOWING overwrites.
+
+        Normal extraction skips filled slots; a correction ("actually it's
+        a 2018") must replace them. Only slots the text actually resolves
+        are touched; free-text slots (description) are NEVER overwritten by
+        a one-line correction ("yes, that's right" is not a description).
+        Every change is ledgered as a correction.
+        """
+        changed: dict[str, str] = {}
+        for slot in self.ctx.pack.required_slots():
+            if getattr(slot, "validation", "") == "free-text":
+                continue
+            try:
+                value = self._extract_slot(slot, text or "")
+            except Exception:
+                continue
+            if value and value != (self.ctx.slots.get(slot.name) or ""):
+                self.ctx.slots[slot.name] = value
+                changed[slot.name] = value
+        if changed:
+            record_action(self._action(
+                action_type="slot_extracted",
+                input_summary=f"correction turn: '{(text or '')[:200]}'",
+                output_summary=f"corrected: {changed}",
+                evidence_ids=[],
+            ))
+        return changed

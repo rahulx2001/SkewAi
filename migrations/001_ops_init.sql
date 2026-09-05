@@ -1,4 +1,5 @@
 -- Alembic-ready initial ops schema (feature #45).
+-- target: ops
 -- Applied manually or via future Alembic env; DuckDB already has equivalent DDL.
 
 CREATE TABLE IF NOT EXISTS interactions (

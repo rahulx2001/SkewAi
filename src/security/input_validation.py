@@ -28,12 +28,16 @@ MAX_INTERACTION_TURNS = 200   # hard cap on turns per interaction (safety net)
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
     # Prompt-injection-ish phrases (case-insensitive)
     re.compile(r"ignore (all |previous |the above )?instructions", re.IGNORECASE),
+    re.compile(r"disregard (all |previous |prior |above |the )*(instructions|directives|prompts)", re.IGNORECASE),
     re.compile(r"you are (now )?a (different|new|helpful) (ai|assistant|agent)", re.IGNORECASE),
     re.compile(r"forget (everything|all|your instructions)", re.IGNORECASE),
     re.compile(r"system prompt", re.IGNORECASE),
+    re.compile(r"repeat (your|the) (system|initial|hidden) (prompt|instructions)", re.IGNORECASE),
+    re.compile(r"do anything now|jailbreak|developer mode|ignore safety", re.IGNORECASE),
     # SQL injection attempts (parameterized queries make these safe, but reject anyway)
     re.compile(r";\s*(drop|alter|truncate|delete|update|insert)\s", re.IGNORECASE),
     re.compile(r"--\s*$", re.IGNORECASE),  # SQL comment at end
+    re.compile(r"\bunion\s+select\b", re.IGNORECASE),
     # Shell injection (defensive; the server doesn't shell out, but reject)
     re.compile(r"\$\(", re.IGNORECASE),  # $(...)
     re.compile(r"`[^`]+`"),              # backticks (shell substitution)
@@ -47,6 +51,19 @@ class ValidationResult:
     ok: bool
     text: str            # cleaned text (control chars stripped)
     reason: str = ""     # empty if ok
+
+
+def escape_untrusted(text: str) -> str:
+    """HTML-escape untrusted text for non-React sinks (board: stored XSS).
+
+    Split of duties (documented): ledger rows and turn transcripts keep
+    VERBATIM evidence (audit hashes depend on it; React auto-escapes on
+    render). Only server-composed strings that embed customer text into
+    console/activity payloads consumed by custom renderers go through here.
+    """
+    import html as _html
+
+    return _html.escape(str(text or ""), quote=True)
 
 
 def validate_input(text: str) -> ValidationResult:
@@ -111,9 +128,25 @@ def validate_advisory_sql(sql: str) -> ValidationResult:
     return ValidationResult(ok=True, text=sql)
 
 
+def sanitize_prompt_variable(val: Any, *, tag_name: str = "untrusted_input") -> str:
+    """Isolate untrusted text inside rigid XML tags and neutralize prompt injection markers (audit 5.4).
+
+    Strips delimiter tags to prevent tag-escaping attacks, strips meta-instruction
+    tokens, and encapsulates text in <{tag_name}>...</{tag_name}>.
+    """
+    text = str(val or "").strip()
+    # Strip opening/closing tag if user tries to close the block
+    text = re.sub(rf"</?\s*{tag_name}\s*>", "", text, flags=re.IGNORECASE)
+    # Neutralize instruction boundary tokens
+    text = re.sub(r"\[/?INST\]|<system>|</system>|<<SYS>>|<</SYS>>", "", text, flags=re.IGNORECASE)
+    return f"<{tag_name}>\n{text}\n</{tag_name}>"
+
+
 __all__ = [
     "validate_input",
     "validate_advisory_sql",
+    "sanitize_prompt_variable",
+    "escape_untrusted",
     "ValidationResult",
     "MAX_INPUT_LENGTH",
     "MAX_INPUT_LINES",

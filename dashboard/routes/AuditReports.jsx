@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiHeaders } from "../src/apiAuth.js";
 
 // ── Minimal markdown renderer (basic #, ##, ###, lists, tables, code) ──
 // Returns an array of React nodes. Intentionally simple — no library.
@@ -160,6 +161,30 @@ function splitRow(line) {
 }
 
 // Inline formatting: **bold**, *italic*, `code`, links
+// SECURITY: hrefs are allowlisted to http/https/relative only — javascript:,
+// data:, vbscript: etc. render as plain text to block stored-XSS via audit
+// markdown (which embeds customer/case text).
+function safeHref(raw) {
+  const href = String(raw || "").trim();
+  if (!href) return null;
+  // Relative links (#anchor, /path) are safe.
+  if (href.startsWith("#") || href.startsWith("/") || href.startsWith("./") || href.startsWith("../")) return href;
+  try {
+    // Use a dummy base so bare "example.com/x" parses; require http/https.
+    const u = new URL(href, "http://localhost");
+    const proto = (u.protocol || "").toLowerCase();
+    if (proto === "http:" || proto === "https:") {
+      // Reject protocol-relative //evil and userinfo tricks that smuggle hosts.
+      if (!href.toLowerCase().startsWith("http://") && !href.toLowerCase().startsWith("https://")) return null;
+      if (href.includes("@") && !href.startsWith("http")) return null;
+      return href;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function renderInline(text) {
   if (!text) return null;
   // Tokenize into nodes by walking regex matches.
@@ -177,7 +202,11 @@ function renderInline(text) {
       tokens.push(<code key={i++}>{tok.slice(1, -1)}</code>);
     } else if (tok.startsWith("[")) {
       const lm = /\[([^\]]+)\]\(([^)]+)\)/.exec(tok);
-      if (lm) tokens.push(<a key={i++} href={lm[2]} target="_blank" rel="noreferrer">{lm[1]}</a>);
+      if (lm) {
+        const href = safeHref(lm[2]);
+        if (href) tokens.push(<a key={i++} href={href} target="_blank" rel="noreferrer noopener">{lm[1]}</a>);
+        else tokens.push(tok);
+      }
       else tokens.push(tok);
     } else if (tok === "MISMATCH") {
       tokens.push(<span key={i++} className="err-text" style={{ fontWeight: 600 }}>MISMATCH</span>);
@@ -188,13 +217,6 @@ function renderInline(text) {
   }
   if (last < text.length) tokens.push(text.slice(last));
   return <>{tokens}</>;
-}
-
-function apiHeaders() {
-  const key = localStorage.getItem("frontline_api_key") || "";
-  const h = {};
-  if (key) h["X-API-Key"] = key;
-  return h;
 }
 
 export default function AuditReports() {

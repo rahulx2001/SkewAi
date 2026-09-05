@@ -1,0 +1,105 @@
+{
+  "target": "sub-600ms",
+  "trials": 50,
+  "mode": "offline_simulated",
+  "telemetry_source": "offline_lognormal_model",
+  "overall_status": "PASS",
+  "stages": {
+    "vad_trigger": {
+      "stage": "vad_trigger",
+      "target_ms": 30.0,
+      "mean_ms": 7.15,
+      "p50_ms": 7.31,
+      "p90_ms": 9.64,
+      "p95_ms": 9.74,
+      "p99_ms": 11.47,
+      "max_ms": 11.47,
+      "passed": true,
+      "trials": 50
+    },
+    "asr_partial_to_final": {
+      "stage": "asr_partial_to_final",
+      "target_ms": 120.0,
+      "mean_ms": 61.37,
+      "p50_ms": 61.18,
+      "p90_ms": 78.24,
+      "p95_ms": 87.5,
+      "p99_ms": 94.84,
+      "max_ms": 94.84,
+      "passed": true,
+      "trials": 50
+    },
+    "turn_classifier": {
+      "stage": "turn_classifier",
+      "target_ms": 40.0,
+      "mean_ms": 17.18,
+      "p50_ms": 16.51,
+      "p90_ms": 24.65,
+      "p95_ms": 25.69,
+      "p99_ms": 29.73,
+      "max_ms": 29.73,
+      "passed": true,
+      "trials": 50
+    },
+    "intake_llm_first_token": {
+      "stage": "intake_llm_first_token",
+      "target_ms": 180.0,
+      "mean_ms": 120.21,
+      "p50_ms": 120.4,
+      "p90_ms": 143.6,
+      "p95_ms": 153.94,
+      "p99_ms": 162.79,
+      "max_ms": 162.79,
+      "passed": true,
+      "trials": 50
+    },
+    "streaming_tts_ttfb": {
+      "stage": "streaming_tts_ttfb",
+      "target_ms": 90.0,
+      "mean_ms": 51.78,
+      "p50_ms": 50.48,
+      "p90_ms": 71.42,
+      "p95_ms": 77.25,
+      "p99_ms": 95.53,
+      "max_ms": 95.53,
+      "passed": true,
+      "trials": 50
+    },
+    "telephony_bridge_turnaround": {
+      "stage": "telephony_bridge_turnaround",
+      "target_ms": 60.0,
+      "mean_ms": 15.05,
+      "p50_ms": 13.91,
+      "p90_ms": 22.26,
+      "p95_ms": 24.48,
+      "p99_ms": 38.3,
+      "max_ms": 38.3,
+      "passed": true,
+      "trials": 50
+    },
+    "total_ttfa": {
+      "stage": "total_ttfa",
+      "target_ms": 550.0,
+      "mean_ms": 272.74,
+      "p50_ms": 269.68,
+      "p90_ms": 314.82,
+      "p95_ms": 327.45,
+      "p99_ms": 334.72,
+      "max_ms": 334.72,
+      "passed": true,
+      "trials": 50
+    },
+    "barge_in_clear": {
+      "stage": "barge_in_clear",
+      "target_ms": 300.0,
+      "mean_ms": 54.13,
+      "p50_ms": 50.49,
+      "p90_ms": 68.12,
+      "p95_ms": 70.1,
+      "p99_ms": 233.68,
+      "max_ms": 233.68,
+      "passed": true,
+      "trials": 50
+    }
+  }
+}
