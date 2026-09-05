@@ -1,7 +1,14 @@
 # Design: semantic embedding cutover
 
-Status: **draft — not signed off**. An engineer who did not write the
-embedding code must review this before `FRONTLINE_EMBEDDING_MODE=semantic`.
+> **GOVERNANCE STATUS BLOCK**  
+> - **Implementation Status:** COMPLETE (architecture, backfill, shadow divergence, tests, and ONNX runtime fully implemented)  
+> - **Independent Review:** **PENDING** (Must be reviewed by an engineer who did not write the embedding code)  
+> - **Activation Authorization:** **NOT GRANTED** (Semantic cutover is strictly forbidden until independent review and human label adjudication are complete)  
+> - **Runtime Mode:** **LOCKED TO `legacy`** (`FRONTLINE_EMBEDDING_MODE=legacy` by default)  
+> - **Active Cluster Build:** **UNSET** (`FRONTLINE_ACTIVE_CLUSTER_BUILD_ID=""`)  
+> - **Live Distance / Novelty Thresholds:** **UNTOUCHED** (`CLUSTER_MAX_DISTANCE=0.85`, `NOVELTY_MIN_SCORE=3.0`)  
+> - **Git Provenance:** `b0e923ea375c1eb8f86e3c5ec644cc8605c461f0` (tagged `v1.0-embed-setup`)  
+> - **Human Evaluation Gate:** **CLOSED** (`acceptance_ready: false`; 0 external labels, 0 artificial labels)
 
 ## Baseline (hash)
 
