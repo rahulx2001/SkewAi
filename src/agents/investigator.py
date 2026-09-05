@@ -188,6 +188,11 @@ class InvestigatorAgent(Agent):
         entity_3 = ctx.slots.get("entity_3")
         category = ctx.slots.get("category")
         description = ctx.slots.get("description") or ""
+        try:
+            from src.ml_runtime.embedding_runtime import customer_visible_mode
+        except Exception:
+            def customer_visible_mode() -> str:  # type: ignore[misc]
+                return "hash"
 
         # Extract a keyword from the description for the ILIKE filter.
         keyword = self._extract_keyword(description)
@@ -422,15 +427,120 @@ class InvestigatorAgent(Agent):
                     _best = _cscore(cluster_rows[0])[0] if cluster_rows else 0.0
                     if _best < _nov_min:
                         cluster_row = None
-                        _record_novel_candidate(
-                            ctx, category, entity_2, entity_3, _best
-                        )
+                        if customer_visible_mode() != "semantic":
+                            _record_novel_candidate(
+                                ctx, category, entity_2, entity_3, _best
+                            )
                     else:
                         cluster_row = cluster_rows[0]
                 if cluster_row is None and (category or description):
                     # Empty candidate set is also novelty (no score computed
                     # above): queue it once with score 0.0.
-                    _record_novel_candidate(ctx, category, entity_2, entity_3, 0.0)
+                    if customer_visible_mode() != "semantic":
+                        _record_novel_candidate(ctx, category, entity_2, entity_3, 0.0)
+
+                # Representation-layer overlay. Hash results above remain the
+                # customer-visible default (legacy/shadow/rollback). Semantic
+                # mode replaces visible ranking only when the sidecar+build
+                # are compatible; missing vectors never become novelty.
+                _emb_match = "performed"
+                _emb_q = "blake2b-512-v1:feature-hash:tok2.0-bi0.5:sublinear-tf:idf-optional:l2:dim512"
+                _emb_c = _emb_q
+                _emb_build = None
+                _skip_novel_missing = False
+                try:
+                    from src.ml_runtime.embedding_match import (
+                        format_match_meta,
+                        maybe_run_shadow,
+                        rank_semantic,
+                    )
+                    from src.ml_runtime.embedding_runtime import (
+                        active_cluster_build_id,
+                        customer_visible_mode,
+                    )
+                    from src.ml_runtime.embedding_space import HASH_EMBEDDING_VERSION
+
+                    _emb_q = HASH_EMBEDDING_VERSION
+                    _emb_c = HASH_EMBEDDING_VERSION
+                    maybe_run_shadow(
+                        interaction_id=ctx.interaction_id,
+                        pack_id=ctx.pack.id,
+                        query=description,
+                        candidates=search_pool or candidates,
+                        hash_ranked=similar,
+                        hash_cluster_id=int(cluster_row[0]) if cluster_row is not None else None,
+                        hash_novel=cluster_row is None,
+                    )
+                    if customer_visible_mode() == "semantic":
+                        sem = rank_semantic(
+                            ctx.pack.id, description, search_pool or candidates, top_k=5
+                        )
+                        _emb_match = str(sem.get("status") or "skipped")
+                        _emb_q = str(sem.get("query_version") or "")
+                        _emb_c = str(sem.get("candidate_version") or "")
+                        _emb_build = active_cluster_build_id() or None
+                        if sem.get("status") == "performed":
+                            similar = sem.get("ranked") or []
+                            retrieval_mode = "semantic"
+                            try:
+                                from src.ml_runtime.cluster_builds import clusters_for_build
+                                from src.ml_runtime.embedding_match import semantic_cluster_score
+
+                                _build_clusters = clusters_for_build(ctx.pack.id, _emb_build or "")
+                            except Exception:
+                                _build_clusters = []
+                            _best_c, _best_s = None, -1.0
+                            for _bc in _build_clusters:
+                                _sc = semantic_cluster_score(ctx.pack.id, description, _bc)
+                                if _sc.get("status") != "performed":
+                                    continue
+                                if float(_sc.get("score") or 0) > _best_s:
+                                    _best_s = float(_sc["score"])
+                                    _best_c = _bc
+                            if _best_c is None:
+                                cluster_row = None
+                                cluster_cols = [
+                                    "cluster_id",
+                                    "top_terms",
+                                    "category",
+                                    "record_count",
+                                    "first_seen",
+                                    "last_seen",
+                                ]
+                                if _emb_build and _build_clusters:
+                                    _record_novel_candidate(
+                                        ctx, category, entity_2, entity_3, max(_best_s, 0.0)
+                                    )
+                                else:
+                                    _skip_novel_missing = True
+                            else:
+                                cluster_cols = [
+                                    "cluster_id",
+                                    "top_terms",
+                                    "category",
+                                    "record_count",
+                                    "first_seen",
+                                    "last_seen",
+                                ]
+                                cluster_row = (
+                                    _best_c.get("cluster_id"),
+                                    json.dumps(_best_c.get("top_terms") or []),
+                                    _best_c.get("category"),
+                                    _best_c.get("record_count") or 0,
+                                    None,
+                                    None,
+                                )
+                        else:
+                            similar = []
+                            cluster_row = None
+                            retrieval_mode = "semantic_skipped"
+                            _skip_novel_missing = True
+                except Exception:
+                    pass
+                _emb_meta = (
+                    f"emb_q={_emb_q} emb_c={_emb_c} match={_emb_match}"
+                    + (f" cluster_build={_emb_build}" if _emb_build else "")
+                )
 
                 spike_rows = con.execute(
                     _SPIKE_SQL, [ctx.pack.id, category, category]
@@ -480,8 +590,8 @@ class InvestigatorAgent(Agent):
             action_type="similar_search",
             input_summary=(
                 f"keyword='{keyword}', category={category}, entity_2={entity_2}, "
-                f"entity_3={entity_3}, mode={retrieval_mode}"
-            ),
+                f"entity_3={entity_3}, mode={retrieval_mode} {_emb_meta}"
+            )[:500],
             output_summary=f"found {len(similar)} similar records ({retrieval_mode})",
             evidence_ids=similar_ids,
             claims=claims,
@@ -511,7 +621,7 @@ class InvestigatorAgent(Agent):
             }
             record_action(self._action(
                 action_type="cluster_matched",
-                input_summary=f"category={category}",
+                input_summary=f"category={category} {_emb_meta}"[:500],
                 output_summary=f"cluster_id={cluster_id}, count={cluster_count}",
                 evidence_ids=[str(cluster_id)] if cluster_id is not None else [],
             ))

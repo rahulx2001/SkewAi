@@ -26,11 +26,37 @@ export default function LiveContactConsole() {
   const [reply, setReply] = useState("");
   const [pack, setPack] = useState(null);
   const [wsStatus, setWsStatus] = useState("connecting");
+  const [shadow, setShadow] = useState(null);
 
   const wsRef = useRef(null);
   const pollRef = useRef(null);
 
   const selected = interactions.find((i) => i.interaction_id === selectedId);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setShadow(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadShadow() {
+      try {
+        const r = await fetch(`/api/frontline/embedding-shadow/${encodeURIComponent(selectedId)}`, {
+          headers: apiHeaders(),
+        });
+        if (!r.ok || cancelled) return;
+        setShadow(await r.json());
+      } catch {
+        /* ignore */
+      }
+    }
+    loadShadow();
+    const t = setInterval(loadShadow, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [selectedId]);
 
   // Deep-link: Command Center can pre-select a live contact.
   useEffect(() => {
@@ -508,6 +534,66 @@ export default function LiveContactConsole() {
                 </>
               )}
             </div>
+
+            {shadow && shadow.present && (
+              <div className="activity-card" style={{ marginBottom: 12 }}>
+                <div className="head">
+                  <span className="faint">Cluster match</span>
+                  <span className={shadow.agree ? "chip teal" : "err-text"}>
+                    {shadow.agree ? "agree" : "disagree"}
+                  </span>
+                </div>
+                <div className="slot-row">
+                  <span className="k">active</span>
+                  <span className="v">
+                    cluster {shadow.active?.cluster_id ?? "—"}
+                    {shadow.active?.novel ? " · novel" : ""}
+                  </span>
+                </div>
+                <div className="slot-row">
+                  <span className="k">shadow</span>
+                  <span className="v">
+                    cluster {shadow.shadow?.cluster_id ?? "—"}
+                    {shadow.shadow?.novel ? " · novel" : ""}
+                    {shadow.shadow?.status ? ` · ${shadow.shadow.status}` : ""}
+                  </span>
+                </div>
+                <div className="row" style={{ marginTop: 8, gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await fetch(
+                        `/api/frontline/embedding-shadow/${encodeURIComponent(selected.interaction_id)}/flag`,
+                        {
+                          method: "POST",
+                          headers: { ...apiHeaders(), "Content-Type": "application/json" },
+                          body: JSON.stringify({ reviewer: "human-supervisor", comment: "shadow looks wrong" }),
+                        }
+                      );
+                    }}
+                  >
+                    Shadow looks wrong
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await fetch("/api/frontline/sentiment-disagreements", {
+                        method: "POST",
+                        headers: { ...apiHeaders(), "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          interaction_id: selected.interaction_id,
+                          human_decision: "sentiment_wrong",
+                          system_sentiment_score: selFrustration,
+                          system_handoff_decision: selFrustration >= FRUSTRATION_THRESHOLD,
+                        }),
+                      });
+                    }}
+                  >
+                    Mark sentiment wrong
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="activity-card" style={{ marginBottom: 12 }}>
               <div className="head">

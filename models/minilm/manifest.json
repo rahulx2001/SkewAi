@@ -1,0 +1,22 @@
+{
+  "model_family": "all-MiniLM-L6-v2",
+  "upstream_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "upstream_model_revision": "c9745ed1d9f366e9d5b9aada2b23ac006d1b8c54",
+  "model_revision": "751bff37182d3f1213fa05d7196b954e230abad9",
+  "tokenizer_revision": "751bff37182d3f1213fa05d7196b954e230abad9",
+  "onnx_source_repo": "Xenova/all-MiniLM-L6-v2",
+  "quantization": "onnx-int8",
+  "pooling": "mean-pool",
+  "normalization": "l2",
+  "padding": "zeropad512",
+  "schema_version": "v1",
+  "native_dimension": 384,
+  "output_dimension": 512,
+  "max_seq_length": 256,
+  "truncation": "head",
+  "export_tool": "Xenova transformers.js ONNX export (consumed as-is)",
+  "onnx_opset": "see model.onnx",
+  "model_sha256": "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
+  "tokenizer_sha256": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+  "license": "Apache-2.0"
+}

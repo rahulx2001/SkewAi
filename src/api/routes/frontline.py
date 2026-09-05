@@ -924,6 +924,116 @@ async def evaluate_alert_rule(body: dict[str, Any]) -> dict[str, Any]:
     return {"evaluation": ev, "applied": applied}
 
 
+@router.get("/embedding-shadow/{interaction_id}")
+async def embedding_shadow(interaction_id: str) -> dict[str, Any]:
+    from src.ml_runtime.embedding_runtime import embedding_mode, shadow_enabled, shadow_kill_switch
+    from src.ml_runtime.embedding_shadow import latest_shadow
+
+    row = latest_shadow(interaction_id)
+    if not row:
+        return {
+            "interaction_id": interaction_id,
+            "present": False,
+            "mode": embedding_mode(),
+            "shadow_enabled": shadow_enabled(),
+            "shadow_killed": shadow_kill_switch(),
+        }
+    agree = row.get("hash_cluster_id") == row.get("semantic_cluster_id")
+    return {
+        "interaction_id": interaction_id,
+        "present": True,
+        "agree": agree,
+        "active": {
+            "cluster_id": row.get("hash_cluster_id"),
+            "top_score": row.get("hash_top_score"),
+            "novel": row.get("hash_novel"),
+            "top_ids": row.get("hash_top_ids"),
+        },
+        "shadow": {
+            "cluster_id": row.get("semantic_cluster_id"),
+            "top_score": row.get("semantic_top_score"),
+            "novel": row.get("semantic_novel"),
+            "top_ids": row.get("semantic_top_ids"),
+            "status": row.get("semantic_status"),
+        },
+        "rank_overlap": row.get("rank_overlap"),
+        "mode": embedding_mode(),
+        "shadow_killed": shadow_kill_switch(),
+    }
+
+
+@router.post("/embedding-shadow/{interaction_id}/flag")
+async def flag_embedding_shadow(interaction_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    from src.ml_runtime.embedding_shadow import flag_shadow_wrong
+
+    body = body or {}
+    fid = flag_shadow_wrong(
+        interaction_id,
+        reviewer=str(body.get("reviewer") or "human-supervisor"),
+        comment=str(body.get("comment") or ""),
+    )
+    return {"flag_id": fid, "queued_for_eval": True}
+
+
+@router.get("/eval/labels/next")
+async def eval_next(annotator_id: str = Query(..., min_length=7)) -> dict[str, Any]:
+    from src.eval.embedding_labels import LABEL_CLASSES, next_unlabeled_item as _next
+
+    item = _next(annotator_id)
+    if item is None:
+        return {"item": None}
+    return {"item": item, "classes": list(LABEL_CLASSES)}
+
+
+@router.post("/eval/labels")
+async def eval_submit(body: dict[str, Any]) -> dict[str, Any]:
+    from src.eval.embedding_labels import submit_label
+
+    rid = submit_label(
+        eval_id=str(body.get("eval_id") or ""),
+        annotator_id=str(body.get("annotator_id") or ""),
+        label=str(body.get("label") or ""),
+        source_record_id=body.get("source_record_id"),
+        notes=str(body.get("notes") or ""),
+    )
+    return {"label_row_id": rid}
+
+
+@router.post("/eval/labels/adjudicate")
+async def eval_adjudicate(body: dict[str, Any]) -> dict[str, Any]:
+    from src.eval.embedding_labels import adjudicate
+
+    rid = adjudicate(
+        eval_id=str(body.get("eval_id") or ""),
+        adjudicator_id=str(body.get("adjudicator_id") or ""),
+        label=str(body.get("label") or ""),
+        notes=str(body.get("notes") or ""),
+    )
+    return {"label_row_id": rid}
+
+
+@router.get("/eval/labels/agreement")
+async def eval_agreement() -> dict[str, Any]:
+    from src.eval.embedding_gates import acceptance_eligibility
+    from src.eval.embedding_labels import agreement_report
+
+    return {"agreement": agreement_report(), "eligibility": acceptance_eligibility()}
+
+
+@router.post("/sentiment-disagreements")
+async def sentiment_disagree(body: dict[str, Any]) -> dict[str, Any]:
+    from src.frontline.sentiment_review import log_sentiment_disagreement, revisit_ready
+
+    rid = log_sentiment_disagreement(
+        interaction_id=str(body.get("interaction_id") or ""),
+        human_decision=str(body.get("human_decision") or "wrong"),
+        system_sentiment_score=body.get("system_sentiment_score"),
+        system_handoff_decision=body.get("system_handoff_decision"),
+        reviewer_comment=str(body.get("reviewer_comment") or ""),
+    )
+    return {"review_id": rid, "revisit_ready": revisit_ready()}
+
+
 @router.post("/clusters/rebuild")
 async def rebuild_clusters_api(pack_id: str = "automotive_nhtsa", k: int = 5) -> dict[str, Any]:
     from src.ml_runtime.clustering import rebuild_clusters

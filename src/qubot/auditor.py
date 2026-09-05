@@ -678,7 +678,59 @@ def _audit_single_action(
     else:
         verdict.verdict = "unverifiable"
         verdict.detail = "some evidence could not be verified"
+    embedding_flags = _audit_embedding_versions(action)
+    if embedding_flags:
+        extra = "; ".join(embedding_flags[:3])
+        verdict.detail = (verdict.detail + " | " if verdict.detail else "") + extra
+        if any(
+            "mismatch" in f or "missing_embedding" in f or "unregistered" in f or "missing embedding-version" in f
+            for f in embedding_flags
+        ):
+            verdict.verdict = "mismatch"
     return verdict
+
+
+def _audit_embedding_versions(action: dict[str, Any]) -> list[str]:
+    """Defense-in-depth: flag mixed embedding versions on semantic decisions.
+
+    Hash-era rows without ``emb_q=`` metadata are left alone. Qubot never
+    rewrites the action.
+    """
+    import re
+
+    from src.ml_runtime.embedding_space import HASH_EMBEDDING_VERSION
+
+    text = f"{action.get('input_summary') or ''} {action.get('output_summary') or ''}"
+    if "emb_q=" not in text and "emb_c=" not in text:
+        return []
+    q_m = re.search(r"emb_q=(\S+)", text)
+    c_m = re.search(r"emb_c=(\S+)", text)
+    match_m = re.search(r"match=(\S+)", text)
+    build_m = re.search(r"cluster_build=(\S+)", text)
+    flags: list[str] = []
+    qv = q_m.group(1) if q_m else ""
+    cv = c_m.group(1) if c_m else ""
+    status = match_m.group(1) if match_m else ""
+    atype = action.get("action_type") or ""
+    if atype in {"similar_search", "cluster_matched", "brief_written", "embedding_recorded"}:
+        if status in {"semantic", "performed"} and (not qv or not cv or cv == "-"):
+            flags.append("missing embedding-version metadata on semantic decision")
+        if qv and cv and cv not in {"-", ""} and qv != cv:
+            flags.append(f"embedding version mismatch query vs candidate")
+        if "novel_reason=missing_embedding" in text:
+            flags.append("novelty caused only by missing_embedding")
+        if qv.startswith("blake2b-512-v1") and build_m and "minilm" in (build_m.group(1) or "").lower():
+            flags.append("hash query matched against semantic cluster build")
+        if qv.startswith("all-MiniLM") and "blake2b-512-v1" in cv:
+            flags.append("semantic query matched against hash-era vectors")
+        registered = qv == HASH_EMBEDDING_VERSION or qv.startswith("all-MiniLM-L6-v2@") or qv.startswith("toy-semantic")
+        if qv and not registered:
+            flags.append("unregistered model revision")
+        if cv and cv not in {"-", ""}:
+            cre = cv == HASH_EMBEDDING_VERSION or cv.startswith("all-MiniLM-L6-v2@") or cv.startswith("toy-semantic")
+            if not cre:
+                flags.append("unregistered candidate model revision")
+    return flags
 
 
 def _mark_case_needs_review(case_id: str) -> None:

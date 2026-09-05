@@ -1,0 +1,27 @@
+{
+  "dataset_version": "pairs_v1",
+  "n_pairs": 12,
+  "label_source": "author_seed",
+  "note": "Not a representative human-labeled study. No Macro-F1.",
+  "paraphrase": {
+    "left": "vehicle stalled at 65 mph",
+    "right": "engine died on highway at speed",
+    "hash_similarity": 0.19528336647123581,
+    "semantic_native_similarity": 0.43502455323777445,
+    "semantic_padded_similarity": 0.43502455323777445
+  },
+  "providers": {
+    "hash": {
+      "positive_mean": 0.1133,
+      "negative_mean": 0.2184,
+      "roc_auc": 0.2778,
+      "average_precision": 0.4549
+    },
+    "minilm_int8": {
+      "positive_mean": 0.4046,
+      "negative_mean": 0.2449,
+      "roc_auc": 0.7222,
+      "average_precision": 0.7052
+    }
+  }
+}

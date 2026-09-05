@@ -192,6 +192,36 @@ def check_crypto_key_store_size(*, max_keys: int = 10000) -> HealthSignal:
     )
 
 
+def check_embedding_runtime() -> HealthSignal:
+    """Active embedding mode, readiness, and version (no artifact paths)."""
+    try:
+        from src.ml_runtime.embedding_runtime import embedding_mode, health_payload
+
+        mode = embedding_mode()
+        payload = health_payload()
+        if mode == "semantic" and not payload.get("semantic_ready"):
+            status = "critical"
+        elif mode == "shadow" and not payload.get("semantic_ready"):
+            status = "degraded"
+        else:
+            status = "healthy"
+        detail = (
+            f"mode={mode} visible={payload.get('visible_provider')} "
+            f"semantic_ready={payload.get('semantic_ready', False)}"
+        )
+        return HealthSignal(
+            name="embedding_runtime",
+            status=status,
+            detail=detail[:300],
+        )
+    except Exception as e:
+        return HealthSignal(
+            name="embedding_runtime",
+            status="degraded",
+            detail=f"check failed: {type(e).__name__}",
+        )
+
+
 def run_all_checks(*, pack_id: str | None = None) -> list[HealthSignal]:
     """Run all health checks. Returns list of HealthSignal.
     
@@ -211,6 +241,7 @@ def run_all_checks(*, pack_id: str | None = None) -> list[HealthSignal]:
             lambda: check_fairness(pack_id=pack_id),
         ])
     checks.append(lambda: check_novel_candidate_backlog())
+    checks.append(check_embedding_runtime)
     
     results: list[HealthSignal] = []
     for check_fn in checks:
@@ -272,4 +303,5 @@ __all__ = [
     'check_crypto_key_store_size',
     'run_all_checks',
     'health_summary',
+    'check_embedding_runtime',
 ]

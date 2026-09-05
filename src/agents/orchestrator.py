@@ -1661,9 +1661,10 @@ class Orchestrator:
             except Exception:
                 pass
             # 1.1: embed at close so fleet scan sees vectors immediately
+            _text = (slots.get("description") or "")[:1000]
             try:
                 from src.ml_runtime.embeddings import embed_text as _embed
-                _emb = _embed((slots.get("description") or "")[:1000])
+                _emb = _embed(_text)
             except Exception:
                 _emb = None
             sec_raw = slots.get("secondary_categories")
@@ -1685,13 +1686,86 @@ class Orchestrator:
                     slots.get("entity_3"),
                     category,
                     sec_label,
-                    (slots.get("description") or "")[:1000],
+                    _text,
                     self.ctx.severity or None,
                     entity_key or None,
                     provenance,
                     _emb,
                 ],
             )
+        # Sidecar semantic vector (shadow/semantic). Never replaces records.embedding.
+        # Failure is pending/failed + retry job; never delays safety or case close.
+        try:
+            from src.ml_runtime.embedding_runtime import embedding_mode, try_semantic_embedder
+            from src.ml_runtime.embedding_store import mark_embedding_status, upsert_embedding
+
+            _mode = embedding_mode()
+            if _mode in {"shadow", "semantic"}:
+                _sem = try_semantic_embedder()
+                if _sem is None:
+                    mark_embedding_status(
+                        self.ctx.pack.id,
+                        rid,
+                        "unloaded",
+                        status="pending",
+                        error_code="unavailable",
+                        error_message="semantic embedder not ready",
+                    )
+                else:
+                    try:
+                        _svec = _sem.embed(_text)
+                        _sha = ""
+                        _meta = _sem.artifact_metadata()
+                        if _meta:
+                            _sha = _meta.model_sha256 or ""
+                        upsert_embedding(
+                            self.ctx.pack.id,
+                            rid,
+                            _svec,
+                            artifact_sha256=_sha,
+                            status="complete",
+                        )
+                        _status = "complete"
+                    except Exception as _emb_err:
+                        mark_embedding_status(
+                            self.ctx.pack.id,
+                            rid,
+                            _sem.version,
+                            status="failed",
+                            error_code="inference",
+                            error_message=type(_emb_err).__name__,
+                            native_dimension=_sem.native_dimension,
+                            output_dimension=_sem.output_dimension,
+                        )
+                        _status = "failed"
+                        try:
+                            from src.jobs.queue import enqueue as _enq_emb
+
+                            _enq_emb(
+                                "embedding_backfill",
+                                {
+                                    "pack_id": self.ctx.pack.id,
+                                    "embedding_version": _sem.version,
+                                    "limit": 8,
+                                },
+                                idempotency_key=f"emb-retry-{rid}",
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        from src.ledger import record_action as _ra_emb
+
+                        _ra_emb(
+                            self._orchestrator_action(
+                                action_type="embedding_recorded",
+                                input_summary=f"record_id={rid} mode={_mode}",
+                                output_summary=f"status={_status} version={_sem.version}",
+                            )
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # 1.1: gazetteer candidate queue (human approve, never auto-mutate)
         try:
             from src.data.warehouse import ops_con as _ops

@@ -93,6 +93,27 @@ verify-chain:
 cluster:
 	$(PY) -c "from src.ml_runtime.clustering import rebuild_clusters; print(rebuild_clusters('$(PACK)'))"
 
+prepare-minilm:
+	$(PY) -m scripts.prepare_minilm_onnx --out models/minilm
+
+embedding-backfill:
+	$(PY) -m scripts.embedding_backfill --pack $(PACK) $(if $(VERSION),--version $(VERSION),) $(if $(DRY),--dry-run,)
+
+cluster-build:
+	$(PY) -m scripts.rebuild_cluster_build --pack $(PACK) $(if $(VERSION),--version $(VERSION),) $(if $(DRY),--dry-run,)
+
+embedding-benchmark:
+	$(PY) -m scripts.embedding_benchmark
+
+eval-labels-sample:
+	$(PY) -m scripts.eval_labels sample --pack $(PACK) --n 20
+
+eval-labels-agreement:
+	$(PY) -m scripts.eval_labels agreement
+
+embedding-eval:
+	$(PY) -c "from src.ml_runtime.embedding_eval import evaluate_pairs; from src.ml_runtime.hash_embedder import HashEmbedder; from src.ml_runtime.onnx_embedder import ToySemanticEmbedder; import json; print(json.dumps(evaluate_pairs({'hash': HashEmbedder(), 'toy': ToySemanticEmbedder()}), indent=2))"
+
 # ── Phase 3: agent core (text mode) ───────────────────────────────────────
 contact:
 	$(PY) -m src.frontline.cli contact

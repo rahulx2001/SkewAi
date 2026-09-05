@@ -258,6 +258,7 @@ def apply_domain_schema(con) -> None:
         "ALTER TABLE weekly_anomalies ADD COLUMN method VARCHAR",
         "ALTER TABLE records ADD COLUMN entity_key VARCHAR",
         "ALTER TABLE records ADD COLUMN provenance VARCHAR",
+        "ALTER TABLE cluster_lineage ADD COLUMN correspondence_kind VARCHAR",
     ):
         try:
             con.execute(ddl)
@@ -316,6 +317,14 @@ def apply_domain_schema(con) -> None:
             "CREATE INDEX IF NOT EXISTS idx_cluster_versions_pack "
             "ON cluster_versions(pack_id, cluster_id)"
         )
+    except Exception:
+        pass
+    try:
+        from src.ml_runtime.embedding_store import ensure_record_embeddings
+        from src.ml_runtime.cluster_builds import ensure_cluster_build_tables
+
+        ensure_record_embeddings(con)
+        ensure_cluster_build_tables(con)
     except Exception:
         pass
 

@@ -163,6 +163,7 @@ ACTION_TYPES = {
     # Investigator
     "similar_search",
     "cluster_matched",
+    "embedding_recorded",
     "spike_checked",
     "brief_written",
     # Case

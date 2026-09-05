@@ -6,6 +6,7 @@ Runner: `python -m scripts.migrate --db ops|domain|postgres`
 |------|--------|----------|
 | `001_ops_init.sql` | ops | Baseline ops schema (interactions, cases, ledger, jobs, …) |
 | `002_pg_vector_fts.sql` | postgres | pgvector 512-dim, `fts_main_records`, trigram index, rollups |
+| `003_record_embeddings.sql` | domain | versioned `record_embeddings` sidecar + `cluster_builds` (Postgres equivalent lives in `PG_PRODUCTION_DDL`) |
 
 Rules:
 

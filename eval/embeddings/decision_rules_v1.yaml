@@ -1,0 +1,57 @@
+# Pre-registered embedding cutover rules.
+# Written before any human-labeled comparison is run.
+# Do not edit numbers after looking at a candidate's scorecard.
+
+version: decision_rules_v1
+primary_metric: hard_negative_same_category.precision_at_5
+tie_break: paraphrase_positive.recall_at_5
+
+ineligible_label_sources:
+  - coding_agent_seed
+  - author_seed
+  - synthetic
+  - agent_proposed
+
+kappa_min: 0.65
+min_annotators_per_class: 2
+
+class_quotas:
+  paraphrase_positive: 100
+  hard_negative_same_category: 80
+  hard_negative_same_components: 50
+  multi_symptom: 50
+  negation_mention: 40
+  safety_true_positive: all_available
+  safety_false_positive_trigger: 40
+  novel_true: 30
+  novel_false: 30
+  cross_entity_same_symptom: 30
+
+meaningful_improvement:
+  # CI lower bound of (candidate - baseline) must exceed this.
+  recall_at_5: 0.0
+  precision_at_5: 0.0
+  average_precision: 0.0
+
+unacceptable_regression:
+  # CI upper bound of (candidate - baseline) must stay above these (negative).
+  paraphrase_positive.recall_at_5: -0.02
+  hard_negative_same_category.precision_at_5: -0.02
+
+zero_regression_invariants:
+  - no_cross_version_cosine
+  - no_mixed_version_cluster_query
+  - safety_escalation_unchanged
+  - severity_floor_unchanged
+  - anomaly_count_outputs_unchanged
+  - merkle_ledger_valid
+  - rollback_restores_prior_pair
+
+resource_budget:
+  max_artifact_mb: 80
+  max_ram_after_warmup_mb: 512
+  p50_inference_ms: 15
+  p99_inference_ms: 50
+  warmup_ms: 2000
+
+sentiment_revisit_n: 300

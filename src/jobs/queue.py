@@ -42,6 +42,8 @@ ALLOWED_JOB_TYPES = frozenset(
         "reenrich",
         "audit_export",
         "build_digest",
+        "embedding_backfill",
+        "rebuild_cluster_build",
     }
 )
 
@@ -345,6 +347,19 @@ def _default_handler(jtype: str, payload: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as e:
             return {"ok": False, "error": str(e)}
+    if jtype == "embedding_backfill":
+        from src.ml_runtime.embedding_backfill import job_handler as _emb_bf
+
+        return _emb_bf(payload)
+    if jtype == "rebuild_cluster_build":
+        from src.ml_runtime.cluster_builds import rebuild_cluster_build
+
+        return rebuild_cluster_build(
+            payload.get("pack_id") or "automotive_nhtsa",
+            payload.get("embedding_version") or "",
+            k=int(payload.get("k") or 5),
+            dry_run=bool(payload.get("dry_run")),
+        )
     if jtype == "recompute_anomalies":
         pack = payload.get("pack_id") or "automotive_nhtsa"
         try:

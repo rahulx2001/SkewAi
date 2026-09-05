@@ -24,9 +24,10 @@ slowapi>=0.1.9,<1.0
 # ── NLP / sentiment (lexicon-based, no transformers) ───────────────────────
 vaderSentiment>=3.3,<4.0
 
-# ── Embeddings (optional; Investigator is ILIKE-only today — L7) ───
-# Install only if you wire real MiniLM similarity later.
-# sentence-transformers>=2.7,<4.0
+# ── Local ONNX embeddings (CPU). Runtime never downloads the model. ──
+onnxruntime>=1.19,<2.0
+tokenizers>=0.20,<0.22
+numpy>=1.26,<3.0
 
 # ── Dev / test ─────────────────────────────────────────────────────────────
 pytest>=8.0,<9.0

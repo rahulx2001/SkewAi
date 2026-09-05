@@ -14,6 +14,7 @@ import TrustPipeline from "../routes/TrustPipeline.jsx";
 import PackBuilder from "../routes/PackBuilder.jsx";
 import QualityEconomics from "../routes/QualityEconomics.jsx";
 import SignIn from "../routes/SignIn.jsx";
+import LabelDesk from "../routes/LabelDesk.jsx";
 import CommandPalette from "./ui/CommandPalette.jsx";
 import { ToastProvider, useToast } from "./ui/Toast.jsx";
 import { ErrorBoundary } from "./ui/Feedback.jsx";
@@ -61,6 +62,7 @@ const NAV_GROUPS = [
     label: "Trust & platform",
     items: [
       { id: "audits", label: "Audit reports", Icon: IconShield, route: AuditReports, keywords: "groundedness compliance export digest" },
+      { id: "labels", label: "Eval labels", Icon: IconShield, route: LabelDesk, keywords: "annotation kappa embedding eval" },
       { id: "platform", label: "Platform OS", Icon: IconLayers, route: PlatformOS, keywords: "governance deployments proposals v3" },
       { id: "settings", label: "Settings", Icon: IconGear, route: Settings, keywords: "api key pack switch webhook theme" },
     ],

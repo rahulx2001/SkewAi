@@ -444,6 +444,27 @@ CREATE TABLE IF NOT EXISTS novel_candidates (
 
 CREATE INDEX IF NOT EXISTS idx_novel_status ON novel_candidates(pack_id, status, created_at);
 
+CREATE TABLE IF NOT EXISTS embedding_shadow_comparisons (
+    comparison_id VARCHAR PRIMARY KEY,
+    interaction_id VARCHAR,
+    pack_id VARCHAR,
+    query_embedding_version VARCHAR,
+    candidate_embedding_version VARCHAR,
+    cluster_build_id VARCHAR,
+    hash_top_ids VARCHAR,
+    semantic_top_ids VARCHAR,
+    rank_overlap DOUBLE,
+    hash_top_score DOUBLE,
+    semantic_top_score DOUBLE,
+    hash_cluster_id INTEGER,
+    semantic_cluster_id INTEGER,
+    hash_novel BOOLEAN,
+    semantic_novel BOOLEAN,
+    semantic_status VARCHAR,
+    latency_ms INTEGER,
+    created_at TIMESTAMP DEFAULT current_timestamp
+);
+
 CREATE TABLE IF NOT EXISTS turn_dedup (
     interaction_id     VARCHAR NOT NULL,
     client_turn_id     VARCHAR NOT NULL,
@@ -539,7 +560,7 @@ CREATE TABLE IF NOT EXISTS records (
     severity_label     VARCHAR,
     region             VARCHAR,
     source             VARCHAR,                    -- NHTSA | CFPB | internal
-    embedding          FLOAT[],                    -- optional bag-of-hash embedding for semantic sim
+    embedding          FLOAT[],                    -- hash-era bag-of-hash vector (blake2b-512-v1); not semantic
     entity_key         VARCHAR,                    -- canonical cross-source join key (declared in mapping.yaml)
     provenance         VARCHAR NOT NULL DEFAULT 'observed'
     -- 'observed' = real-world record; 'fixture' = demo seed; 'computed' = derived
@@ -627,11 +648,65 @@ CREATE TABLE IF NOT EXISTS cluster_lineage (
     new_cluster_uid    VARCHAR NOT NULL,
     pack_id            VARCHAR NOT NULL,
     overlap            DOUBLE NOT NULL,              -- member Jaccard overlap (1.0 = signature-identical)
+    correspondence_kind VARCHAR,                     -- same_embedding | cross_embedding
     created_at         TIMESTAMP DEFAULT current_timestamp,
     PRIMARY KEY (old_cluster_uid, new_cluster_uid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lineage_new ON cluster_lineage(new_cluster_uid);
+
+-- Versioned embedding sidecar. records.embedding stays hash-era.
+CREATE TABLE IF NOT EXISTS record_embeddings (
+    record_id          VARCHAR NOT NULL,
+    embedding_version  VARCHAR NOT NULL,
+    native_dimension   INTEGER NOT NULL,
+    output_dimension   INTEGER NOT NULL,
+    artifact_sha256    VARCHAR,
+    embedding          FLOAT[],
+    status             VARCHAR NOT NULL,
+    error_code         VARCHAR,
+    error_message      VARCHAR,
+    created_at         TIMESTAMP DEFAULT current_timestamp,
+    updated_at         TIMESTAMP DEFAULT current_timestamp,
+    PRIMARY KEY (record_id, embedding_version)
+);
+CREATE INDEX IF NOT EXISTS idx_record_embeddings_version
+    ON record_embeddings(embedding_version, status);
+
+CREATE TABLE IF NOT EXISTS cluster_builds (
+    build_id                  VARCHAR PRIMARY KEY,
+    pack_id                   VARCHAR NOT NULL,
+    embedding_version         VARCHAR NOT NULL,
+    cluster_algorithm_version VARCHAR NOT NULL,
+    parameters_json           VARCHAR NOT NULL,
+    source_cutoff             TIMESTAMP,
+    status                    VARCHAR NOT NULL,
+    coverage_json             VARCHAR,
+    created_at                TIMESTAMP DEFAULT current_timestamp,
+    activated_at              TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS cluster_build_clusters (
+    build_id           VARCHAR NOT NULL,
+    cluster_id         INTEGER NOT NULL,
+    cluster_uid        VARCHAR NOT NULL,
+    embedding_version  VARCHAR NOT NULL,
+    centroid           FLOAT[],
+    top_terms          VARCHAR,
+    category           VARCHAR,
+    record_count       INTEGER NOT NULL,
+    first_seen         TIMESTAMP,
+    last_seen          TIMESTAMP,
+    signature          VARCHAR,
+    PRIMARY KEY (build_id, cluster_id)
+);
+CREATE TABLE IF NOT EXISTS cluster_build_assignments (
+    build_id           VARCHAR NOT NULL,
+    record_id          VARCHAR NOT NULL,
+    cluster_id         INTEGER NOT NULL,
+    embedding_version  VARCHAR NOT NULL,
+    distance           DOUBLE,
+    PRIMARY KEY (build_id, record_id)
+);
 
 CREATE TABLE IF NOT EXISTS exposure (
     pack_id            VARCHAR NOT NULL,

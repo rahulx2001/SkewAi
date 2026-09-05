@@ -1,0 +1,27 @@
+{
+  "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "cpu": "arm",
+  "python": "3.14.0",
+  "provider": "onnx",
+  "version": "all-MiniLM-L6-v2@751bff37182d3f1213fa05d7196b954e230abad9:tok@751bff37182d3f1213fa05d7196b954e230abad9:onnx-int8:mean-pool:l2:zeropad512:v1:modelsha256=afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
+  "threads": 1,
+  "artifact_bytes": 23687085,
+  "rss_mb_after_load": 156.69,
+  "rss_mb_before": 58.64,
+  "cold_init_s": 0.0645,
+  "warm_single_s": {
+    "p50": 0.001,
+    "p95": 0.0012,
+    "p99": 0.0012,
+    "mean": 0.001
+  },
+  "batch8_s": {
+    "p50": 0.0075,
+    "p95": 0.0079,
+    "mean": 0.0076
+  },
+  "throughput_texts_per_s": 1051.88,
+  "hash_single_mean_s": 6.2e-05,
+  "iters": 30,
+  "note": "Warmup excluded from warm percentiles. No model download time included."
+}

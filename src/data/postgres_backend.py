@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS advisories (
     source          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pg_advisories_scope ON advisories (scope_entity_2, scope_category);
+
+-- Versioned embeddings. records.embedding remains the hash-era 512-d column.
+CREATE TABLE IF NOT EXISTS record_embeddings (
+    record_id          TEXT NOT NULL,
+    embedding_version  TEXT NOT NULL,
+    native_dimension   INTEGER NOT NULL,
+    output_dimension   INTEGER NOT NULL,
+    artifact_sha256    TEXT,
+    embedding          vector(512),
+    status             TEXT NOT NULL,
+    error_code         TEXT,
+    error_message      TEXT,
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (record_id, embedding_version)
+);
+CREATE INDEX IF NOT EXISTS idx_pg_record_embeddings_version
+    ON record_embeddings (embedding_version, status);
 """.strip()
 
 
@@ -122,14 +140,33 @@ def semantic_search_records(
     pack_id: str | None = None,
     category: str | None = None,
     limit: int = 5,
+    embedding_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """Cosine-nearest records via pgvector (production path).
 
     ``query_vector`` must be 512-dim. Raises on dimension mismatch (fail
-    loudly, never a false 0-tie).
+    loudly, never a false 0-tie). When ``embedding_version`` is set, rank
+    the sidecar table and filter by version BEFORE the vector operator so
+    hash and semantic rows cannot share an index scan.
     """
     if len(query_vector) != 512:
         raise ValueError(f"query embedding must be 512-dim, got {len(query_vector)}")
+    if embedding_version:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT record_id, 1 - (embedding <=> %s::vector) AS sim
+                FROM record_embeddings
+                WHERE embedding_version = %s
+                  AND status = 'complete'
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                [query_vector, embedding_version, query_vector, int(limit)],
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
     clauses = ["embedding IS NOT NULL"]
     params: list[Any] = []
     if category:

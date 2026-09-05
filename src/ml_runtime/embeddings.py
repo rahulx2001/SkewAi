@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 _DIM = 512
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
@@ -162,34 +162,68 @@ def rank_by_similarity(
     text_key: str = "text",
     embedding_key: str = "embedding",
     top_k: int = 5,
+    embedder: Any | None = None,
+    allow_recompute: bool | None = None,
 ) -> list[dict]:
     """Return candidates sorted by cosine sim to query (adds ``sim_score``).
 
     Empty/whitespace query -> [] (never return input-order as "similar").
-    Stale embeddings with wrong dim are recomputed from text (fail safe).
+    Default embedder is the hash provider. Stored anonymous lists are treated
+    as hash vectors (records.embedding is hash-era). Semantic callers must
+    pass versioned ``EmbeddedVector`` values and ``allow_recompute=False`` so
+    a missing semantic vector is never replaced by a hash vector.
     """
+    from src.ml_runtime.embedding_space import (
+        HASH_EMBEDDING_VERSION,
+        EmbeddedVector,
+        EmbeddingVersionMismatch,
+        as_embedded,
+        compare_embeddings,
+    )
+    from src.ml_runtime.hash_embedder import HashEmbedder
+
     if not (query or "").strip():
         return []
-    q = embed_text(query)
-    if not any(q):
+    active = embedder or HashEmbedder()
+    recompute = (
+        active.version == HASH_EMBEDDING_VERSION
+        if allow_recompute is None
+        else bool(allow_recompute)
+    )
+    q = active.embed(query)
+    if q.is_zero:
         return []
     scored: list[tuple[float, dict]] = []
     for c in candidates:
         emb = c.get(embedding_key)
-        if emb is None:
-            emb = embed_text(str(c.get(text_key) or ""))
-        elif isinstance(emb, (list, tuple)):
-            emb = list(emb)
-            if len(emb) != len(q) or not any(emb):
-                emb = embed_text(str(c.get(text_key) or ""))
-        else:
-            emb = embed_text(str(c.get(text_key) or ""))
+        cand: EmbeddedVector | None = None
+        if isinstance(emb, EmbeddedVector):
+            cand = emb
+        elif isinstance(emb, (list, tuple)) and len(emb) == q.output_dimension and any(emb):
+            if active.version == HASH_EMBEDDING_VERSION:
+                cand = as_embedded(emb, HASH_EMBEDDING_VERSION)
+        if cand is None:
+            if recompute:
+                cand = active.embed(str(c.get(text_key) or ""))
+            else:
+                continue
         try:
-            score = cosine(q, emb)
+            score = compare_embeddings(q, cand)
+        except EmbeddingVersionMismatch:
+            if recompute:
+                cand = active.embed(str(c.get(text_key) or ""))
+                score = compare_embeddings(q, cand)
+            else:
+                continue
         except ValueError:
-            score = cosine(q, embed_text(str(c.get(text_key) or "")))
+            if recompute:
+                cand = active.embed(str(c.get(text_key) or ""))
+                score = compare_embeddings(q, cand)
+            else:
+                continue
         row = dict(c)
         row["sim_score"] = score
+        row["embedding_version"] = q.embedding_version
         scored.append((score, row))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in scored[:top_k]]

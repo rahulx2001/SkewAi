@@ -492,6 +492,12 @@ async def health() -> dict:
             else "single_tenant_pilot_open"
         ),
     }
+    try:
+        from src.ml_runtime.embedding_runtime import health_payload as _emb_health
+
+        body["embedding"] = _emb_health()
+    except Exception as e:
+        body["embedding"] = {"mode": "unknown", "error": type(e).__name__}
     if detail:
         body["detail"] = detail
     body["readiness"] = readiness
@@ -560,6 +566,21 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
             _check("cost_model", cm is not None, "pack cost_model present")
         except Exception:
             _check("cost_model", False, "no cost_model on manifest")
+    try:
+        from src.ml_runtime.embedding_runtime import embedding_mode, try_semantic_embedder
+
+        mode = embedding_mode()
+        if mode == "semantic":
+            sem = try_semantic_embedder()
+            _check(
+                "semantic_embedder",
+                bool(sem and sem.ready()),
+                "semantic mode requires a verified local ONNX artifact",
+            )
+        else:
+            _check("semantic_embedder", True, f"not required in {mode} mode")
+    except Exception as e:
+        _check("semantic_embedder", False, f"inspect failed: {type(e).__name__}")
     try:
         from src.ledger.merkle import latest_head
 

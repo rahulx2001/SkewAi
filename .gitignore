@@ -55,6 +55,14 @@ dashboard/test-results/
 .cursor/
 .grok/
 
+# Local ONNX artifacts (acquired by scripts/prepare_minilm_onnx.py).
+# Manifest/checksums/LICENSE/README may be committed; binaries stay local.
+models/minilm/*.onnx
+models/minilm/*.onnx.data
+models/minilm/tokenizer.json
+models/minilm/vocab.txt
+models/minilm/*.bin
+
 # Docker / local tooling
 *.log
 .docker/
