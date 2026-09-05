@@ -59,6 +59,18 @@ jobs:
           make pack-lint PACK=automotive_nhtsa
           make pack-lint PACK=finance_cfpb
 
+      - name: Set up Node (pytest builds dashboard dist)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard deps
+        working-directory: dashboard
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
       - name: Unit + contract tests
         # Fail hangs instead of burning the runner (WS contract must not block CI).
         run: make test
@@ -90,7 +102,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 

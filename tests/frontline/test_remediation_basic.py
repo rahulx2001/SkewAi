@@ -9,6 +9,7 @@ import pytest
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)
 async def test_item41_persona_expectations_and_negative_controls(
     reset_ops_db, seed_automotive_pack
 ):

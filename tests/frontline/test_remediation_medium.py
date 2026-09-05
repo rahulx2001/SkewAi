@@ -571,6 +571,7 @@ def test_item38_airgapped_completeness(reset_ops_db, seed_automotive_pack, pack)
 # ── ITEM 39: rate limits ─────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(90)
 def test_item39_rate_limits_present(reset_ops_db, seed_automotive_pack, monkeypatch):
     from fastapi.testclient import TestClient
 
