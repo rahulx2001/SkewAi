@@ -128,6 +128,13 @@ def domain_con(pack_id: str, read_only: bool = True) -> Iterator[duckdb.DuckDBPy
         yield con
     finally:
         con.close()
+        if not read_only:
+            try:
+                from scripts.migrate import stamp_schema_current
+
+                stamp_schema_current(path, target="domain")
+            except Exception:
+                pass
 
 
 # ── Init helpers (for tests + Makefile) ─────────────────────────────────────
