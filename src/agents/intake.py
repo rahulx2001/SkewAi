@@ -476,7 +476,7 @@ class IntakeAgent(Agent):
         # Always ask safety questions first if pack defines them AND no
         # escalation flag has been raised. The global turn cap still wins:
         # unanswered safety questions must not loop past FRONTLINE_MAX_TURNS.
-        customer_turn_count = sum(1 for t in ctx.turns if t["speaker"] == "customer")
+        customer_turn_count = ctx.count_turn()
         if customer_turn_count < settings.max_turns:
             safety_q = self._next_safety_question()
             if safety_q:
@@ -791,7 +791,7 @@ class IntakeAgent(Agent):
         """Pick the highest-priority missing required slot that hasn't
         exceeded its re-ask limit."""
         # Count customer turns (NOT slot attempts) for the global cap.
-        customer_turn_count = sum(1 for t in self.ctx.turns if t["speaker"] == "customer")
+        customer_turn_count = self.ctx.count_turn()
         for slot in self.ctx.pack.required_slots():
             if self.ctx.slots.get(slot.name):
                 continue

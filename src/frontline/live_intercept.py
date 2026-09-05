@@ -35,7 +35,8 @@ def slice_is_anomalous(
     with domain_con(pack_id) as con:
         try:
             cur = con.execute(
-                "SELECT received_at, occurred_at, category, entity_2 FROM records"
+                "SELECT received_at, occurred_at, category, entity_2 FROM records "
+                "WHERE provenance IS NULL OR provenance <> 'inferred'"
             )
             cols = [d[0] for d in cur.description]
             records = [dict(zip(cols, r)) for r in cur.fetchall()]

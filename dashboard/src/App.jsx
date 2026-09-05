@@ -15,6 +15,7 @@ import PackBuilder from "../routes/PackBuilder.jsx";
 import QualityEconomics from "../routes/QualityEconomics.jsx";
 import SignIn from "../routes/SignIn.jsx";
 import LabelDesk from "../routes/LabelDesk.jsx";
+import UserJourneyGuide from "../routes/UserJourneyGuide.jsx";
 import CommandPalette from "./ui/CommandPalette.jsx";
 import { ToastProvider, useToast } from "./ui/Toast.jsx";
 import { ErrorBoundary } from "./ui/Feedback.jsx";
@@ -37,6 +38,12 @@ import {
 } from "./icons.jsx";
 
 const NAV_GROUPS = [
+  {
+    label: "Getting started",
+    items: [
+      { id: "guide", label: "User journey & guide", Icon: IconSpark, route: UserJourneyGuide, keywords: "guide walkthrough journey start onboarding howto tutorial" },
+    ],
+  },
   {
     label: "Operate",
     items: [
@@ -91,6 +98,7 @@ function ShortcutSheet({ open, onClose }) {
   if (!open) return null;
   const rows = [
     ["⌘ K / Ctrl K", "Open command palette"],
+    ["g then j", "User journey & guide"],
     ["g then c", "Command center"],
     ["g then v", "Voice agent"],
     ["g then l", "Live console"],
@@ -351,6 +359,7 @@ function Shell() {
       t: () => cycleTheme(),
       r: () => setRefreshKey((k) => k + 1),
       g: () => setPendingG(true),
+      j: () => pendingG && (setRoute("guide"), setPendingG(false)),
       c: () => pendingG && (setRoute("command"), setPendingG(false)),
       v: () => pendingG && (setRoute("call"), setPendingG(false)),
       l: () => pendingG && (setRoute("console"), setPendingG(false)),
@@ -506,6 +515,28 @@ function Shell() {
                 </button>
               )
             )}
+            <button
+              type="button"
+              className="ghost guide-topbar-btn"
+              onClick={() => setRoute("guide")}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                borderColor: route === "guide" ? "var(--ink)" : "var(--edge-strong)",
+                color: route === "guide" ? "var(--ink)" : "var(--accent)",
+                background: route === "guide" ? "var(--bg-panel)" : "transparent",
+                fontWeight: "500",
+                fontSize: "13px",
+                padding: "6px 12px",
+                borderRadius: "8px",
+              }}
+              title="Open User Journey & Product Guide (g then j)"
+            >
+              <IconSpark style={{ width: 14, height: 14 }} />
+              <span>User Guide</span>
+            </button>
+
             <button
               type="button"
               className="ghost palette-trigger"

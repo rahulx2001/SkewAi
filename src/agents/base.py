@@ -84,6 +84,8 @@ class InteractionContext:
     # Enrichment ran (even partially) — hangup after this point must close
     # with a case, never abandon evidence (audit 6.1).
     enrichment_done: bool = False
+    enrichment_partial: bool = False
+    enrichment_degraded: bool = False
     # Kill-switch script captured while SUPERVISED (audit 3.3): emitted if
     # the supervisor releases with a safety escalation pending.
     pending_safety_script: str | None = None
@@ -95,6 +97,15 @@ class InteractionContext:
             for s in self.pack.required_slots()
             if not self.slots.get(s.name)
         ]
+
+    def count_turn(self) -> int:
+        """Customer turns that consume FRONTLINE_MAX_TURNS.
+
+        Supervisor / agent turns are excluded so a takeover cannot burn the
+        budget, and confirmation / elicitation replies still count because
+        they are recorded as speaker='customer'.
+        """
+        return count_turn(self)
 
     def has_required_slots(self) -> bool:
         return not self.required_slots_remaining()
@@ -118,6 +129,16 @@ class InteractionContext:
         except Exception:
             pass
         return turn
+
+
+def count_turn(ctx: InteractionContext) -> int:
+    """Single turn-budget counter used by every collection path.
+
+    Counts speaker='customer' only. Supervisor and agent turns do not consume
+    FRONTLINE_MAX_TURNS. Confirmation, readback replies, and elicitation
+    answers are customer turns and therefore count.
+    """
+    return sum(1 for t in ctx.turns if (t.get("speaker") or "") == "customer")
 
 
 # ── Agent contract ──────────────────────────────────────────────────────────

@@ -370,7 +370,8 @@ def apply_ops_schema(con) -> None:
         (
             "interactions",
             (("customer_ref", "VARCHAR"), ("degraded_ledger", "BOOLEAN"),
-             ("csat", "INTEGER"), ("customer_resolved", "BOOLEAN")),
+             ("csat", "INTEGER"), ("customer_resolved", "BOOLEAN"),
+             ("enrichment_partial", "BOOLEAN")),
         ),
         ("agent_actions", (("erased", "BOOLEAN"),)),
         ("interaction_turns", (("erased", "BOOLEAN"),)),

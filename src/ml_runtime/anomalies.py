@@ -443,15 +443,14 @@ def recompute_weekly_anomalies(
         apply_domain_schema(con)
         sql = "SELECT received_at, occurred_at, category, entity_2 FROM records"
         params: list[Any] = []
-        wheres: list[str] = []
+        wheres: list[str] = ["(provenance IS NULL OR provenance <> 'inferred')"]
         if category:
             wheres.append("category = ?")
             params.append(category)
         if entity_2:
             wheres.append("entity_2 = ?")
             params.append(entity_2)
-        if wheres:
-            sql += " WHERE " + " AND ".join(wheres)
+        sql += " WHERE " + " AND ".join(wheres)
         raw = con.execute(sql, params).fetchall()
         cols = [d[0] for d in con.description]
         records = [dict(zip(cols, r)) for r in raw]

@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS interactions (
     category           VARCHAR,
     description        TEXT,
     status             VARCHAR NOT NULL,          -- active | completed | abandoned | escalated
-    outcome            VARCHAR,                   -- case_created | advisory_notified | escalated_safety | incomplete
+    outcome            VARCHAR,                   -- case_created | advisory_notified | escalated_safety | incomplete | abandoned_with_slots | handed_off | human_resolved
+    enrichment_partial BOOLEAN NOT NULL DEFAULT FALSE,
     supervised         BOOLEAN NOT NULL DEFAULT FALSE,  -- a human took over at some point
     peak_frustration   DOUBLE,
     -- denormalized for the console: latest frustration

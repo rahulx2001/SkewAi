@@ -82,6 +82,7 @@ SAFE_ALTER_COLUMNS = frozenset(
         "degraded_ledger",
         "csat",
         "customer_resolved",
+        "enrichment_partial",
         "erased",
         "entity_key",
         "provenance",

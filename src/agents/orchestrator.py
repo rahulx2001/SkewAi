@@ -358,7 +358,7 @@ class Orchestrator:
         # ── Intake ────────────────────────────────────────────────────────
         # 2.3: budget_remaining logged every turn for audit of elicitation conflicts
         try:
-            _ccount = sum(1 for t in self.ctx.turns if t.get("speaker") == "customer")
+            _ccount = self.ctx.count_turn()
             from src.config import settings as _s
             record_action(self._orchestrator_action(
                 "state_transition",
@@ -1062,10 +1062,11 @@ class Orchestrator:
                 self._run_enrichment(), timeout=settings.enrich_timeout_s
             )
         except asyncio.TimeoutError:
+            self.ctx.enrichment_partial = True
             record_action(self._orchestrator_action(
                 "state_transition",
                 input_summary=f"enrichment timeout after {settings.enrich_timeout_s}s",
-                output_summary="moving to CLOSING with partial enrichment",
+                output_summary="moving to CLOSING with partial enrichment enrichment_partial=true",
             ))
         finally:
             # Enrichment ran (even partially/timed-out): a later hangup must
@@ -1129,6 +1130,8 @@ class Orchestrator:
                     ))
                 except Exception:
                     pass
+                self.ctx.enrichment_partial = True
+                self.ctx.enrichment_degraded = True
                 if agent == "investigator":
                     # Audit 4.1: a failed investigator must not leave the case
                     # evidence-free forever — enqueue a leased, retried
@@ -1431,7 +1434,19 @@ class Orchestrator:
             return "advisory_notified"
         if self.ctx.case_id:
             return "case_created"
+        if self._abandoned_has_projectable_slots():
+            return "abandoned_with_slots"
         return "incomplete"
+
+    def _abandoned_has_projectable_slots(self) -> bool:
+        slots = self.ctx.slots or {}
+        if not (slots.get("category") or "").strip():
+            return False
+        return bool(
+            (slots.get("entity_1") or "").strip()
+            or (slots.get("entity_2") or "").strip()
+            or (slots.get("description") or "").strip()
+        )
 
     def _handoff_was_claimed(self) -> bool:
         try:
@@ -1453,7 +1468,7 @@ class Orchestrator:
         # Determine final status from outcome: 'incomplete' → 'abandoned',
         # otherwise 'completed'. 'escalated_safety' stays 'escalated' for the
         # console's red-flag view.
-        if outcome == "incomplete":
+        if outcome in ("incomplete", "abandoned_with_slots"):
             final_status = "abandoned"
         elif outcome == "escalated_safety":
             final_status = "escalated"
@@ -1471,22 +1486,37 @@ class Orchestrator:
             self.ctx.slots.get("entity_3"),
             self.ctx.slots.get("category"),
             (self.ctx.slots.get("description") or "")[:500],
+            bool(self.ctx.enrichment_partial),
             self.ctx.interaction_id,
         ]
 
         def _write() -> None:
             with ops_con() as con:
-                con.execute(
-                    """
-                    UPDATE interactions
-                    SET ended_at = ?, status = ?, outcome = ?,
-                        peak_frustration = ?, supervised = ?, llm_calls = ?,
-                        entity_1 = ?, entity_2 = ?, entity_3 = ?,
-                        category = ?, description = ?
-                    WHERE interaction_id = ?
-                    """,
-                    payload,
-                )
+                try:
+                    con.execute(
+                        """
+                        UPDATE interactions
+                        SET ended_at = ?, status = ?, outcome = ?,
+                            peak_frustration = ?, supervised = ?, llm_calls = ?,
+                            entity_1 = ?, entity_2 = ?, entity_3 = ?,
+                            category = ?, description = ?,
+                            enrichment_partial = ?
+                        WHERE interaction_id = ?
+                        """,
+                        payload,
+                    )
+                except Exception:
+                    con.execute(
+                        """
+                        UPDATE interactions
+                        SET ended_at = ?, status = ?, outcome = ?,
+                            peak_frustration = ?, supervised = ?, llm_calls = ?,
+                            entity_1 = ?, entity_2 = ?, entity_3 = ?,
+                            category = ?, description = ?
+                        WHERE interaction_id = ?
+                        """,
+                        payload[:-2] + payload[-1:],
+                    )
 
         await ops_in_thread(_write)
         # Cross-contact entity memory (enterprise) — never raise into contact path.
@@ -1520,9 +1550,9 @@ class Orchestrator:
                 self._project_contact_to_corpus(outcome)
             except Exception:
                 pass
-        elif outcome == "incomplete" and (self.ctx.slots.get("category") or "").strip():
-            # Abandoned WITH slots (board): lost signal, but do not pollute
-            # observed statistics — project as inferred.
+        elif outcome in ("incomplete", "abandoned_with_slots") and self._abandoned_has_projectable_slots():
+            # Abandoned WITH slots: keep the signal as inferred. Anomaly
+            # scoring excludes provenance='inferred' until verified.
             try:
                 self._project_contact_to_corpus(outcome, provenance="inferred")
             except Exception:
