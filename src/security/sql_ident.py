@@ -28,6 +28,7 @@ SAFE_TABLES = frozenset(
         "usage_events",
         "alert_dedup",
         "alert_dead_letter",
+        "erasure_drill_reports",
         "connector_deliveries",
         "contact_memory",
         "llm_spend",

@@ -38,7 +38,7 @@ class FrontlineEnabledASGI:
     ``BaseHTTPMiddleware`` never runs for ``websocket`` scopes, so the path
     check for ``/ws/*`` must live here (or in each WS handler).
     When FRONTLINE_ENABLED=0: ``/api/*`` → 503, ``/ws/*`` → close without
-    accept. ``/health`` and ``/ui`` stay up.
+    accept. ``/health``, ``/health/ready``, and ``/ui`` stay up.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -76,6 +76,12 @@ async def _lifespan(app: FastAPI):
     from src.security.harden import validate_startup_security
 
     validate_startup_security()
+    # Production-like: refuse to serve if pack/gazetteer/DB/secrets are dead.
+    # Local tests and demos skip this; override with FRONTLINE_READINESS_SKIP_STARTUP=1.
+    if is_production_like() and os.getenv(
+        "FRONTLINE_READINESS_SKIP_STARTUP", ""
+    ).strip().lower() not in {"1", "true", "yes", "on"}:
+        _assert_startup_readiness()
     # Secret redaction in logs (item 50): API keys / session secrets must
     # never appear in Docker logs, access logs, or debug output.
     try:
@@ -403,6 +409,7 @@ async def root() -> dict:
         },
         "links": {
             "health": "/health",
+            "health_ready": "/health/ready",
             "interactions": "/api/interactions",
             "cases": "/api/frontline/cases",
             "packs": "/api/packs",
@@ -445,7 +452,7 @@ async def health() -> dict:
     # gazetteers, or no cost_model would silently run degraded forever.
     # Readiness fails CLOSED (503) unless explicitly waived per check via
     # FRONTLINE_READINESS_WAIVE=comma,list.
-    readiness = _readiness_report(pack_id, pack, db_ok=pack_ok and db_ok)
+    readiness = _readiness_report(pack_id, pack, db_ok=db_ok)
     if not readiness["ready"]:
         detail["readiness"] = readiness
 
@@ -509,6 +516,75 @@ async def health() -> dict:
     return body
 
 
+@app.get("/health/ready", tags=["meta"])
+async def health_ready() -> dict:
+    """Readiness probe: pack, gazetteer lookup, ops DB, domain warehouse, secrets.
+
+    Returns 200 only when every required component is live. Otherwise 503 with
+    ``failing_component`` set to the first failed check name.
+    """
+    from src.data.warehouse import ops_con, ops_in_thread
+    from src.domains.loader import load_pack
+
+    pack_id = resolve_active_pack_id()
+    db_ok = False
+    pack = None
+    try:
+        def _ping() -> None:
+            with ops_con(read_only=True) as con:
+                con.execute("SELECT 1").fetchone()
+
+        await ops_in_thread(_ping)
+        db_ok = True
+    except Exception:
+        db_ok = False
+    try:
+        pack = load_pack(pack_id)
+    except Exception:
+        pack = None
+    report = _readiness_report(pack_id, pack, db_ok=db_ok)
+    body = {
+        "status": "ready" if report["ready"] else "not_ready",
+        "ready": report["ready"],
+        "active_pack": pack_id,
+        "failing_component": report.get("failing_component"),
+        "failing_components": report.get("failing_components") or [],
+        "checks": report["checks"],
+    }
+    if not report["ready"]:
+        return JSONResponse(status_code=503, content=body)
+    return body
+
+
+def _assert_startup_readiness() -> None:
+    """Refuse to serve live traffic when a required component is missing."""
+    from src.data.warehouse import ops_con
+    from src.domains.loader import load_pack
+
+    pack_id = resolve_active_pack_id()
+    db_ok = False
+    pack = None
+    try:
+        with ops_con(read_only=True) as con:
+            con.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    try:
+        pack = load_pack(pack_id)
+    except Exception:
+        pack = None
+    report = _readiness_report(pack_id, pack, db_ok=db_ok)
+    if report["ready"]:
+        return
+    failed = report.get("failing_components") or []
+    raise RuntimeError(
+        "Readiness failed; refusing to serve live traffic. "
+        f"failing_component={report.get('failing_component')}; "
+        f"failing_components={failed}"
+    )
+
+
 def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[str, Any]:
     """Per-artifact readiness (audit 0.5). Fails closed unless waived.
 
@@ -535,6 +611,7 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
     if pack is None:
         _check("pack", False, f"pack {pack_id} failed to load")
         _check("gazetteers", False, "no pack")
+        _check("gazetteer_lookup", False, "no pack")
         _check("triage", False, "no pack")
         _check("cost_model", False, "no pack")
     else:
@@ -543,8 +620,25 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
             gaz = getattr(pack, "gazetteers", {}) or {}
             terms = sum(len(getattr(g, "values", []) or []) for g in gaz.values())
         except Exception:
+            gaz = {}
             terms = 0
         _check("gazetteers", terms > 0, f"{terms} gazetteer terms")
+        lookup_ok = False
+        lookup_note = "no gazetteer values to look up"
+        try:
+            for g in gaz.values():
+                values = list(getattr(g, "values", []) or [])
+                if not values:
+                    continue
+                probe = str(values[0])
+                got = g.lookup(probe)
+                lookup_ok = got is not None
+                lookup_note = f"lookup({probe!r}) -> {got!r}"
+                break
+        except Exception as e:
+            lookup_ok = False
+            lookup_note = f"lookup failed: {type(e).__name__}"
+        _check("gazetteer_lookup", lookup_ok if terms > 0 else False, lookup_note)
         try:
             sev = pack.manifest.severity
             artifact = getattr(sev, "model_artifact", None)
@@ -588,8 +682,38 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
         _check("merkle_log", True, "tree-head table reachable")
     except Exception as e:
         _check("merkle_log", False, f"unreachable: {type(e).__name__}")
-    ready = all(c["ok"] for c in checks.values())
-    return {"ready": ready, "checks": checks}
+    try:
+        from src.data.warehouse import domain_con as _domain_con
+
+        with _domain_con(pack_id, read_only=True) as dcon:
+            dcon.execute("SELECT 1").fetchone()
+        _check("domain_warehouse", True, "domain warehouse queryable")
+    except Exception as e:
+        _check("domain_warehouse", False, f"{type(e).__name__}: {e}")
+    try:
+        from src.api.auth import _configured_key
+        from src.security.harden import is_production_like, key_strength_problems
+
+        if is_production_like():
+            key = _configured_key()
+            problems = key_strength_problems(key) if key else ["FRONTLINE_API_KEY is empty"]
+            _check(
+                "secrets",
+                not problems,
+                "; ".join(problems) if problems else "required secrets present",
+            )
+        else:
+            _check("secrets", True, "not required outside production-like")
+    except Exception as e:
+        _check("secrets", False, f"inspect failed: {type(e).__name__}")
+    failed = [name for name, c in checks.items() if not c["ok"]]
+    ready = not failed
+    return {
+        "ready": ready,
+        "checks": checks,
+        "failing_components": failed,
+        "failing_component": failed[0] if failed else None,
+    }
 
 
 # Serve built dashboard (Docker / pilot one-box). Prefer SPA at /ui.

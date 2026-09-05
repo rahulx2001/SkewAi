@@ -423,6 +423,7 @@ export default function LiveContactConsole() {
                   <span className="chip">{it.channel}</span>
                   {it.supervised && <span className="chip teal">supervised</span>}
                   {flagged && <span className="chip red pulse">fr high</span>}
+                  {it.enrichment_partial && <span className="chip">partial enrichment</span>}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 12 }}>
                   <span className="muted">category:</span>{" "}
@@ -476,6 +477,15 @@ export default function LiveContactConsole() {
               {isFlagged && (
                 <span className="chip red pulse" style={{ marginLeft: 8 }}>
                   high frustration
+                </span>
+              )}
+              {selected.enrichment_partial && (
+                <span
+                  className="chip"
+                  style={{ marginLeft: 8 }}
+                  title="Enrichment timed out or an agent failed; the brief may be incomplete"
+                >
+                  partial enrichment
                 </span>
               )}
             </div>

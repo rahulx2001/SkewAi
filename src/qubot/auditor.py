@@ -546,6 +546,11 @@ async def audit_interaction(
         result.recommendations.append(
             f"Review {len(result.supervised_segments)} supervisor turn(s) for tone/quality."
         )
+    if interaction.get("enrichment_partial"):
+        result.flags.append("enrichment_partial")
+        result.recommendations.append(
+            "Enrichment was partial (timeout or agent failure); treat the brief as incomplete."
+        )
 
     # ── Write the report ─────────────────────────────────────────────────────
     if write_report:
@@ -803,6 +808,10 @@ def _write_contact_report(result: AuditResult, data: dict[str, Any]) -> Path:
     lines.append(f"- **Supervised:** {interaction.get('supervised')}")
     lines.append(f"- **Peak frustration:** {result.peak_frustration:.2f}")
     lines.append(f"- **LLM calls:** {interaction.get('llm_calls', 0)}")
+    if interaction.get("enrichment_partial"):
+        lines.append(
+            "- **Enrichment:** PARTIAL (timeout or agent failure; brief may be incomplete)"
+        )
     if case:
         lines.append(f"- **Case:** `{case.get('case_id')}` (severity={case.get('severity')}, priority=P{case.get('priority')})")
         if case.get("investigation_id"):

@@ -223,6 +223,19 @@ CREATE TABLE IF NOT EXISTS alert_dead_letter (
 
 CREATE INDEX IF NOT EXISTS idx_alert_dl_status ON alert_dead_letter(status, created_at);
 
+-- Weekly crypto-shred drill reports (GDPR erasure honesty).
+CREATE TABLE IF NOT EXISTS erasure_drill_reports (
+    report_id          VARCHAR PRIMARY KEY,
+    ran_at             TIMESTAMP NOT NULL,
+    interaction_id     VARCHAR,
+    passed             BOOLEAN NOT NULL,
+    chain_ok           BOOLEAN,
+    payload_unreadable BOOLEAN,
+    dek_destroyed      BOOLEAN,
+    error              VARCHAR,
+    detail_json        VARCHAR
+);
+
 -- Outbound connector delivery log (generic HTTP / outbox case-export).
 CREATE TABLE IF NOT EXISTS connector_deliveries (
     delivery_id        VARCHAR PRIMARY KEY,

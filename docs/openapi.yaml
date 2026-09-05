@@ -6327,6 +6327,34 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Health Health Get
+  /health/ready:
+    get:
+      tags:
+      - meta
+      summary: Health Ready
+      description: 'Readiness probe: pack, gazetteer lookup, ops DB, domain warehouse,
+        secrets.
+
+        Returns 200 only when every required component is live. Otherwise 503 with
+        ``failing_component`` set to the first failed check name.'
+      operationId: health_ready_health_ready_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Health Ready Health Ready Get
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Health Ready Health Ready Get 503
 components:
   schemas:
     HTTPValidationError:

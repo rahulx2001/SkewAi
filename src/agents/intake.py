@@ -353,6 +353,8 @@ class IntakeAgent(Agent):
                 _low = [(s, float(c)) for s, c in _conf.items()
                         if isinstance(c, (int, float)) and float(c) < _thr]
                 if _low and customer_turn:
+                    if ctx.count_turn() >= settings.max_turns and not ctx.has_required_slots():
+                        return self._max_turns_response()
                     _slot, _c = _low[0]
                     _q = readback_prompt(_slot, customer_turn.strip()[:120])
                     record_action(self._action(
@@ -498,19 +500,10 @@ class IntakeAgent(Agent):
 
         # Global turn cap: stop collecting and signal orchestrator to wrap up.
         if customer_turn_count >= settings.max_turns and not ctx.has_required_slots():
-            record_action(self._action(
-                action_type="intake_completed",
-                input_summary=f"max_turns={settings.max_turns} reached with incomplete slots",
-                output_summary=f"slots: {ctx.slots}; force wrap-up",
-            ))
-            return {
-                "extracted": extracted,
-                "question": "",
-                "fast_path": True,
-                "kill_switch": None,
-                "slots_filled_now": bool(extracted),
-                "max_turns_reached": True,
-            }
+            out = self._max_turns_response()
+            out["extracted"] = extracted
+            out["slots_filled_now"] = bool(extracted)
+            return out
 
         # Otherwise pick highest-priority missing required slot.
         next_slot = self._next_required_slot()
@@ -786,6 +779,22 @@ class IntakeAgent(Agent):
                 self.ctx.slots[_SAFETY_PENDING_KEY] = str(i)
                 return q
         return None
+
+    def _max_turns_response(self) -> dict[str, Any]:
+        """Deterministic wrap-up payload when FRONTLINE_MAX_TURNS is exhausted."""
+        record_action(self._action(
+            action_type="intake_completed",
+            input_summary=f"max_turns={settings.max_turns} reached with incomplete slots",
+            output_summary=f"slots: {self.ctx.slots}; force wrap-up",
+        ))
+        return {
+            "extracted": {},
+            "question": "",
+            "fast_path": True,
+            "kill_switch": None,
+            "slots_filled_now": False,
+            "max_turns_reached": True,
+        }
 
     def _next_required_slot(self):
         """Pick the highest-priority missing required slot that hasn't

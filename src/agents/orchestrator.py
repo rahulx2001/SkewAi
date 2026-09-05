@@ -64,6 +64,11 @@ ABANDONED = "ABANDONED"
 # Handoff SLA: supervisor pickup window before the customer is told sorry.
 HANDOFF_SLA_S = 75
 
+# Deterministic wrap-up when FRONTLINE_MAX_TURNS is hit (not an abrupt drop).
+BUDGET_WRAP_SCRIPT = (
+    "We've captured what we have and will file this now so nothing is lost."
+)
+
 # Allowed transitions (excluding SUPERVISED which has its own enter/exit logic).
 _TRANSITIONS = {
     GREETING: {COLLECTING, SUPERVISED, ABANDONED},
@@ -460,8 +465,15 @@ class Orchestrator:
             return
 
         # Max customer turns: force wrap-up (case + goodbye), not silent empty questions.
-        if ires.get("max_turns_reached"):
-            await self._move_to_closing()
+        # count_turn() is the single budget counter: confirmation, readback, and
+        # elicitation replies count; supervisor turns do not.
+        over_budget = self.ctx.count_turn() >= settings.max_turns
+        if ires.get("max_turns_reached") or (over_budget and not self.ctx.has_required_slots()):
+            await self._force_budget_wrap()
+            return
+        if over_budget and self.ctx.has_required_slots():
+            # Slots filled at the cap: skip extra confirmation/elicitation loops.
+            await self._enter_enriching()
             return
 
         # Confidence-gated escalate → same handoff surface as frustration (not text-only).
@@ -687,7 +699,7 @@ class Orchestrator:
         else:
             self._transition(self.ctx.state, ABANDONED)
             self._record_state(ABANDONED)
-            await self._finalize_interaction(outcome="incomplete")
+            await self._finalize_interaction(outcome=self._outcome())
 
     async def takeover(self, claimed_by: str | None = None) -> None:
         """Supervisor takes over. Save the pre-state; AI stops generating turns.
@@ -1049,6 +1061,21 @@ class Orchestrator:
             pass  # alerts must never break safety processing
 
     # ── Enrichment ────────────────────────────────────────────────────────
+    async def _force_budget_wrap(self) -> None:
+        """Close at FRONTLINE_MAX_TURNS with a ledgered canned script."""
+        record_action(self._orchestrator_action(
+            "goodbye_emitted",
+            input_summary=f"max_turns={settings.max_turns} force wrap-up",
+            output_summary=BUDGET_WRAP_SCRIPT,
+        ))
+        await self.hooks._maybe(
+            self.hooks.emit_customer_turn,
+            BUDGET_WRAP_SCRIPT,
+            {"speaker": "agent", "fast_path": True, "llm_used": False, "max_turns_reached": True},
+        )
+        self.ctx.record_turn("agent", BUDGET_WRAP_SCRIPT, llm_used=False)
+        await self._move_to_closing()
+
     async def _enter_enriching(self) -> None:
         # Idempotent entry (audit 3.3 release path may already sit here).
         if self.ctx.state != ENRICHING:

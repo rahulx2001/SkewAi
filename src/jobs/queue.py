@@ -44,6 +44,7 @@ ALLOWED_JOB_TYPES = frozenset(
         "build_digest",
         "embedding_backfill",
         "rebuild_cluster_build",
+        "erasure_drill",
     }
 )
 
@@ -377,6 +378,12 @@ def _default_handler(jtype: str, payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "deferred": True, "params": payload}
     if jtype == "build_digest":
         return {"ok": True, "deferred": True, "params": payload}
+    if jtype == "erasure_drill":
+        from src.compliance.erasure_drill import maybe_run_weekly_drill, run_erasure_drill
+
+        if payload.get("weekly"):
+            return maybe_run_weekly_drill() or {"ok": True, "skipped": True, "reason": "not_due"}
+        return run_erasure_drill()
     # Unknown types must not echo arbitrary payloads (allowlist gate on enqueue).
     raise ValueError(f"no handler for job_type: {jtype!r}")
 
