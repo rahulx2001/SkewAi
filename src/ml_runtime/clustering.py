@@ -330,6 +330,7 @@ def rebuild_clusters(pack_id: str, *, k: int = 5) -> dict[str, Any]:
             SELECT record_id, text, category, embedding, received_at
             FROM records
             ORDER BY received_at
+            LIMIT 5000
             """
         ).fetchall()
         if not rows:

@@ -21,6 +21,15 @@ def persist_turn(interaction_id: str, turn: dict[str, Any]) -> None:
         ).fetchone()
         if exists:
             return
+        speaker = turn.get("speaker") or "customer"
+        text = turn.get("text") or ""
+        if speaker == "customer" and text:
+            try:
+                from src.security.pii import encrypt_subject_pii
+
+                text = encrypt_subject_pii(interaction_id, text)
+            except Exception:
+                pass
         con.execute(
             """
             INSERT INTO interaction_turns
@@ -31,8 +40,8 @@ def persist_turn(interaction_id: str, turn: dict[str, Any]) -> None:
                 turn_id,
                 interaction_id,
                 int(turn.get("seq") or 0),
-                turn.get("speaker") or "customer",
-                turn.get("text") or "",
+                speaker,
+                text,
                 ts,
                 turn.get("latency_ms"),
                 bool(turn.get("llm_used", False)),

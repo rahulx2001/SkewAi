@@ -88,7 +88,13 @@ def _hmac_hex(secret: str, msg: str) -> str:
 
 
 def sign_session(msg: str, *, primary: str | None = None) -> str:
-    secret = primary or (os.getenv("SESSION_SECRET") or os.getenv("FRONTLINE_API_KEY") or "")
+    secret = primary or (os.getenv("SESSION_SECRET") or "")
+    if not secret:
+        from src.security.harden import is_production_like
+
+        if is_production_like():
+            raise RuntimeError("SESSION_SECRET required in production-like mode")
+        secret = os.getenv("FRONTLINE_API_KEY") or ""
     return _hmac_hex(secret, msg)
 
 

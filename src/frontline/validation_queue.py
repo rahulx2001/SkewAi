@@ -328,7 +328,13 @@ def assign_review(review_id: str, owner: str) -> dict[str, Any]:
     return {"review_id": review_id, "status": "assigned", "owner": owner[:80]}
 
 
-def resolve_review(review_id: str, verdict: str) -> dict[str, Any]:
+def resolve_review(
+    review_id: str,
+    verdict: str,
+    *,
+    actor: str = "",
+    interaction_id: str | None = None,
+) -> dict[str, Any]:
     """Close a review with a verdict (board #9 taxonomy).
 
     ``ai_wrong`` verdicts are the labeled examples that feed the eval
@@ -338,19 +344,35 @@ def resolve_review(review_id: str, verdict: str) -> dict[str, Any]:
     verdict = (verdict or "").strip().lower()
     if verdict not in ("ai_wrong", "data_drift", "false_alarm"):
         raise ValueError("verdict must be ai_wrong|data_drift|false_alarm")
+    iid = interaction_id
     with ops_con() as con:
         row = con.execute(
-            "SELECT status FROM review_queue WHERE review_id = ?", [review_id]
+            "SELECT status, interaction_id FROM review_queue WHERE review_id = ?",
+            [review_id],
         ).fetchone()
         if not row:
             raise LookupError(f"review not found: {review_id}")
         if row[0] not in ("open", "assigned"):
             raise ValueError(f"review is {row[0]}, cannot resolve")
+        iid = iid or row[1]
         con.execute(
             "UPDATE review_queue SET status = 'resolved', verdict = ? WHERE review_id = ?",
             [verdict, review_id],
         )
-    return {"review_id": review_id, "status": "resolved", "verdict": verdict}
+    try:
+        from src.ledger import AgentAction, record_action
+
+        record_action(AgentAction(
+            interaction_id=str(iid or review_id),
+            agent="supervisor",
+            action_type="human_override",
+            input_summary=f"review {review_id} actor={actor or 'unknown'}",
+            output_summary=f"verdict={verdict}",
+            ok=True,
+        ))
+    except Exception:
+        pass
+    return {"review_id": review_id, "status": "resolved", "verdict": verdict, "actor": actor}
 
 
 def export_audit_regressions(
@@ -370,17 +392,17 @@ def export_audit_regressions(
 
     from src.data.timeutil import utc_now as _now
 
-    dest = _Path(out_dir) if out_dir else _Path("eval") / "regression"
+    dest = _Path(out_dir) if out_dir else _Path("reports") / "regression"
     dest.mkdir(parents=True, exist_ok=True)
     cutoff = _now() - _td(days=max(1, int(since_days)))
     with ops_con(read_only=True) as con:
         try:
             rows = con.execute(
                 """
-                SELECT queue_id, kind, interaction_id, case_id, action_id,
-                       summary, created_at
-                FROM insight_queue
-                WHERE kind IN ('needs_review', 'unverifiable')
+                SELECT review_id, reason, interaction_id, case_id, NULL,
+                       verdict, created_at
+                FROM review_queue
+                WHERE verdict = 'ai_wrong'
                   AND created_at >= ?
                 ORDER BY created_at
                 """,
@@ -399,15 +421,21 @@ def export_audit_regressions(
             if iid:
                 try:
                     with ops_con(read_only=True) as con2:
-                        turns = [
-                            str(r[0])
-                            for r in con2.execute(
-                                "SELECT text FROM interaction_turns"
-                                " WHERE interaction_id = ? AND speaker = 'customer'"
-                                " ORDER BY seq",
-                                [iid],
-                            ).fetchall()
-                        ]
+                        from src.security.pii import decrypt_subject_pii, redact_pii
+
+                        turns = []
+                        for r in con2.execute(
+                            "SELECT text FROM interaction_turns"
+                            " WHERE interaction_id = ? AND speaker = 'customer'"
+                            " ORDER BY seq",
+                            [iid],
+                        ).fetchall():
+                            raw = str(r[0] or "")
+                            try:
+                                raw = decrypt_subject_pii(iid, raw)
+                            except Exception:
+                                pass
+                            turns.append(redact_pii(raw))
                 except Exception:
                     turns = []
             fh.write(_json.dumps({
@@ -417,7 +445,7 @@ def export_audit_regressions(
                 "case_id": cid,
                 "action_id": aid,
                 "customer_turns": turns,
-                "expected_failure": summary,
+                "expected_failure": summary or kind,
                 "exported_at": _now().isoformat(),
             }) + "\n")
             written += 1

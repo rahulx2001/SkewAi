@@ -89,10 +89,11 @@ def next_question(
     cat = (slots.get("category") or "").strip()
     ent = (slots.get("entity_2") or "").strip()
     answered: set[str] = set()
-    if interaction_id:
-        with ops_con(read_only=True) as con:
-            try:
-                _ensure(con)
+    rows = []
+    with ops_con(read_only=True) as con:
+        try:
+            _ensure(con)
+            if interaction_id:
                 answered = {
                     str(r[0])
                     for r in con.execute(
@@ -100,10 +101,6 @@ def next_question(
                         [interaction_id],
                     ).fetchall()
                 }
-            except Exception:
-                answered = set()
-    with ops_con(read_only=True) as con:
-        try:
             rows = con.execute(
                 """
                 SELECT question_id, prompt, category, entity_2
@@ -216,8 +213,7 @@ def record_spoken_confirmation(
             action_type="spoken_confirmation",
             input_summary=(question_id or "")[:200],
             output_summary=f"confirmed={confirmed}; utterance={utterance[:400]}",
-            # question_id is not a warehouse row — citing dq_* makes Qubot red.
-            evidence_ids=[],
+            evidence_ids=[question_id] if question_id else [],
             ok=True,
         )
     )

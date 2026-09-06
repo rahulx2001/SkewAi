@@ -54,6 +54,7 @@ RUN chmod +x /entrypoint.sh
 
 USER frontline
 EXPOSE 8000
+STOPSIGNAL SIGTERM
 
 # Compose also defines a healthcheck; this covers bare `docker run`.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=5 \

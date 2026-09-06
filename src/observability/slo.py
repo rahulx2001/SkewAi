@@ -135,10 +135,17 @@ def evaluate_slos(*, fire_alerts: bool = True) -> dict[str, Any]:
                     pass
 
             try:
-                _anyio.run(_fire)
-            except Exception:
-                pass
-            alerted.append("job_queue_stuck")
+                import asyncio as _asyncio
+
+                _loop = _asyncio.get_running_loop()
+                _loop.create_task(_fire())
+                alerted.append("job_queue_stuck")
+            except RuntimeError:
+                try:
+                    _anyio.run(_fire)
+                    alerted.append("job_queue_stuck")
+                except Exception:
+                    pass
     except Exception:
         pass
     return {

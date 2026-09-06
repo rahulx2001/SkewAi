@@ -68,11 +68,14 @@ def prometheus_text() -> str:
         for k, vals in sorted(_histograms.items()):
             if not vals:
                 continue
-            name = k.split("|", 1)[0]
+            name = k.split("|", 1)[0].replace("{", "_").replace("}", "").replace(",", "_")
             avg = sum(vals) / len(vals)
+            xs = sorted(vals)
+            p95 = xs[min(len(xs) - 1, max(0, int(0.95 * len(xs)) - 1))]
             lines.append(f"{name}_count {len(vals)}")
             lines.append(f"{name}_sum {sum(vals)}")
             lines.append(f"{name}_avg {avg}")
+            lines.append(f"{name}_p95 {p95}")
     return "\n".join(lines) + "\n"
 
 

@@ -137,9 +137,39 @@ async def _lifespan(app: FastAPI):
         hb_task = _asyncio.create_task(_heartbeat_loop())
     except Exception:
         pass
+    worker_task = None
+    if not os.getenv("FRONTLINE_TEST_ISOLATION"):
+        try:
+            from src.jobs.queue import run_next as _run_next
+
+            import asyncio as _asyncio
+
+            async def _job_worker() -> None:
+                while True:
+                    await _asyncio.sleep(5)
+                    try:
+                        await _asyncio.to_thread(_run_next)
+                    except Exception:
+                        pass
+                    try:
+                        from src.compliance.erasure_drill import maybe_run_weekly_drill
+
+                        await _asyncio.to_thread(maybe_run_weekly_drill)
+                    except Exception:
+                        pass
+
+            worker_task = _asyncio.create_task(_job_worker())
+        except Exception:
+            pass
     try:
         yield
     finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except BaseException:
+                pass
         if hb_task is not None:
             hb_task.cancel()
             try:

@@ -178,8 +178,14 @@ def run_fleet_scan(
                         except Exception:
                             pass
 
-                    _anyio.run(_fire)
-                    report["alerts_fired"] += 1
+                    try:
+                        import asyncio as _aio
+
+                        _aio.get_running_loop().create_task(_fire())
+                        report["alerts_fired"] += 1
+                    except RuntimeError:
+                        _anyio.run(_fire)
+                        report["alerts_fired"] += 1
                 except Exception:
                     pass
         else:

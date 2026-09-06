@@ -257,17 +257,21 @@ async def test_fix_regression_watch_fires(orchestrator_factory):
 
 
 def test_audit_regression_export(reset_ops_db):
-    from src.frontline.validation_queue import enqueue_insight, export_audit_regressions
+    from src.frontline.validation_queue import (
+        create_review,
+        export_audit_regressions,
+        resolve_review,
+    )
 
-    enqueue_insight(kind="needs_review", interaction_id="int_rx",
-                   summary="mismatch: uncited 19V-1")
+    rv = create_review(interaction_id="int_rx", reason="mismatch: uncited 19V-1")
+    resolve_review(rv["review_id"], "ai_wrong", actor="test")
     out = export_audit_regressions(since_days=7, out_dir="/tmp/board_regression")
     assert out["written"] >= 1
     import json
 
     lines = open(out["path"], encoding="utf-8").read().strip().splitlines()
     last = json.loads(lines[-1])
-    assert last["expected_failure"].startswith("mismatch")
+    assert last["expected_failure"] == "ai_wrong"
 
 
 def test_cluster_feedback_endpoints(reset_ops_db, seed_automotive_pack, monkeypatch):

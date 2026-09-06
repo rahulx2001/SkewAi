@@ -508,10 +508,23 @@ def replay_ledger_wal(*, limit: int = 1000) -> dict[str, Any]:
             path.rename(rotated)
     except OSError:
         pass
-    if not rest:
+    if not rest and replayed:
+        iids = set()
+        for line in lines[:limit]:
+            try:
+                iid = (json.loads(line).get("action") or {}).get("interaction_id")
+                if iid:
+                    iids.add(iid)
+            except Exception:
+                pass
         try:
             with ops_con() as con:
-                con.execute("UPDATE interactions SET degraded_ledger = FALSE WHERE degraded_ledger = TRUE")
+                for iid in iids:
+                    con.execute(
+                        "UPDATE interactions SET degraded_ledger = FALSE "
+                        "WHERE interaction_id = ? AND degraded_ledger = TRUE",
+                        [iid],
+                    )
         except Exception:
             pass
     return {"replayed": replayed, "failed": len(failed), "remaining": len(rest),

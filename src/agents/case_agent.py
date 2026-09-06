@@ -162,7 +162,7 @@ class CaseAgent(Agent):
             investigation_id,
             "open",
             followup,
-            "customer",
+            getattr(ctx, "case_kind", None) or "customer",
             getattr(ctx, "customer_ref", None),
         ]
 

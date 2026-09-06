@@ -108,17 +108,31 @@ def warranty_reserve(
 ) -> dict[str, Any]:
     """Project reserve from recent weekly claim counts (linear + residual band)."""
     series = [max(0, int(v)) for v in weekly_volumes]
-    if len(series) < 2:
-        slope = 0.0
-        last = series[-1] if series else 0
-        resid = 0.0
-    else:
-        slope = (series[-1] - series[0]) / max(1, len(series) - 1)
-        last = series[-1]
-        fitted = [series[0] + slope * i for i in range(len(series))]
-        resid = math.sqrt(
-            sum((a - b) ** 2 for a, b in zip(series, fitted)) / max(1, len(series) - 1)
-        )
+    min_weeks = 4
+    if len(series) < min_weeks:
+        return {
+            "weekly_volumes": series,
+            "slope_per_week": 0.0,
+            "residual_stdev": 0.0,
+            "cost_per_claim": float(cost_per_claim),
+            "weeks_ahead": max(1, int(weeks_ahead)),
+            "projected_reserve": 0.0,
+            "ci_low": 0.0,
+            "ci_high": 0.0,
+            "path": [],
+            "error": "insufficient_history",
+        }
+    n = len(series)
+    xs = list(range(n))
+    xbar = sum(xs) / n
+    ybar = sum(series) / n
+    den = sum((x - xbar) ** 2 for x in xs) or 1.0
+    slope = sum((x - xbar) * (y - ybar) for x, y in zip(xs, series)) / den
+    last = series[-1]
+    fitted = [ybar + slope * (x - xbar) for x in xs]
+    resid = math.sqrt(
+        sum((a - b) ** 2 for a, b in zip(series, fitted)) / max(1, n - 2)
+    )
     ahead = max(1, int(weeks_ahead))
     path = []
     acc = 0.0

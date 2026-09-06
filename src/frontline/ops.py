@@ -250,6 +250,13 @@ def update_investigation(
     return out
 
 
+def _csv_neutralize(value: str) -> str:
+    """Prefix formula-leading cells so Excel/Sheets will not execute them."""
+    if value and value[0] in ("=", "+", "-", "@", "\t"):
+        return "'" + value
+    return value
+
+
 def build_cases_csv(
     *,
     status: str | None = None,
@@ -306,6 +313,8 @@ def build_cases_csv(
         for k, v in list(row.items()):
             if isinstance(v, datetime):
                 row[k] = v.isoformat()
+            elif isinstance(v, str):
+                row[k] = _csv_neutralize(v)
         writer.writerow(row)
     return buf.getvalue(), len(rows)
 

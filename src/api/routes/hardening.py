@@ -38,6 +38,14 @@ router = APIRouter(
 )
 
 
+@router.get("/health")
+async def ops_health(role: str = Depends(get_role)) -> dict[str, Any]:
+    from src.observability.health_checks import health_summary
+
+    require_perm(role, "ops:read", open_mode_ok=_open_mode_ok())
+    return health_summary()
+
+
 @router.get("/slos")
 async def slos(role: str = Depends(get_role)) -> dict[str, Any]:
     from src.ops.pilot import STAGE_SLOS, queue_ceiling

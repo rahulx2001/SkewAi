@@ -49,18 +49,17 @@ class TelephonyTurnSequencer:
                 try:
                     from src.data.warehouse import ops_con
 
-                    con = self._con or ops_con()
-                    # Try inserting into turn_dedup table
-                    con.execute(
-                        """
-                        INSERT INTO turn_dedup (interaction_id, client_turn_id, seen_at)
-                        VALUES (?, ?, ?)
-                        """,
-                        [self.interaction_id, turn_payload_hash, datetime.now(timezone.utc)],
-                    )
+                    with ops_con() as con:
+                        con.execute(
+                            """
+                            INSERT INTO turn_dedup (interaction_id, client_turn_id, seen_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            [self.interaction_id, turn_payload_hash, datetime.now(timezone.utc)],
+                        )
                 except Exception:
                     # If primary key collision or duplicate insertion fails
-                    pass
+                    return False
 
             # Mark processed
             self.last_committed_seq = max(self.last_committed_seq, turn_seq)

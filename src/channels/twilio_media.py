@@ -110,14 +110,17 @@ class TwilioMediaChannel(ChannelAdapter):
         caller_id: str | None = None,
     ) -> str:
         """Generate compliant TwiML for warm transfer via SIP REFER or Conference (audit 2.4)."""
-        cid_attr = f' callerId="{caller_id}"' if caller_id else ""
+        from xml.sax.saxutils import escape as _esc, quoteattr as _qa
+
+        safe_target = _esc(str(target or ""), {'"': "&quot;", "'": "&apos;"})
+        cid_attr = f" callerId={_qa(str(caller_id))}" if caller_id else ""
         if method.lower() == "conference":
             return (
                 '<?xml version="1.0" encoding="UTF-8"?>'
-                f'<Response><Dial{cid_attr}><Conference>{target}</Conference></Dial></Response>'
+                f'<Response><Dial{cid_attr}><Conference>{safe_target}</Conference></Dial></Response>'
             )
         elif method.lower() == "sip":
-            sip_uri = target if target.startswith("sip:") else f"sip:{target}"
+            sip_uri = safe_target if safe_target.startswith("sip:") else f"sip:{safe_target}"
             return (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 f'<Response><Dial{cid_attr}><Sip>{sip_uri}</Sip></Dial></Response>'
@@ -125,7 +128,7 @@ class TwilioMediaChannel(ChannelAdapter):
         else:
             return (
                 '<?xml version="1.0" encoding="UTF-8"?>'
-                f'<Response><Dial{cid_attr}><Number>{target}</Number></Dial></Response>'
+                f'<Response><Dial{cid_attr}><Number>{safe_target}</Number></Dial></Response>'
             )
 
     async def hangup(self) -> None:

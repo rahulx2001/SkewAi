@@ -127,7 +127,14 @@ def _ensure(con) -> None:
 
 
 def _hash(token: str) -> str:
-    salt = (os.getenv("SCOPED_KEY_SALT") or "skew-scoped-v1").encode("utf-8")
+    salt_raw = (os.getenv("SCOPED_KEY_SALT") or "").strip()
+    if not salt_raw:
+        from src.security.harden import is_production_like
+
+        if is_production_like():
+            raise RuntimeError("SCOPED_KEY_SALT required in production-like mode")
+        salt_raw = "skew-scoped-v1"
+    salt = salt_raw.encode("utf-8")
     return hmac.new(salt, token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 

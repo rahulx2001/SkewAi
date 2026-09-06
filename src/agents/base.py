@@ -89,6 +89,8 @@ class InteractionContext:
     # Kill-switch script captured while SUPERVISED (audit 3.3): emitted if
     # the supervisor releases with a safety escalation pending.
     pending_safety_script: str | None = None
+    # customer | simulated | audit_review — live-risk and COPQ exclude non-customer.
+    case_kind: str = "customer"
 
     # ── Slot helpers ────────────────────────────────────────────────────
     def required_slots_remaining(self) -> list[str]:

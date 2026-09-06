@@ -122,6 +122,7 @@ class Orchestrator:
             interaction_id=interaction_id,
             pack=pack,
             channel=channel,
+            case_kind="simulated" if channel == "simulated" else "customer",
         )
         self.hooks = hooks or OrchestratorHooks()
         self._pre_supervised_state: str | None = None
@@ -436,15 +437,27 @@ class Orchestrator:
                 await alert_safety_escalation(self.ctx.interaction_id, ires["kill_switch"])
             except Exception:
                 pass
+            try:
+                from src.routing import get_circuit_breaker
+
+                get_circuit_breaker().record_safety_evaluation(missed_safety=False)
+            except Exception:
+                pass
             # Best-effort enrichment on the escalation path (audit 4.1): a
             # turn-1 kill-switch fires before slots complete, and the
             # Critical case that follows is exactly where evidence matters
             # most. Short timeout, partial results kept, never blocking.
             try:
-                await asyncio.wait_for(self._run_enrichment(), timeout=5.0)
+                await asyncio.wait_for(
+                    self._run_enrichment(), timeout=settings.enrich_timeout_s
+                )
+                self.ctx.enrichment_done = True
+            except asyncio.TimeoutError:
+                self.ctx.enrichment_partial = True
                 self.ctx.enrichment_done = True
             except Exception:
-                pass
+                self.ctx.enrichment_partial = True
+                self.ctx.enrichment_done = True
             await self._move_to_closing()
             return
 
@@ -1247,12 +1260,14 @@ class Orchestrator:
                 risk = hit.get("live_risk") or []
                 if risk:
                     top = risk[0]
-                    await alert_early_warning(
-                        int(top.get("cluster_id") or cid or 0),
-                        int(top.get("live_case_count") or 0),
-                        top.get("lead_time_weeks"),
-                        pack_id=self.ctx.pack.id,
-                    )
+                    score = float(top.get("live_risk_score") or 0.0)
+                    if score >= float(settings.early_warning_alert_threshold):
+                        await alert_early_warning(
+                            int(top.get("cluster_id") or cid or 0),
+                            int(top.get("live_case_count") or 0),
+                            top.get("lead_time_weeks"),
+                            pack_id=self.ctx.pack.id,
+                        )
             except Exception:
                 pass
             try:
@@ -1291,7 +1306,7 @@ class Orchestrator:
         # this covers replicas sharing the ops DB (Redis NX when configured).
         from src.jobs.registry import acquire_close_claim_info, heartbeat_close_claim
 
-        _claim_owner = f"orch-{id(self):x}"
+        _claim_owner = f"orch-{self.ctx.interaction_id}"
         _claim_takeover = False
         try:
             _claim = acquire_close_claim_info(self.ctx.interaction_id, _claim_owner)

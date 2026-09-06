@@ -40,7 +40,8 @@ def _t_crit_95(df: int) -> float:
         return float("nan")
     if df in table:
         return table[df]
-    return 1.96
+    # Normal approximation plus 1/(4n) correction; 1.96 is slightly anti-conservative.
+    return 1.96 + 1.0 / (4.0 * float(df))
 
 
 def project_next_week_volume(series: list[int]) -> dict[str, Any]:
@@ -535,9 +536,12 @@ def financial_impact(
     rcpu = recall_cost_per_unit
     exposure = 1.0
     currency = "USD"
+    cost_source = "pack.yaml cost_model"
+    explicit = cost_per_case is not None or recall_cost_per_unit is not None
     # Cost uncertainty band for COPQ ranges (audit 8.4): pack-owned when
     # declared, else an explicit ±25% default — labeled, never hidden.
     uncertainty = 0.25
+    pack_loaded = False
     if cpc is None or rcpu is None:
         try:
             from src.config import settings
@@ -551,12 +555,17 @@ def financial_impact(
                 rcpu = float(cm.recall_cost_per_unit)
             exposure = float(cm.exposure_multiplier)
             currency = str(cm.currency or currency)
+            pack_loaded = True
         except Exception:
-            pass
+            pack_loaded = False
     if cpc is None:
         cpc = 250.0
     if rcpu is None:
         rcpu = 900.0
+    if explicit:
+        cost_source = "explicit_override"
+    elif not pack_loaded:
+        cost_source = "default_fallback"
     with ops_con(read_only=True) as con:
         sql = "SELECT COALESCE(cluster_match_id,0), COUNT(*), SUM(CASE WHEN severity='Critical' THEN 1 ELSE 0 END) FROM cases WHERE COALESCE(case_kind, 'customer') = 'customer'"
         params: list[Any] = []
@@ -602,7 +611,7 @@ def financial_impact(
         "exposure_multiplier": exposure,
         "cost_uncertainty": uncertainty,
         "currency": currency,
-        "cost_source": "pack.yaml cost_model",
+        "cost_source": cost_source,
     }
 
 
@@ -616,9 +625,10 @@ def bias_fairness_report(
     with ops_con(read_only=True) as con:
         try:
             sql = """
-                SELECT COALESCE(category, 'unknown') AS grp,
+                SELECT COALESCE(channel, 'unknown') AS grp,
                        COUNT(*) AS n,
-                       AVG(CASE WHEN peak_frustration >= 0.65 THEN 1.0 ELSE 0.0 END) AS handoff_rate,
+                       AVG(CASE WHEN COALESCE(last_frustration, peak_frustration, 0) >= 0.65
+                            THEN 1.0 ELSE 0.0 END) AS handoff_rate,
                        AVG(CASE WHEN outcome LIKE '%escalat%' OR status = 'escalated' THEN 1.0 ELSE 0.0 END) AS esc_rate
                 FROM interactions
                 WHERE started_at >= ?
@@ -651,7 +661,7 @@ def bias_fairness_report(
         "handoff_rate_disparity": round(disparity, 3),
         "flag": disparity >= 0.25,
         "window_days": window_days,
-        "note": "Pilot fairness monitor on category proxy; not a legal compliance certification.",
+        "note": "Pilot fairness monitor on channel proxy (last_frustration); not a legal compliance certification.",
     }
 
 

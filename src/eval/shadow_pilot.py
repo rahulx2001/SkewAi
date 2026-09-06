@@ -195,8 +195,13 @@ class ShadowPilotEvaluator:
         }
 
     def evaluate_severity_agreement(self) -> ShadowMetricResult:
-        ai_labels = [c.ai_severity for c in self.contacts]
-        hu_labels = [c.human_severity for c in self.contacts]
+        pairs = [
+            (c.ai_severity, c.human_severity)
+            for c in self.contacts
+            if (c.human_severity or "").strip()
+        ]
+        ai_labels = [a for a, _h in pairs]
+        hu_labels = [h for _a, h in pairs]
         kappa, low, up = cohen_kappa_with_ci(hu_labels, ai_labels)
         rating = "green" if kappa >= 0.70 else ("yellow" if kappa >= 0.50 else "red")
         return ShadowMetricResult(
@@ -206,7 +211,7 @@ class ShadowPilotEvaluator:
             ci_upper=up,
             rating=rating,
             target="kappa >= 0.70",
-            detail=f"Evaluated across {len(self.contacts)} human supervisor ratings",
+            detail=f"Evaluated across {len(pairs)} human supervisor ratings",
         )
 
     def evaluate_cluster_agreement(self) -> dict[str, ShadowMetricResult]:

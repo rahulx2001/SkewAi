@@ -189,6 +189,18 @@ def build_payload(
     return {k: v for k, v in payload.items() if v is not None or k in ("event", "ts", "source")}
 
 
+def _safe_title(raw: Any) -> str | None:
+    text = (str(raw) if raw is not None else "")[:200]
+    if not text:
+        return None
+    try:
+        from src.security.pii import redact_pii
+
+        return redact_pii(text)
+    except Exception:
+        return text
+
+
 def build_case_payload_from_db(case_id: str) -> dict[str, Any] | None:
     """Load a case row and build a manual_export payload. None if missing."""
     with ops_con(read_only=True) as con:
@@ -216,7 +228,7 @@ def build_case_payload_from_db(case_id: str) -> dict[str, Any] | None:
         severity=c.get("severity"),
         priority=c.get("priority"),
         category=c.get("category"),
-        title=(c.get("description_summary") or "")[:200] or None,
+        title=_safe_title(c.get("description_summary")),
         extra={"status": c.get("status")},
     )
 

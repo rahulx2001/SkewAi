@@ -112,14 +112,21 @@ async def validation_queue() -> dict[str, Any]:
 
 
 @router.post("/reviews/{review_id}/assign")
-async def review_assign(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def review_assign(
+    review_id: str,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+    actor: str = Depends(get_actor),
+) -> dict[str, Any]:
     """Claim a review-queue row (board #10): open → assigned with an owner."""
+    from src.api.rbac import require_perm
     from src.frontline.validation_queue import assign_review
 
+    require_perm(role, "approval:decide")
     if not isinstance(body, dict):
         raise HTTPException(400, "JSON object required")
     try:
-        return assign_review(review_id, str(body.get("owner") or ""))
+        return assign_review(review_id, str(body.get("owner") or actor or ""))
     except LookupError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:
@@ -127,14 +134,25 @@ async def review_assign(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/reviews/{review_id}/resolve")
-async def review_resolve(review_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def review_resolve(
+    review_id: str,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+    actor: str = Depends(get_actor),
+) -> dict[str, Any]:
     """Close a review with verdict ai_wrong|data_drift|false_alarm (board #9)."""
+    from src.api.rbac import require_perm
     from src.frontline.validation_queue import resolve_review
 
+    require_perm(role, "approval:decide")
     if not isinstance(body, dict):
         raise HTTPException(400, "JSON object required")
     try:
-        return resolve_review(review_id, str(body.get("verdict") or ""))
+        return resolve_review(
+            review_id,
+            str(body.get("verdict") or ""),
+            actor=str(actor or ""),
+        )
     except LookupError as e:
         raise HTTPException(404, str(e)) from e
     except ValueError as e:

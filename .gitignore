@@ -28,6 +28,7 @@ data/uploads/demo_*.csv
 data/uploads/evil_*.csv
 reports/qubot/contacts/
 reports/qubot/digests/
+eval/regression/
 # Keep eval report dir but ignore generated dated files if desired:
 # reports/qubot/eval/eval_*.md
 

@@ -322,17 +322,18 @@ def load_empirical_cohort(
             "category": str(record.get("category", "")),
         }
         human_kill_needed = bool(record.get("expected_safety", record.get("human_kill_needed", False)))
-        category = record.get("category", "ENGINE")
-        human_sev = record.get("human_severity")
-        if not human_sev:
-            if human_kill_needed:
-                human_sev = "Critical"
-            elif category in ("SERVICE BRAKES", "STEERING", "VEHICLE SPEED CONTROL"):
-                human_sev = "High"
-            else:
-                human_sev = "Medium"
-
-        eng_cluster = _CATEGORY_CLUSTERS.get(category, 14)
+        # F-010: never invent supervisor/engineer labels from the same rules the AI uses.
+        human_sev = (record.get("human_severity") or "").strip()
+        eng_cluster = record.get("engineer_cluster_id")
+        if eng_cluster is None:
+            eng_cluster = record.get("engineer_verified_cluster_id")
+        if isinstance(eng_cluster, str) and str(eng_cluster).isdigit():
+            eng_cluster = int(eng_cluster)
+        elif eng_cluster is not None:
+            try:
+                eng_cluster = int(eng_cluster)
+            except (TypeError, ValueError):
+                eng_cluster = None
 
         # AI Extraction
         ai_slots: dict[str, str] = {}
@@ -356,8 +357,7 @@ def load_empirical_cohort(
             matched_cat = _extract_via_gazetteer(text, ctx, "category")
         if matched_cat:
             ai_slots["category"] = matched_cat
-        elif human_slots.get("category"):
-            ai_slots["category"] = human_slots["category"]
+        # F-009: do not copy human/ground-truth category into the AI prediction.
 
         # AI Kill Switch
         matched_term = _check_kill_switch(text, ctx)
@@ -371,9 +371,9 @@ def load_empirical_cohort(
         else:
             ai_sev = "Medium"
 
-        # AI Cluster
-        ai_cat = ai_slots.get("category", category)
-        ai_cluster_id = _CATEGORY_CLUSTERS.get(ai_cat, eng_cluster)
+        # AI Cluster — from extracted category only; never the engineer label.
+        ai_cat = ai_slots.get("category") or ""
+        ai_cluster_id = _CATEGORY_CLUSTERS.get(ai_cat) if ai_cat else None
         other_clusters = [c for c in all_cluster_ids if c != ai_cluster_id]
         ai_top_3 = [ai_cluster_id] + other_clusters[:2]
 
@@ -489,6 +489,11 @@ def run_shadow_pilot(
     input_path: str | None = None,
 ) -> dict[str, Any]:
     """Run shadow pilot evaluation and write JSON report to disk."""
+    if mode == "live" and not input_path:
+        raise ValueError(
+            "--mode=live requires --input with labeled contacts; "
+            "refusing Monte Carlo as live evidence"
+        )
     if input_path:
         contacts = load_empirical_cohort(input_path, pack_id=pack_id, sample_size=sample_size)
     else:

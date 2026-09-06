@@ -82,7 +82,7 @@ def evaluate_pairs(
         "git_sha": _git_sha(),
         "limitations": [
             "pairs_v1 is a coding-agent development fixture and is not an acceptance gate.",
-            "Human labels with provenance, κ ≥ 0.65, and quota are required before cutover.",
+            "Human labels with provenance, κ ≥ 0.70, and quota are required before cutover.",
             "Do not treat Macro-F1 as available: no failure-mode ground truth ships.",
             "canonical_identity is not used as a positive-pair signal.",
         ],

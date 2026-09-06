@@ -36,7 +36,7 @@ def _make_supervisor_session(subject: str = "supervisor_alice") -> str:
     """Mint an authenticated supervisor session token for HITL drills."""
     body = {"sub": subject, "role": "supervisor", "exp": int(time.time()) + 3600}
     raw = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()
     return f"{raw}|{sig}"
 
 

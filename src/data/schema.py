@@ -609,7 +609,7 @@ CREATE TABLE IF NOT EXISTS records (
     embedding          FLOAT[],                    -- hash-era bag-of-hash vector (blake2b-512-v1); not semantic
     entity_key         VARCHAR,                    -- canonical cross-source join key (declared in mapping.yaml)
     provenance         VARCHAR NOT NULL DEFAULT 'observed'
-    -- 'observed' = real-world record; 'fixture' = demo seed; 'computed' = derived
+    -- observed | fixture | computed | inferred | legacy
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_received ON records(received_at);

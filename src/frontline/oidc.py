@@ -253,13 +253,29 @@ def pop_state(state: str) -> dict[str, Any] | None:
         _ensure(con)
         row = con.execute(
             """
-            SELECT state, nonce, next_url, used, code_verifier
+            SELECT state, nonce, next_url, used, code_verifier, created_at
             FROM oidc_auth_state WHERE state = ?
             """,
             [state],
         ).fetchone()
         if not row or row[3]:
             return None
+        created = row[5]
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            if created is not None:
+                if isinstance(created, str):
+                    created_dt = datetime.fromisoformat(created)
+                else:
+                    created_dt = created
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - created_dt > timedelta(minutes=10):
+                    con.execute("UPDATE oidc_auth_state SET used = TRUE WHERE state = ?", [state])
+                    return None
+        except Exception:
+            pass
         con.execute("UPDATE oidc_auth_state SET used = TRUE WHERE state = ?", [state])
         return {
             "state": row[0],
@@ -300,15 +316,24 @@ def verify_id_token(
         raise ValueError("id_token_iss")
     if payload.get("aud") != audience:
         raise ValueError("id_token_aud")
+    now_i = int(now if now is not None else time.time())
     exp = int(payload.get("exp") or 0)
-    if exp < int(now if now is not None else time.time()):
+    if exp <= now_i:
         raise ValueError("id_token_exp")
+    nbf = payload.get("nbf")
+    if nbf is not None and int(nbf) > now_i:
+        raise ValueError("id_token_nbf")
+    iat = payload.get("iat")
+    if iat is not None and int(iat) > now_i + 60:
+        raise ValueError("id_token_iat")
     if nonce and payload.get("nonce") != nonce:
         raise ValueError("id_token_nonce")
 
     keys = (jwks or _load_jwks()).get("keys") or []
     kid = header.get("kid")
-    chosen = next((k for k in keys if not kid or k.get("kid") == kid), None)
+    if not kid:
+        raise ValueError("id_token_kid")
+    chosen = next((k for k in keys if k.get("kid") == kid), None)
     if not chosen:
         raise ValueError("id_token_kid")
     _verify_rs256(parts[0], parts[1], parts[2], chosen)

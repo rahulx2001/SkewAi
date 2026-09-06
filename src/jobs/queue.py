@@ -45,6 +45,7 @@ ALLOWED_JOB_TYPES = frozenset(
         "embedding_backfill",
         "rebuild_cluster_build",
         "erasure_drill",
+        "export_audit_regressions",
     }
 )
 
@@ -384,6 +385,10 @@ def _default_handler(jtype: str, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("weekly"):
             return maybe_run_weekly_drill() or {"ok": True, "skipped": True, "reason": "not_due"}
         return run_erasure_drill()
+    if jtype == "export_audit_regressions":
+        from src.frontline.validation_queue import export_audit_regressions
+
+        return export_audit_regressions(since_days=int(payload.get("since_days") or 7))
     # Unknown types must not echo arbitrary payloads (allowlist gate on enqueue).
     raise ValueError(f"no handler for job_type: {jtype!r}")
 

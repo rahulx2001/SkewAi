@@ -60,7 +60,7 @@ async def early_warning(window_days: int = 7, include_simulated: bool = True) ->
     """Clusters re-scored with live-contact counts joined to backtest lead-time stats."""
 
     def _load() -> dict[str, Any]:
-        risk = live_risk(window_days=window_days)
+        risk = live_risk(window_days=window_days, include_simulated=include_simulated)
         funnel = case_funnel(window_days=window_days)
         if not include_simulated:
             with ops_con(read_only=True) as con:
@@ -73,6 +73,7 @@ async def early_warning(window_days: int = 7, include_simulated: bool = True) ->
                     [str(window_days)],
                 ).fetchone()
                 funnel["simulated_count"] = row[0] if row else 0
+        funnel["include_simulated"] = bool(include_simulated)
         return {"live_risk": risk, "funnel": funnel}
 
     return await ops_in_thread(_load)
@@ -1057,10 +1058,16 @@ async def sentiment_disagree(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/clusters/rebuild")
-async def rebuild_clusters_api(pack_id: str = "automotive_nhtsa", k: int = 5) -> dict[str, Any]:
+async def rebuild_clusters_api(
+    pack_id: str = "automotive_nhtsa",
+    k: int = 5,
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
     from src.ml_runtime.clustering import rebuild_clusters
 
-    return rebuild_clusters(pack_id, k=k)
+    require_perm(role, "pack:edit")
+    k = max(2, min(int(k or 5), 20))
+    return await ops_in_thread(lambda: rebuild_clusters(pack_id, k=k))
 
 
 @router.get(

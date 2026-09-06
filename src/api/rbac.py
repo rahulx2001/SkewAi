@@ -205,7 +205,7 @@ def issue_session(
     if extra:
         body.update(extra)
     raw = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()
     token = f"{raw}|{sig}"
     res = {"token": token, "role": requested, "subject": subject, "exp": exp}
     if extra:
@@ -219,7 +219,7 @@ def issue_idp_session(subject: str, *, ttl_s: int = 3600) -> dict[str, Any]:
     exp = int(time.time()) + max(60, int(ttl_s))
     body = {"sub": name, "role": "agent", "exp": exp, "idp": "oidc"}
     raw = json.dumps(body, separators=(",", ":"), sort_keys=True)
-    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()
     token = f"{raw}|{sig}"
     return {"token": token, "role": "agent", "subject": name, "exp": exp}
 
@@ -228,7 +228,7 @@ def verify_session(token: str) -> dict[str, Any]:
     if "|" not in token:
         raise HTTPException(status_code=401, detail="invalid session token")
     raw, sig = token.rsplit("|", 1)
-    expect = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()[:32]
+    expect = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expect, sig):
         raise HTTPException(status_code=401, detail="bad session signature")
     body = json.loads(raw)
@@ -316,6 +316,12 @@ def require_perm(role: str, perm: str, *, open_mode_ok: bool = False) -> None:
     operator is always ``agent``). Takeover is never skipped — seizing a live
     customer call is gated even on a laptop.
     """
+    _never_open = frozenset({
+        "dsr:export", "dsr:delete", "admin:keys", "admin:cross_tenant",
+        "deploy:activate", "marketplace:install",
+    })
+    if open_mode_ok and perm in _never_open:
+        open_mode_ok = False
     if open_mode_ok and _is_open_mode():
         return
     grants = PERMS.get(role, frozenset())

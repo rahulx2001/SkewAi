@@ -87,7 +87,12 @@ def agent_performance(window_days: int = 1) -> list[dict[str, Any]]:
 
 # ── 3. live_risk ─────────────────────────────────────────────────────────────
 
-def live_risk(window_days: int = 7, *, as_of: str | None = None) -> list[dict[str, Any]]:
+def live_risk(
+    window_days: int = 7,
+    *,
+    as_of: str | None = None,
+    include_simulated: bool = False,
+) -> list[dict[str, Any]]:
     """Cases grouped by matched cluster, joined to weekly anomalies + backtest.
 
     Surfaces clusters that are heating up right now, with the historical
@@ -99,7 +104,12 @@ def live_risk(window_days: int = 7, *, as_of: str | None = None) -> list[dict[st
     never returned for an unrelated cluster. ``as_of`` (ISO week or full
     timestamp) caps the series for reproducible historical reads.
     """
-    sql = """
+    kind_sql = (
+        "1=1"
+        if include_simulated
+        else "COALESCE(c.case_kind, 'customer') = 'customer'"
+    )
+    sql = f"""
     SELECT
         c.cluster_match_id AS cluster_id,
         c.pack_id,
@@ -109,7 +119,7 @@ def live_risk(window_days: int = 7, *, as_of: str | None = None) -> list[dict[st
     FROM cases c
     WHERE c.cluster_match_id IS NOT NULL
       AND c.created_at >= now() - INTERVAL (? || ' days')
-      AND COALESCE(c.case_kind, 'customer') = 'customer'
+      AND ({kind_sql})
     GROUP BY c.cluster_match_id, c.pack_id
     ORDER BY live_case_count DESC
     """
@@ -260,6 +270,12 @@ def live_risk(window_days: int = 7, *, as_of: str | None = None) -> list[dict[st
         cl["trend_scope"] = scope
         cl["trend_entity_2"] = cent
         cl["weekly_trend"] = (trend or [])[:8]
+        n = float(cl.get("live_case_count") or 0)
+        crit = float(cl.get("critical_count") or 0)
+        cl["live_risk_score"] = round(
+            min(1.0, (n / 20.0) * 0.6 + (crit / max(n, 1.0)) * 0.4),
+            4,
+        )
     return clusters
 
 
