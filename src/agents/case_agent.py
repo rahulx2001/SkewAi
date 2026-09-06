@@ -140,13 +140,20 @@ class CaseAgent(Agent):
             evidence_ids=evidence_ids,
             case_id=case_id,
         )
+        desc_plain = (ctx.slots.get("description") or "")[:500]
+        try:
+            from src.security.pii import encrypt_subject_text
+
+            desc_stored = encrypt_subject_text(ctx.interaction_id, desc_plain)
+        except Exception:
+            desc_stored = desc_plain
         insert_args = [
             case_id,
             ctx.interaction_id,
             ctx.pack.id,
             _now(),
             ctx.slots.get("category"),
-            (ctx.slots.get("description") or "")[:500],
+            desc_stored,
             _now(),
             ctx.severity,
             ctx.severity_source,

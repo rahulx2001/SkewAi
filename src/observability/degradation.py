@@ -83,8 +83,8 @@ class DegradationLadder:
                 "degradation_ladder_step",
                 extra={
                     "subsystem": self.subsystem,
-                    "level": next_level,
-                    "name": target.name,
+                    "ladder_level": next_level,
+                    "level_name": target.name,
                     "reason": reason,
                 },
             )
@@ -224,6 +224,16 @@ def init_default_ladders() -> None:
         register_ladder(builder())
 
 
+def step_down(subsystem: str, *, reason: str) -> DegradationLevel | None:
+    """Move a named ladder one rung. No-op if the ladder is unknown."""
+    if not _REGISTRY:
+        init_default_ladders()
+    ladder = get_ladder(subsystem)
+    if ladder is None:
+        return None
+    return ladder.degrade(reason=reason)
+
+
 __all__ = [
     "DegradationLevel",
     "DegradationLadder",
@@ -237,4 +247,5 @@ __all__ = [
     "all_ladders_status",
     "reset_all_ladders",
     "init_default_ladders",
+    "step_down",
 ]

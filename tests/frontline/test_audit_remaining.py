@@ -131,6 +131,91 @@ def test_f036_twiml_escapes_xml():
     assert "<sip:evil>" not in xml
 
 
+def test_f008_case_description_encrypt_decrypt(reset_ops_db):
+    from src.frontline.ops import get_case_row
+    from src.data.warehouse import ops_con
+    from src.security.pii import encrypt_subject_text
+
+    SubjectKeyStore.clear()
+    iid = "int_case_" + new_ulid()[:10]
+    cid = "case_" + new_ulid()[:10]
+    now = datetime.now(timezone.utc)
+    with ops_con() as con:
+        con.execute(
+            """
+            INSERT INTO interactions
+            (interaction_id, pack_id, pack_version, started_at, channel, status)
+            VALUES (?, 'automotive_nhtsa', 't', ?, 'web_text', 'completed')
+            """,
+            [iid, now],
+        )
+        stored = encrypt_subject_text(iid, "Caller 555-0199: brakes grind on the CR-V")
+        con.execute(
+            """
+            INSERT INTO cases (
+                case_id, interaction_id, pack_id, created_at, category,
+                description_summary, onset, severity, severity_source, priority,
+                safety_flags, status
+            ) VALUES (?, ?, 'automotive_nhtsa', ?, 'SERVICE BRAKES', ?, ?,
+                      'Medium', 'rules', 2, '{}', 'open')
+            """,
+            [cid, iid, now, stored, now],
+        )
+    with ops_con(read_only=True) as con:
+        raw = con.execute(
+            "SELECT description_summary FROM cases WHERE case_id = ?", [cid]
+        ).fetchone()[0]
+    assert str(raw).startswith("enc:v1:")
+    assert "555-0199" not in str(raw)
+    row = get_case_row(cid)
+    assert "555-0199" in (row or {}).get("description_summary", "")
+    from src.frontline.dsr import export_interaction
+
+    exported = export_interaction(iid)
+    assert "555-0199" in (exported["cases"][0].get("description_summary") or "")
+
+
+def test_f026_rebuild_does_not_alter_records():
+    src = open("src/ml_runtime/clustering.py", encoding="utf-8").read()
+    assert "ALTER TABLE records ADD COLUMN embedding" not in src
+    wh = open("src/data/warehouse.py", encoding="utf-8").read()
+    assert "ALTER TABLE records ADD COLUMN embedding FLOAT[]" in wh
+
+
+def test_f048_degradation_ladder_is_wired():
+    from src.observability.degradation import init_default_ladders, reset_all_ladders, step_down, all_ladders_status
+
+    reset_all_ladders()
+    init_default_ladders()
+    step_down("merkle_anchor", reason="wal_fallback")
+    by_name = {s["subsystem"]: s for s in all_ladders_status()}
+    assert by_name["merkle_anchor"]["current_level"] >= 1
+
+
+def test_f012_worker_tick_runs(reset_ops_db):
+    from src.jobs.worker import worker_tick
+
+    out = worker_tick(run_fairness=True)
+    assert "job" in out
+    assert "fairness" in out
+
+
+def test_f015_health_summary_runs_fairness(reset_ops_db):
+    from src.observability.health_checks import health_summary
+
+    summary = health_summary()
+    names = [c["name"] for c in summary["checks"]]
+    assert "fairness_circuit_breaker" in names
+    assert "degradation_ladders" in summary
+
+
+def test_f029_dashboard_renders_trend_scope_and_simulated_opt_out():
+    src = open("dashboard/routes/EarlyWarningBoard.jsx", encoding="utf-8").read()
+    assert "include_simulated" in src
+    assert "trend_scope" in src
+    assert "Include simulated" in src
+
+
 def test_f040_session_sig_is_full_sha256():
     from src.api.rbac import issue_session, verify_session
 

@@ -164,10 +164,6 @@ def upsert_records(pack_id: str, records: Iterable[dict[str, Any]]) -> int:
     count = 0
     with domain_con(pack_id, read_only=False) as con:
         apply_domain_schema(con)
-        try:
-            con.execute("ALTER TABLE records ADD COLUMN embedding FLOAT[]")
-        except Exception:
-            pass
         for rec in records:
             emb = embed_text(rec["text"])
             con.execute(

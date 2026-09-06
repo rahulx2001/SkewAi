@@ -68,6 +68,9 @@ def get_case_status(case_id: str) -> dict[str, Any] | None:
             "followup_draft",
         ]
         d = dict(zip(cols, row))
+        from src.security.pii import decrypt_case_row
+
+        d = decrypt_case_row(d) or d
         inv = None
         if d.get("investigation_id"):
             inv_row = con.execute(

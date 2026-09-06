@@ -120,14 +120,17 @@ def list_queue() -> list[dict[str, Any]]:
         except Exception:
             low = []
 
+    from src.security.pii import reveal_subject_text
+
     for case_id, iid, status, cat, desc, sev in cases:
+        desc_plain = reveal_subject_text(str(iid), desc)
         aid = _action_for_case(str(case_id), str(iid))
         items.append(
             {
                 "queue_kind": "needs_review",
                 "ref_id": str(case_id),
                 "interaction_id": str(iid),
-                "summary": desc or cat or case_id,
+                "summary": desc_plain or cat or case_id,
                 "severity": sev,
                 "status": status,
                 "span_evidence": _evidence_payload(aid),

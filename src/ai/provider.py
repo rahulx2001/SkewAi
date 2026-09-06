@@ -249,6 +249,12 @@ def narrate(
             reason="ok",
         )
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, KeyError, ValueError, OSError) as e:
+        try:
+            from src.observability.degradation import step_down
+
+            step_down("llm_narration", reason=f"llm_error:{type(e).__name__}")
+        except Exception:
+            pass
         return NarrationResult(
             text=fallback,
             ok=False,

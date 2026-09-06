@@ -168,9 +168,6 @@ def verify_chain(
         actual = row.get("row_hash") or ""
 
         if v == 1:
-            if row.get("erased"):
-                prev = actual or prev
-                continue
             expected = compute_row_hash(row, expected_prev, version=1)
             if actual != expected:
                 return {

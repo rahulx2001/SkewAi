@@ -265,6 +265,7 @@ def apply_domain_schema(con) -> None:
         "ALTER TABLE weekly_anomalies ADD COLUMN method VARCHAR",
         "ALTER TABLE records ADD COLUMN entity_key VARCHAR",
         "ALTER TABLE records ADD COLUMN provenance VARCHAR",
+        "ALTER TABLE records ADD COLUMN embedding FLOAT[]",
         "ALTER TABLE cluster_lineage ADD COLUMN correspondence_kind VARCHAR",
     ):
         try:

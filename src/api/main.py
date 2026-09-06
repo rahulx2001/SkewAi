@@ -80,6 +80,12 @@ async def _lifespan(app: FastAPI):
     from src.ml_runtime.embedding_runtime import validate_startup_config
 
     validate_startup_config()
+    try:
+        from src.observability.degradation import init_default_ladders
+
+        init_default_ladders()
+    except Exception:
+        pass
     # Production-like: refuse to serve if pack/gazetteer/DB/secrets are dead.
     # Local tests and demos skip this; override with FRONTLINE_READINESS_SKIP_STARTUP=1.
     if is_production_like() and os.getenv(
@@ -138,25 +144,27 @@ async def _lifespan(app: FastAPI):
     except Exception:
         pass
     worker_task = None
-    if not os.getenv("FRONTLINE_TEST_ISOLATION"):
+    _inline_off = os.getenv("FRONTLINE_DISABLE_INLINE_WORKER", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if not os.getenv("FRONTLINE_TEST_ISOLATION") and not _inline_off:
         try:
-            from src.jobs.queue import run_next as _run_next
+            from src.jobs.worker import worker_tick as _worker_tick
 
             import asyncio as _asyncio
 
             async def _job_worker() -> None:
+                last_fairness = 0.0
                 while True:
                     await _asyncio.sleep(5)
+                    now = _asyncio.get_event_loop().time()
+                    due = (now - last_fairness) >= 60.0
                     try:
-                        await _asyncio.to_thread(_run_next)
+                        await _asyncio.to_thread(_worker_tick, run_fairness=due)
                     except Exception:
                         pass
-                    try:
-                        from src.compliance.erasure_drill import maybe_run_weekly_drill
-
-                        await _asyncio.to_thread(maybe_run_weekly_drill)
-                    except Exception:
-                        pass
+                    if due:
+                        last_fairness = now
 
             worker_task = _asyncio.create_task(_job_worker())
         except Exception:

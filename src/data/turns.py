@@ -6,6 +6,7 @@ from typing import Any
 
 from src.data.timeutil import to_naive_utc, utc_now
 from src.data.warehouse import ops_con
+from src.security.pii import ERASED_TEXT, reveal_subject_text
 
 
 def persist_turn(interaction_id: str, turn: dict[str, Any]) -> None:
@@ -50,26 +51,12 @@ def persist_turn(interaction_id: str, turn: dict[str, Any]) -> None:
         )
 
 
-ERASED_TURN = "[ERASED]"
+ERASED_TURN = ERASED_TEXT
 
 
 def reveal_turn_text(interaction_id: str, text: str | None) -> str:
-    """Decrypt an at-rest turn payload for display / audit / DSR.
-
-    Plaintext rows (legacy, agent, supervisor) pass through. Shredded DEKs
-    become ``[ERASED]`` so callers never see ciphertext.
-    """
-    raw = text or ""
-    if not raw.startswith("enc:v1:"):
-        return raw
-    try:
-        from src.security.pii import decrypt_subject_pii
-
-        return decrypt_subject_pii(interaction_id, raw)
-    except KeyError:
-        return ERASED_TURN
-    except Exception:
-        return ERASED_TURN
+    """Decrypt an at-rest turn payload for display / audit / DSR."""
+    return reveal_subject_text(interaction_id, text)
 
 
 def decrypt_turn_rows(interaction_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

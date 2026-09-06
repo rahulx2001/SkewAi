@@ -81,6 +81,12 @@ def record_multi_issues(
             case_id = issue.get("case_id")
             if create_extra_cases and seq > 0 and not case_id:
                 case_id = f"case_{new_ulid()}_{seq}"
+                try:
+                    from src.security.pii import encrypt_subject_text
+
+                    desc_stored = encrypt_subject_text(interaction_id, desc[:500])
+                except Exception:
+                    desc_stored = desc[:500]
                 con.execute(
                     """
                     INSERT INTO cases (
@@ -98,7 +104,7 @@ def record_multi_issues(
                         pack_id,
                         now,
                         issue.get("category"),
-                        desc[:500],
+                        desc_stored,
                         now,
                         issue.get("severity") or "Medium",
                         int(issue.get("priority") or 2),

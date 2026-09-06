@@ -263,3 +263,49 @@ def test_legacy_rows_still_verify():
     chain = [row0, row1, row2]
     res = verify_chain(chain, allow_partial=True)
     assert res["ok"] is True
+
+
+def test_v1_erased_cannot_hide_content_tamper():
+    """F-003 leftover: erased v1 rows still have their current content hashed."""
+    from src.ledger.chain import compute_row_hash, verify_chain
+
+    row0 = {
+        "action_id": "act_tamper_0",
+        "interaction_id": "int_tamper_v1",
+        "case_id": None,
+        "agent": "orchestrator",
+        "action_type": "state_transition",
+        "input_summary": "in_0",
+        "output_summary": "out_0",
+        "evidence_ids": [],
+        "claims": [],
+        "ok": True,
+        "error": None,
+        "duration_ms": 5,
+        "ts": "2026-01-01T00:00:00",
+        "prev_hash": GENESIS,
+        "hash_version": 1,
+    }
+    row0["row_hash"] = compute_row_hash(row0, GENESIS, version=1)
+    row1 = {
+        "action_id": "act_tamper_1",
+        "interaction_id": "int_tamper_v1",
+        "case_id": None,
+        "agent": "orchestrator",
+        "action_type": "state_transition",
+        "input_summary": "secret original",
+        "output_summary": "out_1",
+        "evidence_ids": [],
+        "claims": [],
+        "ok": True,
+        "error": None,
+        "duration_ms": 5,
+        "ts": "2026-01-01T00:00:01",
+        "prev_hash": row0["row_hash"],
+        "hash_version": 1,
+    }
+    row1["row_hash"] = compute_row_hash(row1, row0["row_hash"], version=1)
+    row1["erased"] = True
+    row1["input_summary"] = "attacker rewrite"
+    res = verify_chain([row0, row1], allow_partial=True)
+    assert res["ok"] is False

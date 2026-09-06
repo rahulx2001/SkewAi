@@ -373,6 +373,12 @@ def record_action(action: AgentAction, *, on_degraded=None) -> str:
             raise
         _wal_append(action, e)
         _mark_degraded_ledger(action.interaction_id)
+        try:
+            from src.observability.degradation import step_down
+
+            step_down("merkle_anchor", reason="wal_fallback")
+        except Exception:
+            pass
         _note_degraded(
             "wal_fallback",
             action_id=action.action_id,

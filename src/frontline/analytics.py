@@ -625,7 +625,7 @@ def bias_fairness_report(
     with ops_con(read_only=True) as con:
         try:
             sql = """
-                SELECT COALESCE(channel, 'unknown') AS grp,
+                SELECT COALESCE(pack_id, 'unknown') || '/' || COALESCE(channel, 'unknown') AS grp,
                        COUNT(*) AS n,
                        AVG(CASE WHEN COALESCE(last_frustration, peak_frustration, 0) >= 0.65
                             THEN 1.0 ELSE 0.0 END) AS handoff_rate,
@@ -661,7 +661,13 @@ def bias_fairness_report(
         "handoff_rate_disparity": round(disparity, 3),
         "flag": disparity >= 0.25,
         "window_days": window_days,
-        "note": "Pilot fairness monitor on channel proxy (last_frustration); not a legal compliance certification.",
+        "grouping": "pack_id/channel",
+        "proxy_kind": "service_channel_not_demographic",
+        "note": (
+            "Pilot fairness monitor groups pack_id/channel using last_frustration "
+            "as a handoff proxy. No region or demographic fields exist on interactions; "
+            "this is not a legal disparate-impact certification."
+        ),
     }
 
 

@@ -118,6 +118,10 @@ def export_interaction(interaction_id: str, *, redact_pii: bool = False) -> dict
                     from src.data.turns import decrypt_turn_rows
 
                     rows = decrypt_turn_rows(iid, rows)
+                if name == "cases":
+                    from src.security.pii import decrypt_case_rows
+
+                    rows = decrypt_case_rows(rows)
                 out[name] = rows if name != "interaction" else (rows[0] if rows else None)
             except Exception as e:
                 out[name] = {"error": f"{type(e).__name__}:{e}"}
@@ -268,29 +272,41 @@ def tombstone_interaction(interaction_id: str) -> dict[str, Any]:
                 )
         except Exception:
             pass
-        for table, col, idcol in (
-            ("interaction_turns", "text", "interaction_id"),
-            ("agent_actions", "input_summary", "interaction_id"),
-        ):
-            try:
-                from src.security.sql_ident import safe_column, safe_table
+        try:
+            from src.security.sql_ident import safe_column, safe_table
 
-                t = safe_table(table)
-                c = safe_column(col)
-                n = con.execute(
-                    f"SELECT COUNT(*) FROM {t} WHERE {idcol} = ?", [iid]
-                ).fetchone()[0]
-                con.execute(
-                    f"UPDATE {t} SET {c} = ?, erased = TRUE WHERE {idcol} = ?",
-                    [stamp, iid],
-                )
-                out[f"{table}.tombstoned"] = int(n)
-            except Exception:
-                out[f"{table}.tombstoned"] = -1
+            t = safe_table("interaction_turns")
+            c = safe_column("text")
+            n = con.execute(
+                f"SELECT COUNT(*) FROM {t} WHERE interaction_id = ?", [iid]
+            ).fetchone()[0]
+            con.execute(
+                f"UPDATE {t} SET {c} = ?, erased = TRUE WHERE interaction_id = ?",
+                [stamp, iid],
+            )
+            out["interaction_turns.tombstoned"] = int(n)
+        except Exception:
+            out["interaction_turns.tombstoned"] = -1
+        # v2+ only: v1 row_hash covers current summaries, so tombstoning v1
+        # actions would fail verify_chain. New writes are hash_version=2.
         try:
             n = con.execute(
-                "UPDATE agent_actions SET output_summary = ?, erased = TRUE"
-                " WHERE interaction_id = ?",
+                "SELECT COUNT(*) FROM agent_actions WHERE interaction_id = ? "
+                "AND COALESCE(hash_version, 1) >= 2",
+                [iid],
+            ).fetchone()[0]
+            con.execute(
+                "UPDATE agent_actions SET input_summary = ?, erased = TRUE "
+                "WHERE interaction_id = ? AND COALESCE(hash_version, 1) >= 2",
+                [stamp, iid],
+            )
+            out["agent_actions.tombstoned"] = int(n)
+        except Exception:
+            out["agent_actions.tombstoned"] = -1
+        try:
+            con.execute(
+                "UPDATE agent_actions SET output_summary = ?, erased = TRUE "
+                "WHERE interaction_id = ? AND COALESCE(hash_version, 1) >= 2",
                 [stamp, iid],
             )
             out["agent_actions.output_tombstoned"] = "ok"
@@ -319,6 +335,17 @@ def tombstone_interaction(interaction_id: str) -> dict[str, Any]:
             out["interaction.slots_cleared"] = 1
         except Exception:
             out["interaction.slots_cleared"] = -1
+        try:
+            n = con.execute(
+                "SELECT COUNT(*) FROM cases WHERE interaction_id = ?", [iid]
+            ).fetchone()[0]
+            con.execute(
+                "UPDATE cases SET description_summary = ? WHERE interaction_id = ?",
+                [stamp, iid],
+            )
+            out["cases.description_tombstoned"] = int(n)
+        except Exception:
+            out["cases.description_tombstoned"] = -1
     try:
         from src.security.audit_log import security_event
 

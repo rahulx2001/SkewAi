@@ -236,10 +236,8 @@ def run_all_checks(*, pack_id: str | None = None) -> list[HealthSignal]:
         lambda: check_crypto_key_store_size(),
     ]
     if pack_id:
-        checks.extend([
-            lambda: check_anomaly_freshness(pack_id),
-            lambda: check_fairness(pack_id=pack_id),
-        ])
+        checks.append(lambda: check_anomaly_freshness(pack_id))
+    checks.append(lambda: check_fairness(pack_id=pack_id))
     checks.append(lambda: check_novel_candidate_backlog())
     checks.append(check_embedding_runtime)
     
@@ -277,6 +275,15 @@ def health_summary(*, pack_id: str | None = None) -> dict[str, Any]:
             break
         if s.status == 'degraded':
             worst = 'degraded'
+    ladders: list[dict[str, Any]] = []
+    try:
+        from src.observability.degradation import all_ladders_status, init_default_ladders
+
+        if not all_ladders_status():
+            init_default_ladders()
+        ladders = all_ladders_status()
+    except Exception:
+        ladders = []
     return {
         'overall': worst,
         'checks': [
@@ -289,6 +296,7 @@ def health_summary(*, pack_id: str | None = None) -> dict[str, Any]:
             }
             for s in signals
         ],
+        'degradation_ladders': ladders,
     }
 
 

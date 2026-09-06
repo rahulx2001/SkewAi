@@ -218,6 +218,9 @@ def build_case_payload_from_db(case_id: str) -> dict[str, Any] | None:
             return None
         cols = [d[0] for d in cur.description]
         c = dict(zip(cols, row))
+    from src.security.pii import decrypt_case_row
+
+    c = decrypt_case_row(c) or c
     return build_payload(
         "manual_export",
         case_id=c.get("case_id"),

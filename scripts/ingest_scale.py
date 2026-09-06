@@ -66,11 +66,6 @@ def build_scaled(pack_id: str, n: int, *, force: bool = False) -> Path:
     records = _synth_records(base, n)
     with domain_con(pack_id, read_only=False) as con:
         apply_domain_schema(con)
-        # embedding column for older DBs
-        try:
-            con.execute("ALTER TABLE records ADD COLUMN embedding FLOAT[]")
-        except Exception:
-            pass
 
         for r in records:
             emb = embed_text(r["text"])

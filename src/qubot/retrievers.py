@@ -56,6 +56,9 @@ def contact_audit(interaction_id: str) -> dict[str, Any]:
             [interaction_id],
         )
         case = _rows(con, "SELECT * FROM cases WHERE interaction_id = ?", [interaction_id])
+        from src.security.pii import decrypt_case_rows
+
+        case = decrypt_case_rows(case)
     if not header:
         raise FileNotFoundError(f"interaction not found: {interaction_id}")
     return {

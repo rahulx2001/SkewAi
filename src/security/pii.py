@@ -245,6 +245,44 @@ def decrypt_subject_pii(subject_id: str, token: str) -> str:
         raise
 
 
+ERASED_TEXT = "[ERASED]"
+
+
+def encrypt_subject_text(subject_id: str, plaintext: str) -> str:
+    """Encrypt free text; on failure return the original so persist cannot stall."""
+    if not plaintext:
+        return plaintext
+    try:
+        return encrypt_subject_pii(subject_id, plaintext)
+    except Exception:
+        return plaintext
+
+
+def reveal_subject_text(subject_id: str, text: str | None) -> str:
+    """Decrypt an at-rest enc:v1: payload. Plaintext passes through. Shredded → [ERASED]."""
+    raw = text or ""
+    if not raw.startswith("enc:v1:"):
+        return raw
+    try:
+        return decrypt_subject_pii(subject_id, raw)
+    except Exception:
+        return ERASED_TEXT
+
+
+def decrypt_case_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return row
+    item = dict(row)
+    iid = str(item.get("interaction_id") or "")
+    if iid and "description_summary" in item:
+        item["description_summary"] = reveal_subject_text(iid, item.get("description_summary"))
+    return item
+
+
+def decrypt_case_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [decrypt_case_row(r) or r for r in rows]
+
+
 __all__ = [
     "redact_pii",
     "find_pii",
@@ -254,4 +292,9 @@ __all__ = [
     "SubjectKeyStore",
     "encrypt_subject_pii",
     "decrypt_subject_pii",
+    "encrypt_subject_text",
+    "reveal_subject_text",
+    "decrypt_case_row",
+    "decrypt_case_rows",
+    "ERASED_TEXT",
 ]

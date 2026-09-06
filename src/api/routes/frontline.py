@@ -291,7 +291,9 @@ async def list_cases(
                         except Exception:
                             pass
                 out.append(json_safe(d))
-            return out
+            from src.security.pii import decrypt_case_rows
+
+            return decrypt_case_rows(out)
 
     # P1: offload sync DuckDB from the event loop on hot list path.
     import asyncio
@@ -356,6 +358,9 @@ async def get_case(
     if not row:
         raise HTTPException(status_code=404, detail=f"case not found: {case_id}")
     case = dict(zip(cols, row))
+    from src.security.pii import decrypt_case_row
+
+    case = decrypt_case_row(case) or case
     for k in ("safety_flags",):
         v = case.get(k)
         if isinstance(v, str):

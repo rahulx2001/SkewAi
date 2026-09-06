@@ -400,7 +400,7 @@ def test_fairness_circuit_breaker_trips_on_disparity(reset_ops_db):
                 INSERT INTO interactions
                 (interaction_id, pack_id, pack_version, started_at, channel,
                  category, status, outcome, peak_frustration)
-                VALUES (?, 'automotive_nhtsa', '1.0', ?, 'web_text', 'AIR_BAGS', 'escalated', 'escalated_safety', 0.9)
+                VALUES (?, 'automotive_nhtsa', '1.0', ?, 'voice', 'AIR_BAGS', 'escalated', 'escalated_safety', 0.9)
                 """,
                 [f"int_a_{i}", now],
             )

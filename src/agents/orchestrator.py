@@ -1728,10 +1728,6 @@ class Orchestrator:
         rid = f"FRONTLINE-{self.ctx.interaction_id}"
         with domain_con(self.ctx.pack.id, read_only=False) as con:
             apply_domain_schema(con)
-            try:
-                con.execute("ALTER TABLE records ADD COLUMN embedding FLOAT[]")
-            except Exception:
-                pass
             # 1.1: embed at close so fleet scan sees vectors immediately
             _text = (slots.get("description") or "")[:1000]
             try:
@@ -1775,6 +1771,12 @@ class Orchestrator:
             if _mode in {"shadow", "semantic"}:
                 _sem = try_semantic_embedder()
                 if _sem is None:
+                    try:
+                        from src.observability.degradation import step_down
+
+                        step_down("semantic_search", reason="embedder_unavailable")
+                    except Exception:
+                        pass
                     mark_embedding_status(
                         self.ctx.pack.id,
                         rid,

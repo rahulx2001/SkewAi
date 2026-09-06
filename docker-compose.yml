@@ -61,6 +61,31 @@ services:
     mem_limit: 1g
     cpus: 1.0
 
+  frontline-worker:
+    profiles: ["open"]
+    image: frontline-v2:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      frontline:
+        condition: service_healthy
+    environment:
+      DOMAIN_PACK: ${DOMAIN_PACK:-automotive_nhtsa}
+      FRONTLINE_ENABLED: "1"
+      FRONTLINE_API_KEY: ${FRONTLINE_API_KEY:-}
+      FRONTLINE_WORKER_INTERVAL_S: "5"
+    volumes:
+      - frontline-data-open:/app/data
+      - frontline-reports-open:/app/reports
+    entrypoint: ["python", "-m", "src.jobs.worker"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: 0.5
+
   # Hardened single-tenant profile (SOC 2 engineering baseline deploy)
   frontline-hardened:
     profiles: ["hardened"]
@@ -106,6 +131,37 @@ services:
     stop_grace_period: 30s
     mem_limit: 1g
     cpus: 1.0
+
+  frontline-hardened-worker:
+    profiles: ["hardened"]
+    image: frontline-v2:hardened
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      frontline-hardened:
+        condition: service_healthy
+    environment:
+      DOMAIN_PACK: ${DOMAIN_PACK:-automotive_nhtsa}
+      FRONTLINE_ENABLED: "1"
+      ENV: ${ENV:-production}
+      PILOT_HARDENED: "1"
+      SOC2_MODE: ${SOC2_MODE:-1}
+      FRONTLINE_AUTH_REQUIRED: "1"
+      FRONTLINE_OPEN_MODE: "0"
+      FRONTLINE_API_KEY: ${FRONTLINE_API_KEY:?Set FRONTLINE_API_KEY in .env for hardened profile}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env for hardened profile}
+      FRONTLINE_WORKER_INTERVAL_S: "5"
+    volumes:
+      - frontline-data-hardened:/app/data
+      - frontline-reports-hardened:/app/reports
+    entrypoint: ["python", "-m", "src.jobs.worker"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: 0.5
 
 volumes:
   frontline-data-open:

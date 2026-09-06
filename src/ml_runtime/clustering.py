@@ -321,10 +321,6 @@ def rebuild_clusters(pack_id: str, *, k: int = 5) -> dict[str, Any]:
     """Rebuild clusters for pack from records text/embeddings."""
     with domain_con(pack_id, read_only=False) as con:
         apply_domain_schema(con)
-        try:
-            con.execute("ALTER TABLE records ADD COLUMN embedding FLOAT[]")
-        except Exception:
-            pass
         rows = con.execute(
             """
             SELECT record_id, text, category, embedding, received_at

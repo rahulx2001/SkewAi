@@ -17,6 +17,7 @@ export default function EarlyWarningBoard() {
   const [simResult, setSimResult] = useState(null);
   const [simRunning, setSimRunning] = useState(false);
   const [metrics, setMetrics] = useState(null);
+  const [includeSimulated, setIncludeSimulated] = useState(false);
 
   async function loadMetrics() {
     try {
@@ -34,9 +35,12 @@ export default function EarlyWarningBoard() {
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch("/api/frontline/early-warning?window_days=7", {
-        headers: apiHeaders(),
-      });
+      const r = await fetch(
+        `/api/frontline/early-warning?window_days=7&include_simulated=${includeSimulated ? "true" : "false"}`,
+        {
+          headers: apiHeaders(),
+        }
+      );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       setClusters(d.live_risk || []);
@@ -74,7 +78,7 @@ export default function EarlyWarningBoard() {
     else if (tab === "investigations") loadInvestigations();
     else loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, includeSimulated]);
 
   // Composite risk: live_count × critical_count
   const sortedClusters = [...clusters].sort((a, b) => {
@@ -99,7 +103,7 @@ export default function EarlyWarningBoard() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       setSimResult(d);
-      // Refresh data after sim.
+      setIncludeSimulated(true);
       if (tab === "clusters") loadClusters();
       else loadInvestigations();
     } catch (e) {
@@ -139,6 +143,14 @@ export default function EarlyWarningBoard() {
         </div>
         <div className="page-actions">
           <span className="build-stamp">Risk board</span>
+          <label className="check-row" style={{ fontSize: 12, margin: 0 }}>
+            <input
+              type="checkbox"
+              checked={includeSimulated}
+              onChange={(e) => setIncludeSimulated(e.target.checked)}
+            />
+            Include simulated
+          </label>
           <button type="button" className="primary" onClick={() => setSimModal(true)}>
             Simulate traffic
           </button>
@@ -225,6 +237,11 @@ export default function EarlyWarningBoard() {
               </div>
             </div>
           )}
+          {funnel && funnel.include_simulated === false && funnel.simulated_count != null && (
+            <p className="faint" style={{ margin: "0 0 10px" }}>
+              {funnel.simulated_count} simulated contacts excluded from this board
+            </p>
+          )}
           {funnel && (
             <div className="funnel" aria-label="Weekly funnel">
               <div className="funnel-step"><div className="n">{funnel.started ?? 0}</div><div className="l">started</div></div>
@@ -256,6 +273,7 @@ export default function EarlyWarningBoard() {
                       <span>{c.live_case_count ?? 0} live</span>
                       <span>{c.critical_count ?? 0} critical</span>
                       <span>{c.lead_time_weeks != null ? `${c.lead_time_weeks}w lead` : "no lead time"}</span>
+                      <span>{c.trend_scope || "no trend scope"}</span>
                     </div>
                   </div>
                 );
@@ -273,6 +291,7 @@ export default function EarlyWarningBoard() {
                   <th>critical</th>
                   <th>composite risk</th>
                   <th>weekly trend</th>
+                  <th>trend scope</th>
                   <th>backtest lead-time</th>
                   <th>matched advisory</th>
                   <th>last case</th>
@@ -281,7 +300,7 @@ export default function EarlyWarningBoard() {
               <tbody>
                 {sortedClusters.length === 0 && (
                   <tr>
-                    <td colSpan={9}>
+                    <td colSpan={10}>
                       <div className="hero-empty" style={{ margin: 16, border: "none" }}>
                         <h3>No live-risk clusters</h3>
                         <p>Simulate traffic to light up this board, or wait for real contacts to cluster.</p>
@@ -308,6 +327,7 @@ export default function EarlyWarningBoard() {
                       </td>
                       <td className="mono"><strong>{composite}</strong></td>
                       <td><WeekSpark trend={c.weekly_trend} compact /></td>
+                      <td className="mono faint">{c.trend_scope || "—"}</td>
                       <td className="mono">{c.lead_time_weeks != null ? `${c.lead_time_weeks}w` : "—"}</td>
                       <td className="mono">
                         {c.matched_advisory ? (

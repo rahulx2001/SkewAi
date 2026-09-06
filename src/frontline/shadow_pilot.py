@@ -510,6 +510,7 @@ def run_shadow_pilot(
         "target_cost_usd": target_cost,
         "data_source": input_path if input_path else "synthetic_monte_carlo",
         "source_type": "empirical_ground_truth" if input_path else "offline_synthetic",
+        "synthetic_self_labels": not bool(input_path),
     }
 
     # Write output report

@@ -45,7 +45,9 @@ def get_case_row(case_id: str) -> dict[str, Any] | None:
         cols = [d[0] for d in cur.description]
         d = dict(zip(cols, row))
     _parse_json_field(d, "safety_flags")
-    return d
+    from src.security.pii import decrypt_case_row
+
+    return decrypt_case_row(d)
 
 
 def update_case(
@@ -301,6 +303,9 @@ def build_cases_csv(
         cur = con.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    from src.security.pii import decrypt_case_rows
+
+    rows = decrypt_case_rows(rows)
 
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
