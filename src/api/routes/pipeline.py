@@ -256,7 +256,7 @@ async def marketplace_install(pack_id: str, role: str = Depends(get_role)) -> di
         raise HTTPException(404, str(e)) from e
 
 
-@router.get("/usage")
+@router.get("/billing/usage")
 async def usage(tenant_id: str = "default") -> dict[str, Any]:
     from src.frontline.billing import usage_dashboard
 

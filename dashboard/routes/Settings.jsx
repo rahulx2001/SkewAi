@@ -248,6 +248,8 @@ export default function Settings() {
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="Paste pilot API key"
+            aria-label="Pilot API key"
+            autoComplete="off"
             style={{ flex: 1 }}
           />
           <button className="primary" onClick={saveApiKey}>
@@ -297,7 +299,7 @@ export default function Settings() {
                 </tr>
               </thead>
               <tbody>
-                {packs.map((p) => (
+                {packs.filter((p) => p.id && !String(p.id).startsWith("_") && !p.error).map((p) => (
                   <tr key={p.id} className={p.is_active ? "selected" : ""}>
                     <td className="mono">{p.id}</td>
                     <td>
@@ -315,7 +317,9 @@ export default function Settings() {
                       )}
                     </td>
                     <td>
-                      {p.lint_errors && p.lint_errors.length > 0 ? (
+                      {p.error ? (
+                        <span className="chip red">invalid</span>
+                      ) : p.lint_errors && p.lint_errors.length > 0 ? (
                         <span className="chip red">
                           {p.lint_errors.length} lint error(s)
                         </span>
@@ -331,6 +335,7 @@ export default function Settings() {
                           className="primary"
                           disabled={
                             switching ||
+                            Boolean(p.error) ||
                             (p.lint_errors && p.lint_errors.length > 0)
                           }
                           onClick={() => selectPack(p.id)}

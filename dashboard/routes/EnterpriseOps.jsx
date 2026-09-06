@@ -382,6 +382,7 @@ export default function EnterpriseOps() {
               onChange={(e) => setIxId(e.target.value)}
               style={{ flex: 1, minWidth: 220 }}
               title="Recent interactions"
+              aria-label="Recent interactions"
             >
               <option value="">— pick recent interaction —</option>
               {recentIx.map((x) => (
@@ -397,6 +398,7 @@ export default function EnterpriseOps() {
               value={ixId}
               onChange={(e) => setIxId(e.target.value)}
               placeholder="or paste interaction_id (int_…)"
+              aria-label="Interaction id"
               style={{ flex: 1, minWidth: 180 }}
             />
             <button className="ghost" onClick={loadRecentInteractions} disabled={loading}>
@@ -592,6 +594,7 @@ export default function EnterpriseOps() {
               value={copilotQ}
               onChange={(e) => setCopilotQ(e.target.value)}
               style={{ flex: 1 }}
+              aria-label="Copilot question"
               onKeyDown={(e) => e.key === "Enter" && askCopilot()}
             />
             <button className="primary" onClick={askCopilot} disabled={loading}>
@@ -613,7 +616,7 @@ export default function EnterpriseOps() {
                   </thead>
                   <tbody>
                     {copilotA.rows.map((row, i) => (
-                      <tr key={i}>
+                      <tr key={row.case_id || row.interaction_id || JSON.stringify(row) + i}>
                         {Object.keys(copilotA.rows[0])
                           .slice(0, 6)
                           .map((k) => (
@@ -757,7 +760,7 @@ export default function EnterpriseOps() {
               <h3 style={{ fontSize: 13 }}>Edges (sample)</h3>
               <div style={{ maxHeight: 200, overflow: "auto" }}>
                 {(graph.edges || []).slice(0, 50).map((e, i) => (
-                  <div key={i} className="mono" style={{ fontSize: 11 }}>
+                  <div key={`${e.source}-${e.rel}-${e.target}-${i}`} className="mono" style={{ fontSize: 11 }}>
                     {e.source} —{e.rel}→ {e.target}
                   </div>
                 ))}
@@ -771,9 +774,9 @@ export default function EnterpriseOps() {
         <div className="panel">
           <h2>Cross-contact entity memory</h2>
           <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <input placeholder="entity_1" value={memE1} onChange={(e) => setMemE1(e.target.value)} />
-            <input placeholder="entity_2" value={memE2} onChange={(e) => setMemE2(e.target.value)} />
-            <input placeholder="entity_3" value={memE3} onChange={(e) => setMemE3(e.target.value)} />
+            <input placeholder="entity_1" aria-label="entity_1" value={memE1} onChange={(e) => setMemE1(e.target.value)} />
+            <input placeholder="entity_2" aria-label="entity_2" value={memE2} onChange={(e) => setMemE2(e.target.value)} />
+            <input placeholder="entity_3" aria-label="entity_3" value={memE3} onChange={(e) => setMemE3(e.target.value)} />
             <button className="primary" onClick={lookupMem}>Lookup memory</button>
             <button className="ghost" onClick={loadMemories}>List</button>
           </div>
@@ -862,7 +865,7 @@ export default function EnterpriseOps() {
               {Array.isArray(scnValid.errors) && scnValid.errors.length > 0 && (
                 <ul className="plain" style={{ marginTop: 8 }}>
                   {scnValid.errors.map((e, i) => (
-                    <li key={i} className="err-text">{String(e)}</li>
+                    <li key={`${e}-${i}`} className="err-text">{String(e)}</li>
                   ))}
                 </ul>
               )}

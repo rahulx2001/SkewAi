@@ -324,21 +324,30 @@ def build_cases_csv(
     return buf.getvalue(), len(rows)
 
 
-def ops_metrics(*, window_days: int = 7) -> dict[str, Any]:
+def ops_metrics(*, window_days: int = 7, include_simulated: bool = False) -> dict[str, Any]:
     """Pilot ops snapshot for dashboard header / health-adjacent views."""
     window_days = min(max(int(window_days), 1), 90)
+    sim_ix = "" if include_simulated else " AND COALESCE(channel, '') <> 'simulated'"
+    sim_case = (
+        ""
+        if include_simulated
+        else (
+            " AND interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated')"
+        )
+    )
     with ops_con(read_only=True) as con:
         case_open = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE status = 'open'"
+            f"SELECT COUNT(*) FROM cases WHERE status = 'open'{sim_case}"
         ).fetchone()[0]
         case_pending = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE status = 'pending_followup'"
+            f"SELECT COUNT(*) FROM cases WHERE status = 'pending_followup'{sim_case}"
         ).fetchone()[0]
         case_closed = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE status = 'closed'"
+            f"SELECT COUNT(*) FROM cases WHERE status = 'closed'{sim_case}"
         ).fetchone()[0]
         case_critical = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE status != 'closed' AND severity = 'Critical'"
+            f"SELECT COUNT(*) FROM cases WHERE status != 'closed' AND severity = 'Critical'{sim_case}"
         ).fetchone()[0]
         inv_open = con.execute(
             "SELECT COUNT(*) FROM investigations WHERE status = 'open'"
@@ -347,12 +356,12 @@ def ops_metrics(*, window_days: int = 7) -> dict[str, Any]:
             "SELECT COUNT(*) FROM investigations WHERE status = 'monitoring'"
         ).fetchone()[0]
         active_ix = con.execute(
-            "SELECT COUNT(*) FROM interactions WHERE status = 'active'"
+            f"SELECT COUNT(*) FROM interactions WHERE status = 'active'{sim_ix}"
         ).fetchone()[0]
         cases_window = con.execute(
-            """
+            f"""
             SELECT COUNT(*) FROM cases
-            WHERE created_at >= now() - INTERVAL (? || ' days')
+            WHERE created_at >= now() - INTERVAL (? || ' days'){sim_case}
             """,
             [str(window_days)],
         ).fetchone()[0]

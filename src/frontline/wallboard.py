@@ -8,32 +8,46 @@ from src.data.timeutil import utc_now
 from src.data.warehouse import ops_con
 
 
-def build_wallboard(*, pack_id: str | None = None, limit_clusters: int = 5) -> dict[str, Any]:
+def build_wallboard(
+    *,
+    pack_id: str | None = None,
+    limit_clusters: int = 5,
+    include_simulated: bool = False,
+) -> dict[str, Any]:
     """Live contacts, P1/open counts, top risk clusters."""
+    sim_ix = "" if include_simulated else " AND COALESCE(channel, '') <> 'simulated'"
+    sim_case = (
+        ""
+        if include_simulated
+        else (
+            " AND interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated')"
+        )
+    )
     with ops_con(read_only=True) as con:
         active = con.execute(
-            """
-            SELECT COUNT(*) FROM interactions WHERE status = 'active'
-            """
+            f"SELECT COUNT(*) FROM interactions WHERE status = 'active'{sim_ix}"
         ).fetchone()[0]
         completed = con.execute(
-            """
-            SELECT COUNT(*) FROM interactions WHERE status IN ('completed', 'escalated')
+            f"""
+            SELECT COUNT(*) FROM interactions
+            WHERE status IN ('completed', 'escalated'){sim_ix}
             """
         ).fetchone()[0]
         open_cases = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE status IN ('open', 'pending_followup')"
+            f"SELECT COUNT(*) FROM cases WHERE status IN ('open', 'pending_followup'){sim_case}"
         ).fetchone()[0]
         p1 = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE priority = 1 AND status IN ('open', 'pending_followup')"
+            f"SELECT COUNT(*) FROM cases WHERE priority = 1 AND status IN ('open', 'pending_followup'){sim_case}"
         ).fetchone()[0]
         critical = con.execute(
-            "SELECT COUNT(*) FROM cases WHERE severity = 'Critical' AND status IN ('open', 'pending_followup')"
+            f"SELECT COUNT(*) FROM cases WHERE severity = 'Critical' AND status IN ('open', 'pending_followup'){sim_case}"
         ).fetchone()[0]
 
         # Top clusters by live case volume.
         # Severity rank via CASE — lexical MAX('Critical','Low') is wrong ('Low').
-        sql = """
+        sql = (
+            """
             SELECT cluster_match_id, pack_id, COUNT(*) AS n,
                    MAX(CASE severity
                          WHEN 'Critical' THEN 3
@@ -44,7 +58,9 @@ def build_wallboard(*, pack_id: str | None = None, limit_clusters: int = 5) -> d
             FROM cases
             WHERE cluster_match_id IS NOT NULL
               AND status IN ('open', 'pending_followup')
-        """
+            """
+            + sim_case
+        )
         params: list[Any] = []
         if pack_id:
             sql += " AND pack_id = ?"
@@ -68,10 +84,11 @@ def build_wallboard(*, pack_id: str | None = None, limit_clusters: int = 5) -> d
         ]
 
         live = con.execute(
-            """
+            f"""
             SELECT interaction_id, pack_id, status, channel, started_at, category
             FROM interactions
             WHERE status = 'active'
+            {sim_ix}
             ORDER BY started_at DESC
             LIMIT 20
             """

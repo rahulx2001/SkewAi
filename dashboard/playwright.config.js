@@ -3,13 +3,12 @@ import { defineConfig, devices } from "@playwright/test";
 /**
  * Skew AI ops console E2E.
  * Serves production /ui from FastAPI on :8000 (reuseExistingServer).
- * Auth: set E2E_API_KEY (defaults to live-harden key used in pilot).
+ * Auth: set E2E_API_KEY or FRONTLINE_API_KEY. No hardcoded fallback.
+ * Browsers: npx playwright install chromium
+ * Requires an already-running API on BASE_URL (fails if /health is down).
  */
 const BASE = process.env.BASE_URL || "http://127.0.0.1:8000";
-const API_KEY =
-  process.env.E2E_API_KEY ||
-  process.env.FRONTLINE_API_KEY ||
-  "live-harden-key-32-chars-min!!";
+const API_KEY = process.env.E2E_API_KEY || process.env.FRONTLINE_API_KEY || "";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -33,12 +32,12 @@ export default defineConfig({
     navigationTimeout: 30_000,
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  // Prefer already-running hardened API; do not spawn open-mode server by accident.
+  // Require an already-running API. Fail loudly if /health is unreachable.
   webServer: {
-    command: "echo 'reuse existing server on BASE_URL'",
+    command: `python3 -c "import urllib.request,sys; urllib.request.urlopen('${BASE}/health', timeout=3); print('health ok')" && sleep 3600`,
     url: `${BASE}/health`,
     reuseExistingServer: true,
-    timeout: 5_000,
+    timeout: 8_000,
   },
 });
 

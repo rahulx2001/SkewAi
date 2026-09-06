@@ -468,7 +468,7 @@ export default function FeatureStudio() {
                     </thead>
                     <tbody>
                       {regMatches.map((m, i) => (
-                        <tr key={i}>
+                        <tr key={`${m.advisory_id}-${m.investigation_id}-${i}`}>
                           <td className="mono">{m.advisory_id}</td>
                           <td className="mono">{m.investigation_id}</td>
                           <td className="mono">{m.lead_time_weeks ?? "—"}</td>

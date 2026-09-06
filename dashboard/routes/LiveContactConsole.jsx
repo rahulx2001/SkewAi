@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { apiHeaders, sendWsAuth, withApiKeyQuery } from "../src/apiAuth.js";
+import { apiHeaders, sendWsAuth } from "../src/apiAuth.js";
 import { SS, consumeSession } from "../src/ui/opsActions.js";
 
 const AGENT_BADGE_CLASS = {
@@ -27,6 +27,7 @@ export default function LiveContactConsole() {
   const [pack, setPack] = useState(null);
   const [wsStatus, setWsStatus] = useState("connecting");
   const [shadow, setShadow] = useState(null);
+  const [actionMsg, setActionMsg] = useState(null);
 
   const wsRef = useRef(null);
   const pollRef = useRef(null);
@@ -151,9 +152,7 @@ export default function LiveContactConsole() {
     function connect() {
       if (cancelled) return;
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const url = withApiKeyQuery(
-        `${proto}//${window.location.host}/ws/console`
-      );
+      const url = `${proto}//${window.location.host}/ws/console`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -493,7 +492,7 @@ export default function LiveContactConsole() {
             <div className="scroll-y transcript" style={{ maxHeight: 420, paddingRight: 6 }}>
               {selTurns.length === 0 && <div className="empty">Waiting for turns…</div>}
               {selTurns.map((t, i) => (
-                <div key={i} className={"turn " + t.speaker} style={{ maxWidth: "100%" }}>
+                <div key={t.turn_id || `${t.ts}-${t.speaker}-${i}`} className={"turn " + t.speaker} style={{ maxWidth: "100%" }}>
                   <div className="who">
                     {t.speaker} · {fmtTime(t.ts)}
                   </div>
@@ -508,6 +507,7 @@ export default function LiveContactConsole() {
                   <input
                     style={{ flex: 1 }}
                     placeholder="Type supervisor reply…"
+                    aria-label="Supervisor reply"
                     value={reply}
                     onChange={(e) => setReply(e.target.value)}
                     autoFocus
@@ -572,14 +572,20 @@ export default function LiveContactConsole() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await fetch(
-                        `/api/frontline/embedding-shadow/${encodeURIComponent(selected.interaction_id)}/flag`,
-                        {
-                          method: "POST",
-                          headers: { ...apiHeaders(), "Content-Type": "application/json" },
-                          body: JSON.stringify({ reviewer: "human-supervisor", comment: "shadow looks wrong" }),
-                        }
-                      );
+                      try {
+                        const r = await fetch(
+                          `/api/frontline/embedding-shadow/${encodeURIComponent(selected.interaction_id)}/flag`,
+                          {
+                            method: "POST",
+                            headers: { ...apiHeaders(), "Content-Type": "application/json" },
+                            body: JSON.stringify({ reviewer: "human-supervisor", comment: "shadow looks wrong" }),
+                          }
+                        );
+                        if (!r.ok) throw new Error(`flag failed (${r.status})`);
+                        setActionMsg("Shadow mismatch flagged.");
+                      } catch (e) {
+                        setActionMsg(String(e.message || e));
+                      }
                     }}
                   >
                     Shadow looks wrong
@@ -587,21 +593,30 @@ export default function LiveContactConsole() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await fetch("/api/frontline/sentiment-disagreements", {
-                        method: "POST",
-                        headers: { ...apiHeaders(), "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          interaction_id: selected.interaction_id,
-                          human_decision: "sentiment_wrong",
-                          system_sentiment_score: selFrustration,
-                          system_handoff_decision: selFrustration >= FRUSTRATION_THRESHOLD,
-                        }),
-                      });
+                      try {
+                        const r = await fetch("/api/frontline/sentiment-disagreements", {
+                          method: "POST",
+                          headers: { ...apiHeaders(), "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            interaction_id: selected.interaction_id,
+                            human_decision: "sentiment_wrong",
+                            system_sentiment_score: selFrustration,
+                            system_handoff_decision: selFrustration >= FRUSTRATION_THRESHOLD,
+                          }),
+                        });
+                        if (!r.ok) throw new Error(`mark failed (${r.status})`);
+                        setActionMsg("Sentiment marked wrong.");
+                      } catch (e) {
+                        setActionMsg(String(e.message || e));
+                      }
                     }}
                   >
                     Mark sentiment wrong
                   </button>
                 </div>
+                {actionMsg && (
+                  <p className="sub" style={{ marginTop: 8 }}>{actionMsg}</p>
+                )}
               </div>
             )}
 
@@ -611,8 +626,8 @@ export default function LiveContactConsole() {
                 <span className="chip teal">fr {selFrustration.toFixed(2)}</span>
               </div>
               <div style={{ marginTop: 6 }}>
-                {packLabeledSlots(selected.interaction_id).map((s, i) => (
-                  <div className="slot-row" key={i}>
+                {packLabeledSlots(selected.interaction_id).map((s) => (
+                  <div className="slot-row" key={s.label}>
                     <span className="k">{s.label}</span>
                     <span className={"v" + (s.value ? "" : " empty")}>{s.value || "—"}</span>
                   </div>

@@ -58,14 +58,13 @@ def test_callwidget_wires_api_key_on_start_end_and_ws():
     src = CALL_WIDGET.read_text(encoding="utf-8")
     assert 'from "../src/apiAuth.js"' in src or "from '../src/apiAuth.js'" in src
     assert "apiHeaders" in src
-    assert "withApiKeyQuery" in src
+    assert "withApiKeyQuery" not in src
     # start POST must pass headers
     assert "interactions/start" in src
     assert "headers: apiHeaders()" in src
     # end POST must pass headers
     assert "/end" in src
     # WS: no query-string secret; sendWsAuth after open
-    assert "withApiKeyQuery(" in src or "sendWsAuth" in src
     assert "sendWsAuth" in src
     assert "ws_url" in src
 
@@ -74,7 +73,7 @@ def test_live_console_wires_api_key_on_takeover_release_and_console_ws():
     src = LIVE_CONSOLE.read_text(encoding="utf-8")
     assert 'from "../src/apiAuth.js"' in src or "from '../src/apiAuth.js'" in src
     assert "apiHeaders" in src
-    assert "withApiKeyQuery" in src
+    assert "withApiKeyQuery" not in src
     assert "/takeover" in src
     assert "/release" in src
     assert "headers: apiHeaders()" in src

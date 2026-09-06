@@ -94,68 +94,6 @@ export default function PlatformOS() {
     }
   }
 
-  async function seedDemoExperiment() {
-    setLoading(true);
-    setMsg(null);
-    try {
-      const mk = async (version, body) => {
-        const r = await fetch("/api/v3/artifacts", {
-          method: "POST",
-          headers: { ...apiHeaders(), "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: "prompt",
-            name: "intake_greeting",
-            version,
-            body,
-          }),
-        });
-        if (!r.ok) throw new Error(await r.text());
-        return r.json();
-      };
-      const control = await mk("1.0.0", { text: "Hello, how can I help?" });
-      const candidate = await mk("1.1.0", { text: "Hi — what's the issue today?" });
-      const er = await fetch("/api/v3/experiments", {
-        method: "POST",
-        headers: { ...apiHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: "Greeting A/B",
-          mode: "ab",
-          control_artifact_id: control.artifact_id,
-          candidate_artifact_id: candidate.artifact_id,
-          description: "Shorter greeting experiment",
-        }),
-      });
-      if (!er.ok) throw new Error(await er.text());
-      const exp = await er.json();
-      // Seed synthetic trials
-      const trials = [
-        { arm: "control", resolution_ok: true, escalated: false, latency_ms: 120, groundedness_ok: true, hallucination_flag: false, cost_units: 1.0 },
-        { arm: "control", resolution_ok: true, escalated: true, latency_ms: 200, groundedness_ok: true, hallucination_flag: false, cost_units: 1.2 },
-        { arm: "candidate", resolution_ok: true, escalated: false, latency_ms: 90, groundedness_ok: true, hallucination_flag: false, cost_units: 0.8 },
-        { arm: "candidate", resolution_ok: true, escalated: false, latency_ms: 95, groundedness_ok: true, hallucination_flag: false, cost_units: 0.85 },
-      ];
-      for (const t of trials) {
-        await fetch(`/api/v3/experiments/${exp.experiment_id}/trials`, {
-          method: "POST",
-          headers: { ...apiHeaders(), "Content-Type": "application/json" },
-          body: JSON.stringify(t),
-        });
-      }
-      const cr = await fetch(`/api/v3/experiments/${exp.experiment_id}/complete`, {
-        method: "POST",
-        headers: apiHeaders(),
-      });
-      if (!cr.ok) throw new Error(await cr.text());
-      setExpReport(await cr.json());
-      setMsg("Demo experiment completed.");
-      await loadExperiments();
-    } catch (e) {
-      setMsg(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function loadGovernance() {
     try {
       const r = await fetch("/api/v3/governance/deployments", { headers: apiHeaders() });
@@ -367,9 +305,6 @@ export default function PlatformOS() {
         <div className="panel">
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>Experiments</h2>
-            <button className="primary" onClick={seedDemoExperiment} disabled={loading}>
-              Seed demo A/B
-            </button>
           </div>
           <p className="muted" style={{ fontSize: 12 }}>
             Versioned artifacts (prompt/workflow/routing/safety/retrieval) with offline trial metrics.
@@ -476,6 +411,7 @@ export default function PlatformOS() {
               value={stampId}
               onChange={(e) => setStampId(e.target.value)}
               placeholder="interaction_id"
+              aria-label="Interaction id for version stamp"
               style={{ flex: 1 }}
             />
             <button className="primary" onClick={loadStamp} disabled={loading}>

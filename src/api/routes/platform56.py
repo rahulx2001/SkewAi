@@ -469,11 +469,18 @@ async def subscriptions_tick(force: bool = True) -> dict[str, Any]:
 
 @router.get("/usage")
 async def usage_get() -> dict[str, Any]:
-    """Usage summary for the process tenant (client tenant_id ignored — M8)."""
-    from src.frontline.metering import usage_summary
+    """Usage + plan/seats for the process tenant (client tenant_id ignored — M8).
+
+    Merges metering totals with billing plan fields so TrustPipeline can
+    render plan/seats. The duplicate GET /usage on pipeline.py is renamed.
+    """
+    from src.data.timeutil import utc_now
+    from src.frontline.billing import usage_dashboard
     from src.ops.tenant import get_tenant
 
-    return usage_summary(tenant_id=get_tenant())
+    out = usage_dashboard(tenant_id=get_tenant())
+    out.setdefault("as_of", utc_now().isoformat())
+    return out
 
 
 @router.post("/usage")

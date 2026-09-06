@@ -124,7 +124,8 @@ async def build_audit_export(
             row["actions"] = actions
 
             report_path = REPORTS_DIR / f"{iid}.md"
-            row["report_path"] = str(report_path) if report_path.exists() else None
+            row["report_name"] = f"{iid}.md" if report_path.exists() else None
+            row["report_url"] = f"/api/frontline/audits/{iid}"
             if include_markdown and report_path.exists():
                 row["report_markdown"] = report_path.read_text(encoding="utf-8")
 

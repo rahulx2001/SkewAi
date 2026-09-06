@@ -62,6 +62,7 @@ export default function LabelDesk() {
             value={annotator}
             onChange={(e) => setAnnotator(e.target.value)}
             placeholder="human-yourname"
+            aria-label="Annotator id"
           />
         </div>
         <button type="button" className="primary" onClick={loadNext} style={{ marginTop: 12 }}>

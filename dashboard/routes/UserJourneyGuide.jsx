@@ -674,9 +674,9 @@ export default function UserJourneyGuide() {
       {/* TAB 2: ROLE-BASED PLAYBOOKS */}
       {activeTab === "playbooks" && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-          {ROLES.map((r, idx) => (
+          {ROLES.map((r) => (
             <div
-              key={idx}
+              key={r.title}
               style={{
                 background: "var(--bg-panel, #1c1c1a)",
                 border: "1px solid var(--edge, #2c2c29)",

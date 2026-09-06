@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { apiHeaders, sendWsAuth, withApiKeyQuery } from "../src/apiAuth.js";
+import { apiHeaders, sendWsAuth } from "../src/apiAuth.js";
 import { IconHangup, IconMic, IconSpeaker } from "../src/icons.jsx";
 import {
   BARGE_IN_GRACE_MS,
@@ -483,7 +483,7 @@ export default function CallWidget() {
     setupSpeechRecognition();
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = withApiKeyQuery(`${proto}//${window.location.host}${startRes.ws_url}`);
+    const wsUrl = `${proto}//${window.location.host}${startRes.ws_url}`;
     activeWsUrlRef.current = wsUrl;
 
     function bindWs(ws, { isReconnect }) {

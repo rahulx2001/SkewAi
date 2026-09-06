@@ -105,6 +105,12 @@ def test_list_audits_returns_list(client):
     assert "count" in body
     assert isinstance(body["audits"], list)
     assert body["count"] == len(body["audits"])
+    blob = resp.text
+    assert "/Users/" not in blob
+    assert "/home/" not in blob
+    for row in body["audits"]:
+        assert "report_path" not in row
+        assert str(row.get("report_url") or "").startswith("/api/")
 
 
 # ── GET /api/packs ────────────────────────────────────────────────────────────
@@ -121,6 +127,7 @@ def test_list_packs_includes_automotive(client):
     assert auto["lint_errors"] == []
     assert auto["pack_version"]
     assert "entity_1" in auto["entity_labels"]
+    assert "_template" not in pack_ids
 
 
 def test_get_single_pack(client):

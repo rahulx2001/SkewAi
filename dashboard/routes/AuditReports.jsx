@@ -48,8 +48,8 @@ function renderMarkdown(md) {
         <table>
           <thead>
             <tr>
-              {header.map((h, idx) => (
-                <th key={idx}>{h}</th>
+              {header.map((h) => (
+                <th key={h}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -101,7 +101,7 @@ function renderMarkdown(md) {
       push(
         <ul>
           {items.map((it, idx) => (
-            <li key={idx}>{renderInline(it)}</li>
+            <li key={`${it}-${idx}`}>{renderInline(it)}</li>
           ))}
         </ul>
       );
@@ -118,7 +118,7 @@ function renderMarkdown(md) {
       push(
         <ol>
           {items.map((it, idx) => (
-            <li key={idx}>{renderInline(it)}</li>
+            <li key={`${it}-${idx}`}>{renderInline(it)}</li>
           ))}
         </ol>
       );
@@ -364,12 +364,14 @@ export default function AuditReports() {
                 type="date"
                 value={exportStart}
                 onChange={(e) => setExportStart(e.target.value)}
+                aria-label="Export start date"
                 style={{ fontSize: 11, maxWidth: 130 }}
               />
               <input
                 type="date"
                 value={exportEnd}
                 onChange={(e) => setExportEnd(e.target.value)}
+                aria-label="Export end date"
                 style={{ fontSize: 11, maxWidth: 130 }}
               />
               <button
@@ -413,7 +415,7 @@ export default function AuditReports() {
                 {a._hasMismatch && <span className="chip red">MISMATCH</span>}
               </div>
               <div className="meta" style={{ fontSize: 11, color: "var(--text-faint)" }}>
-                {a.report_path ? a.report_path.split("/").pop() : ""}
+                {a.report_name || (a.interaction_id ? `${a.interaction_id}.md` : "")}
               </div>
             </div>
           ))}

@@ -133,11 +133,14 @@ async def simulate(
 
 
 @router.get("/metrics")
-async def frontline_metrics(window_days: int = 7) -> dict[str, Any]:
+async def frontline_metrics(
+    window_days: int = 7,
+    include_simulated: bool = False,
+) -> dict[str, Any]:
     """Pilot ops snapshot: open cases, investigations, dead-letters, connectors."""
     from src.frontline.ops import ops_metrics
 
-    return ops_metrics(window_days=window_days)
+    return ops_metrics(window_days=window_days, include_simulated=include_simulated)
 
 
 # ── Cases ────────────────────────────────────────────────────────────────────
@@ -227,6 +230,7 @@ async def list_cases(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = None,
     scrub_pii: bool = Query(default=True),
+    include_simulated: bool = Query(default=False),
 ) -> dict[str, Any]:
     """List cases (filter by status / severity / free-text q).
 
@@ -252,26 +256,31 @@ async def list_cases(
     except InvalidCursor as e:
         raise HTTPException(status_code=400, detail=f"invalid cursor: {e}") from e
 
-    sql = "SELECT * FROM cases"
+    sql = (
+        "SELECT c.*, i.channel AS channel, i.peak_frustration AS peak_frustration "
+        "FROM cases c LEFT JOIN interactions i ON i.interaction_id = c.interaction_id"
+    )
     params: list[Any] = []
     clauses = []
     if status:
-        clauses.append("status = ?")
+        clauses.append("c.status = ?")
         params.append(status)
     if severity:
-        clauses.append("severity = ?")
+        clauses.append("c.severity = ?")
         params.append(severity)
     if q and q.strip():
         like = f"%{q.strip()}%"
         clauses.append(
-            "(case_id ILIKE ? OR interaction_id ILIKE ? OR category ILIKE ? "
-            "OR description_summary ILIKE ? OR investigation_id ILIKE ?)"
+            "(c.case_id ILIKE ? OR c.interaction_id ILIKE ? OR c.category ILIKE ? "
+            "OR c.description_summary ILIKE ? OR c.investigation_id ILIKE ?)"
         )
         params.extend([like, like, like, like, like])
+    if not include_simulated:
+        clauses.append("(i.channel IS NULL OR i.channel != 'simulated')")
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     # Fetch one extra row to detect has_more without a separate COUNT.
-    sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    sql += " ORDER BY c.created_at DESC LIMIT ? OFFSET ?"
     params.extend([lim + 1, off])
 
     def _load_cases() -> list[dict[str, Any]]:
@@ -374,8 +383,8 @@ async def get_case(
     iid = case.get("interaction_id")
     if iid:
         report_path = REPORTS_DIR / f"{iid}.md"
-        case["audit_report_path"] = str(report_path) if report_path.exists() else None
         case["audit_report_url"] = f"/api/frontline/audits/{iid}"
+        case["audit_report_name"] = f"{iid}.md" if report_path.exists() else None
     case["notes"] = list_case_notes(case_id)
     if scrub:
         case = redact_dict(case)
@@ -742,7 +751,7 @@ async def list_audits(
                 ).fetchone()
             out.append({
                 "interaction_id": iid,
-                "report_path": str(f),
+                "report_name": f"{iid}.md",
                 "report_url": f"/api/frontline/audits/{iid}",
             })
         return out
@@ -783,15 +792,16 @@ async def get_audit(
             "mismatch_actions": result.mismatch_actions,
             "severity_sane": result.severity_sane,
             "peak_frustration": result.peak_frustration,
-            "report_path": str(result.report_path) if result.report_path else None,
+            "report_name": f"{interaction_id}.md" if result.report_path else None,
+            "report_url": f"/api/frontline/audits/{interaction_id}",
         }
-    # Just return the existing report path (or 404)
     report_path = REPORTS_DIR / f"{interaction_id}.md"
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail=f"audit report not found: {report_path}")
+        raise HTTPException(status_code=404, detail="FileNotFoundError")
     return {
         "interaction_id": interaction_id,
-        "report_path": str(report_path),
+        "report_name": f"{interaction_id}.md",
+        "report_url": f"/api/frontline/audits/{interaction_id}",
         "report_markdown": report_path.read_text(encoding="utf-8"),
     }
 
@@ -847,11 +857,14 @@ async def run_digest_scheduled(
 
 
 @router.get("/wallboard")
-async def wallboard(pack_id: str | None = None) -> dict[str, Any]:
+async def wallboard(
+    pack_id: str | None = None,
+    include_simulated: bool = False,
+) -> dict[str, Any]:
     """Ops wallboard: live contacts, P1 counts, top risk clusters."""
     from src.frontline.wallboard import build_wallboard
 
-    return build_wallboard(pack_id=pack_id)
+    return build_wallboard(pack_id=pack_id, include_simulated=include_simulated)
 
 
 @router.get("/insights/csat")

@@ -25,7 +25,11 @@ async def list_all_packs() -> dict[str, Any]:
     """List available packs + the active pack."""
     active = resolve_active_pack_id()
     packs = []
+    from src.security.identifiers import PACK_ID_RE
+
     for pid in list_packs():
+        if not PACK_ID_RE.match(pid):
+            continue
         try:
             pack = load_pack(pid)
             errors = lint_pack(pid)
