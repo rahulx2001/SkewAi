@@ -839,10 +839,12 @@ export default function EnterpriseOps() {
             />
           </div>
           <div className="field" style={{ marginBottom: 8 }}>
-            <label>customer steps (one line each)</label>
+            <label htmlFor="scn-steps-textarea">customer steps (one line each)</label>
             <textarea
+              id="scn-steps-textarea"
               value={scnSteps}
               onChange={(e) => setScnSteps(e.target.value)}
+              aria-label="Customer steps (one line each)"
               style={{ width: "100%", minHeight: 100 }}
             />
           </div>

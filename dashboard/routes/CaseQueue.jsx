@@ -482,8 +482,11 @@ export default function CaseQueue() {
                 </div>
 
                 <div className="h-divider" />
-                <h2 style={panelHeading}>Follow-up Draft</h2>
+                <h2 style={panelHeading} id="followup-draft-heading">Follow-up Draft</h2>
                 <textarea
+                  id="followup-draft-input"
+                  aria-labelledby="followup-draft-heading"
+                  aria-label="Follow-up Draft"
                   value={followupDraft}
                   onChange={(e) => setFollowupDraft(e.target.value)}
                   placeholder="Draft a follow-up message…"
@@ -498,8 +501,11 @@ export default function CaseQueue() {
                 </button>
 
                 <div className="h-divider" />
-                <h2 style={panelHeading}>Operator notes</h2>
+                <h2 style={panelHeading} id="operator-notes-heading">Operator notes</h2>
                 <textarea
+                  id="operator-notes-input"
+                  aria-labelledby="operator-notes-heading"
+                  aria-label="Operator notes"
                   value={noteBody}
                   onChange={(e) => setNoteBody(e.target.value)}
                   placeholder="Add a note for the pilot team…"

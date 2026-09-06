@@ -553,8 +553,9 @@ export default function EarlyWarningBoard() {
             </p>
             <div className="row" style={{ gap: 16, marginTop: 12 }}>
               <div className="field" style={{ flex: 1 }}>
-                <label>count</label>
+                <label htmlFor="sim-count-input">count</label>
                 <input
+                  id="sim-count-input"
                   type="number"
                   min={1}
                   max={100}
@@ -564,8 +565,13 @@ export default function EarlyWarningBoard() {
                 />
               </div>
               <div className="field" style={{ flex: 1 }}>
-                <label>speed</label>
-                <select value={simSpeed} onChange={(e) => setSimSpeed(e.target.value)}>
+                <label htmlFor="sim-speed-select">speed</label>
+                <select
+                  id="sim-speed-select"
+                  value={simSpeed}
+                  onChange={(e) => setSimSpeed(e.target.value)}
+                  aria-label="Simulation speed"
+                >
                   <option value="instant">instant</option>
                   <option value="fast">fast</option>
                   <option value="realtime">realtime</option>
