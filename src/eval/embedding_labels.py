@@ -1,7 +1,7 @@
 """Human embedding-label store, import/export, and inter-annotator agreement.
 
 This module never proposes a label. Sampling yields unlabeled items.
-Acceptance gates must refuse coding-agent seeds and classes with κ < 0.65.
+Acceptance gates must refuse coding-agent seeds and classes with κ < 0.70.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ LABEL_CLASSES = (
     "cross_entity_same_symptom",
 )
 
-KAPPA_MIN = 0.65
+KAPPA_MIN = 0.70
 INELIGIBLE_SOURCES = frozenset(
     {"coding_agent_seed", "author_seed", "synthetic", "agent_proposed"}
 )

@@ -283,7 +283,7 @@ def test_item33_ols_ci_and_gates():
     # N<4 refused.
     assert project_next_week_volume([1, 2, 3])["method"] == "insufficient_history"
     assert _t_crit_95(1) == pytest.approx(12.706, rel=0.01)
-    assert _t_crit_95(100) == pytest.approx(1.96)
+    assert _t_crit_95(100) == pytest.approx(1.96 + 1.0 / 400.0)
 
 
 def test_item33_breach_first_and_pack_costs(reset_ops_db, pack):

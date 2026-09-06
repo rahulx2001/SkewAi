@@ -355,6 +355,10 @@ def load_empirical_cohort(
                 break
         if not matched_cat:
             matched_cat = _extract_via_gazetteer(text, ctx, "category")
+        if not matched_cat:
+            # Residual NHTSA class when no specific system is named. Not a
+            # ground-truth copy: unmatched text is UNKNOWN OR OTHER.
+            matched_cat = "UNKNOWN OR OTHER"
         if matched_cat:
             ai_slots["category"] = matched_cat
         # F-009: do not copy human/ground-truth category into the AI prediction.
@@ -473,6 +477,7 @@ def format_scorecard_table(report: dict[str, Any], target_cost_usd: float = 0.45
         "GREEN": "PROCEED — System meets all statistical thresholds for Phase 1 Live Pilot (5% traffic)",
         "YELLOW": "HUMAN IN LOOP — Proceed with mandatory supervisor sign-off on flagged entities",
         "RED": "BLOCKED — Do not route live customer calls; address regressions in engineering",
+        "BLOCKED": "BLOCKED — Independent human labels missing or metrics below gate",
     }.get(verdict, "")
     lines.append(f"OVERALL PILOT VERDICT: [{verdict}] — {status_note}")
     lines.append("=" * w)

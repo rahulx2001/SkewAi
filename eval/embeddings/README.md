@@ -28,7 +28,7 @@ python -m scripts.eval_labels sample --pack automotive_nhtsa --n 20
 Annotate in the dashboard **Eval labels** desk (text + entity only).
 Agreement: `python -m scripts.eval_labels agreement`.
 
-A class is gate-eligible only with ≥2 annotators and Cohen's κ ≥ 0.65,
+A class is gate-eligible only with ≥2 annotators and Cohen's κ ≥ 0.70,
 then the quotas in `decision_rules_v1.yaml`. Those rules were written
 before a human comparison is run; do not retune them after seeing scores.
 

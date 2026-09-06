@@ -216,6 +216,59 @@ def test_f029_dashboard_renders_trend_scope_and_simulated_opt_out():
     assert "Include simulated" in src
 
 
+def test_empirical_unlabeled_severity_and_cluster_are_blocked():
+    from src.frontline.shadow_pilot import load_empirical_cohort
+    from src.eval.shadow_pilot import ShadowPilotEvaluator
+
+    contacts = load_empirical_cohort(
+        "data/safety_eval_corpus.jsonl", sample_size=20
+    )
+    assert all(not (c.human_severity or "").strip() for c in contacts)
+    assert all(c.engineer_verified_cluster_id is None for c in contacts)
+    report = ShadowPilotEvaluator(contacts).run_full_evaluation()
+    assert report["metrics"]["severity_agreement"]["rating"] == "blocked"
+    assert report["metrics"]["cluster_agreement"]["top_1"]["rating"] == "blocked"
+    assert report["overall_verdict"] == "red"
+    assert "elif human_slots.get(\"category\")" not in open(
+        "src/frontline/shadow_pilot.py", encoding="utf-8"
+    ).read()
+
+
+def test_persist_turn_encrypt_fail_closed(reset_ops_db, monkeypatch):
+    from src.data.turns import persist_turn
+    from src.data.warehouse import ops_con
+
+    iid = "int_encfail_" + new_ulid()[:8]
+    now = datetime.now(timezone.utc)
+    with ops_con() as con:
+        con.execute(
+            """
+            INSERT INTO interactions
+            (interaction_id, pack_id, pack_version, started_at, channel, status)
+            VALUES (?, 'automotive_nhtsa', 't', ?, 'web_text', 'active')
+            """,
+            [iid, now],
+        )
+
+    def _boom(_sid, _text):
+        raise RuntimeError("dek unavailable")
+
+    monkeypatch.setattr("src.security.pii.encrypt_subject_pii", _boom)
+    with pytest.raises(RuntimeError, match="dek unavailable"):
+        persist_turn(iid, {
+            "turn_id": iid + "_t1",
+            "seq": 1,
+            "speaker": "customer",
+            "text": "My Honda CR-V grinds. Call 555-0199.",
+            "ts": now,
+        })
+    with ops_con(read_only=True) as con:
+        row = con.execute(
+            "SELECT text FROM interaction_turns WHERE interaction_id = ?", [iid]
+        ).fetchone()
+    assert row is None
+
+
 def test_f040_session_sig_is_full_sha256():
     from src.api.rbac import issue_session, verify_session
 

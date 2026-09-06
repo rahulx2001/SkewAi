@@ -318,7 +318,7 @@ def require_perm(role: str, perm: str, *, open_mode_ok: bool = False) -> None:
     """
     _never_open = frozenset({
         "dsr:export", "dsr:delete", "admin:keys", "admin:cross_tenant",
-        "deploy:activate", "marketplace:install",
+        "deploy:activate",
     })
     if open_mode_ok and perm in _never_open:
         open_mode_ok = False

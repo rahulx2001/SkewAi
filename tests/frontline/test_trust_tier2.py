@@ -233,8 +233,21 @@ async def test_spoken_confirmation_does_not_red_audit(pack, reset_ops_db):
             """,
             [iid, pack.id, utc_now()],
         )
+    qid = "dq_confirm_readback"
+    with ops_con() as con:
+        from src.frontline.elicitation import _ensure as _ensure_dq
+
+        _ensure_dq(con)
+        con.execute(
+            """
+            INSERT INTO diagnostic_questions
+            (question_id, pack_id, prompt, category, entity_2, created_at)
+            VALUES (?, ?, 'Is the grinding on the front brakes?', 'SERVICE BRAKES', 'HONDA', ?)
+            """,
+            [qid, pack.id, utc_now()],
+        )
     record_spoken_confirmation(
-        iid, "correct", confirmed=True, question_id="dq_not_a_warehouse_row"
+        iid, "correct", confirmed=True, question_id=qid
     )
     result = await audit_interaction(iid, write_report=False)
     sc = [v for v in result.action_verdicts if v.action_type == "spoken_confirmation"]

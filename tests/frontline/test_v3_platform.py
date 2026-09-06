@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+from src.api.rbac import issue_session
 from src.data.warehouse import ops_con
 from src.ids import new_ulid
 from src.v3.experiments import (
@@ -60,11 +61,23 @@ def _seed_failure_interaction() -> str:
     return iid
 
 
+_V3_KEY = "v3-test-secret-key-32chars-ok!!"
+
+
 @pytest.fixture
 def client(reset_ops_db, monkeypatch):
-    monkeypatch.delenv("FRONTLINE_API_KEY", raising=False)
+    monkeypatch.setenv("FRONTLINE_API_KEY", _V3_KEY)
+    monkeypatch.setenv("FRONTLINE_AUTH_REQUIRED", "1")
+    monkeypatch.setenv("SESSION_SECRET", "v3-session-secret-32bytes-ok!!!!")
+    monkeypatch.setenv("FRONTLINE_BOOTSTRAP_ADMIN", "1")
+    monkeypatch.delenv("FRONTLINE_OPEN_MODE", raising=False)
     with TestClient(app) as c:
         yield c
+
+
+def _admin_h() -> dict[str, str]:
+    tok = issue_session("v3-admin", "admin", issuer_role="admin")["token"]
+    return {"X-API-Key": _V3_KEY, "X-Frontline-Session": tok}
 
 
 # ── Learning ─────────────────────────────────────────────────────────────────
@@ -189,12 +202,13 @@ def test_governance_default_rollback_restores_prior_inactive(reset_ops_db):
 
 def test_v3_apis(client, reset_ops_db):
     iid = _seed_failure_interaction()
+    h = _admin_h()
 
-    r = client.post("/api/v3/learning/run?limit=10")
+    r = client.post("/api/v3/learning/run?limit=10", headers=h)
     assert r.status_code == 200
     assert r.json()["created"] >= 1
 
-    r = client.get("/api/v3/learning/proposals")
+    r = client.get("/api/v3/learning/proposals", headers=h)
     assert r.status_code == 200
     props = r.json()["proposals"]
     assert len(props) >= 1
@@ -203,11 +217,12 @@ def test_v3_apis(client, reset_ops_db):
     r = client.post(
         f"/api/v3/learning/proposals/{pid}/review",
         json={"status": "approved"},
+        headers=h,
     )
     assert r.status_code == 200
     assert r.json()["status"] == "approved"
 
-    r = client.get("/api/v3/learning/trends")
+    r = client.get("/api/v3/learning/trends", headers=h)
     assert r.status_code == 200
     assert "by_status" in r.json()
 
@@ -215,10 +230,12 @@ def test_v3_apis(client, reset_ops_db):
     a1 = client.post(
         "/api/v3/artifacts",
         json={"kind": "routing", "name": "default", "version": "a", "body": {"policy": "cheap"}},
+        headers=h,
     ).json()
     a2 = client.post(
         "/api/v3/artifacts",
         json={"kind": "routing", "name": "default", "version": "b", "body": {"policy": "quality"}},
+        headers=h,
     ).json()
     exp = client.post(
         "/api/v3/experiments",
@@ -228,16 +245,19 @@ def test_v3_apis(client, reset_ops_db):
             "candidate_artifact_id": a2["artifact_id"],
             "mode": "shadow",
         },
+        headers=h,
     ).json()
     client.post(
         f"/api/v3/experiments/{exp['experiment_id']}/trials",
         json={"arm": "control", "resolution_ok": True, "escalated": False, "latency_ms": 100},
+        headers=h,
     )
     client.post(
         f"/api/v3/experiments/{exp['experiment_id']}/trials",
         json={"arm": "candidate", "resolution_ok": True, "escalated": False, "latency_ms": 50},
+        headers=h,
     )
-    r = client.post(f"/api/v3/experiments/{exp['experiment_id']}/complete")
+    r = client.post(f"/api/v3/experiments/{exp['experiment_id']}/complete", headers=h)
     assert r.status_code == 200
     assert r.json()["metrics"]["winner"]
 
@@ -245,16 +265,21 @@ def test_v3_apis(client, reset_ops_db):
     dep = client.post(
         "/api/v3/governance/deployments",
         json={"label": "pilot-1", "artifact_versions": {"routing/default": "a"}},
+        headers=h,
     ).json()
-    r = client.post(f"/api/v3/governance/deployments/{dep['deployment_id']}/activate", json={})
+    r = client.post(
+        f"/api/v3/governance/deployments/{dep['deployment_id']}/activate",
+        json={},
+        headers=h,
+    )
     assert r.status_code == 200
     assert r.json()["status"] == "active"
 
-    r = client.post(f"/api/v3/governance/stamps/{iid}", json={})
+    r = client.post(f"/api/v3/governance/stamps/{iid}", json={}, headers=h)
     assert r.status_code == 200
     assert r.json()["pack_version"] == "packv1"
 
-    r = client.get("/api/v3/governance/deployments")
+    r = client.get("/api/v3/governance/deployments", headers=h)
     assert r.status_code == 200
     assert r.json()["active"]["deployment_id"] == dep["deployment_id"]
 
@@ -262,15 +287,17 @@ def test_v3_apis(client, reset_ops_db):
     dep2 = client.post(
         "/api/v3/governance/deployments",
         json={"label": "pilot-2", "artifact_versions": {"routing/default": "b"}},
+        headers=h,
     ).json()
     assert (
         client.post(
             f"/api/v3/governance/deployments/{dep2['deployment_id']}/activate",
             json={},
+            headers=h,
         ).status_code
         == 200
     )
-    r = client.post("/api/v3/governance/rollback", json={})
+    r = client.post("/api/v3/governance/rollback", json={}, headers=h)
     assert r.status_code == 200
     assert r.json()["deployment_id"] == dep["deployment_id"]
     assert r.json()["status"] == "active"

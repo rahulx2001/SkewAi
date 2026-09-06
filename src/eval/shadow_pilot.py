@@ -200,6 +200,16 @@ class ShadowPilotEvaluator:
             for c in self.contacts
             if (c.human_severity or "").strip()
         ]
+        if len(pairs) < 2:
+            return ShadowMetricResult(
+                name="severity_agreement_kappa",
+                point_estimate=0.0,
+                ci_lower=0.0,
+                ci_upper=0.0,
+                rating="blocked",
+                target="kappa >= 0.70",
+                detail="insufficient independent human_severity labels; not scored",
+            )
         ai_labels = [a for a, _h in pairs]
         hu_labels = [h for _a, h in pairs]
         kappa, low, up = cohen_kappa_with_ci(hu_labels, ai_labels)
@@ -217,6 +227,17 @@ class ShadowPilotEvaluator:
     def evaluate_cluster_agreement(self) -> dict[str, ShadowMetricResult]:
         evaluated = [c for c in self.contacts if c.engineer_verified_cluster_id is not None]
         total = len(evaluated)
+        if total < 2:
+            blocked = ShadowMetricResult(
+                name="cluster_agreement_unlabeled",
+                point_estimate=0.0,
+                ci_lower=0.0,
+                ci_upper=0.0,
+                rating="blocked",
+                target=">= 0.75 top-1",
+                detail="insufficient independent engineer_cluster_id labels; not scored",
+            )
+            return {"top_1": blocked, "top_3": blocked}
         top_1_matches = sum(1 for c in evaluated if c.ai_cluster_id == c.engineer_verified_cluster_id)
         top_3_matches = sum(1 for c in evaluated if c.engineer_verified_cluster_id in c.ai_top_3_clusters)
 
@@ -283,7 +304,7 @@ class ShadowPilotEvaluator:
         cost = self.evaluate_cost_per_contact(target_cost_usd)
 
         all_ratings = [m.rating for m in list(slots.values()) + list(ks.values()) + [sev, clu["top_1"], cost]]
-        if any(r == "red" for r in all_ratings):
+        if any(r in {"red", "blocked"} for r in all_ratings):
             overall = "red"
         elif any(r == "yellow" for r in all_ratings):
             overall = "yellow"

@@ -26,7 +26,7 @@ This deployment does not fine-tune.
 
 Human-labeled acceptance set is **not yet eligible**. `pairs_v1` is a
 coding-agent development fixture (`acceptance_eligible=false`). Cutover
-requires κ ≥ 0.65 per class and the quotas in
+requires κ ≥ 0.70 per class and the quotas in
 `eval/embeddings/decision_rules_v1.yaml`.
 
 ## Failure modes

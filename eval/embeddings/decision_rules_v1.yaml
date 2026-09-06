@@ -12,7 +12,7 @@ ineligible_label_sources:
   - synthetic
   - agent_proposed
 
-kappa_min: 0.65
+kappa_min: 0.70
 min_annotators_per_class: 2
 
 class_quotas:

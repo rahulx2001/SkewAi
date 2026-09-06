@@ -6,7 +6,7 @@ F-008 Crypto-shred inert
   Action: Execute erasure_drill weekly; schedule real DSR test with legal.
 
 F-009 Shadow-pilot label leak / F-010 Self-comparison κ
-  Blocked: 200+/200+/50+ human-reviewed pairs required; 2 annotators + adjudicator; κ ≥ 0.65.
+  Blocked: 200+/200+/50+ human-reviewed pairs required; 2 annotators + adjudicator; κ ≥ 0.70.
   Status: 12 seed pairs (author_seed, acceptance_eligible=false). No synthetic pairs written.
   Action: Execute eval_sampling_plan.md recruitment; do not restore scores until κ passes.
 

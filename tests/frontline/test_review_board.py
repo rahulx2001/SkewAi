@@ -256,7 +256,7 @@ async def test_fix_regression_watch_fires(orchestrator_factory):
 # ── #9 feedback loops ────────────────────────────────────────────────────────
 
 
-def test_audit_regression_export(reset_ops_db):
+def test_audit_regression_export(reset_ops_db, tmp_path):
     from src.frontline.validation_queue import (
         create_review,
         export_audit_regressions,
@@ -265,7 +265,7 @@ def test_audit_regression_export(reset_ops_db):
 
     rv = create_review(interaction_id="int_rx", reason="mismatch: uncited 19V-1")
     resolve_review(rv["review_id"], "ai_wrong", actor="test")
-    out = export_audit_regressions(since_days=7, out_dir="/tmp/board_regression")
+    out = export_audit_regressions(since_days=7, out_dir=str(tmp_path / "board_regression"))
     assert out["written"] >= 1
     import json
 

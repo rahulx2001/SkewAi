@@ -1,43 +1,43 @@
 {
-  "total_contacts": 100,
-  "overall_verdict": "green",
+  "total_contacts": 150,
+  "overall_verdict": "red",
   "metrics": {
     "slots": {
       "entity_1": {
         "name": "slot_accuracy_entity_1",
-        "point_estimate": 0.93,
-        "ci_lower": 0.8625,
-        "ci_upper": 0.9657,
+        "point_estimate": 0.9533,
+        "ci_lower": 0.9068,
+        "ci_upper": 0.9772,
         "rating": "green",
         "target": ">= 0.90",
-        "detail": "93/100 matching human record"
+        "detail": "143/150 matching human record"
       },
       "entity_2": {
         "name": "slot_accuracy_entity_2",
-        "point_estimate": 0.93,
-        "ci_lower": 0.8625,
-        "ci_upper": 0.9657,
+        "point_estimate": 0.9533,
+        "ci_lower": 0.9068,
+        "ci_upper": 0.9772,
         "rating": "green",
         "target": ">= 0.90",
-        "detail": "93/100 matching human record"
+        "detail": "143/150 matching human record"
       },
       "entity_3": {
         "name": "slot_accuracy_entity_3",
-        "point_estimate": 0.93,
-        "ci_lower": 0.8625,
-        "ci_upper": 0.9657,
+        "point_estimate": 0.9533,
+        "ci_lower": 0.9068,
+        "ci_upper": 0.9772,
         "rating": "green",
         "target": ">= 0.90",
-        "detail": "93/100 matching human record"
+        "detail": "143/150 matching human record"
       },
       "category": {
         "name": "slot_accuracy_category",
-        "point_estimate": 0.96,
-        "ci_lower": 0.9016,
-        "ci_upper": 0.9843,
-        "rating": "green",
+        "point_estimate": 0.8067,
+        "ci_lower": 0.7361,
+        "ci_upper": 0.8619,
+        "rating": "yellow",
         "target": ">= 0.90",
-        "detail": "96/100 matching human record"
+        "detail": "121/150 matching human record"
       }
     },
     "kill_switch": {
@@ -62,50 +62,51 @@
     },
     "severity_agreement": {
       "name": "severity_agreement_kappa",
-      "point_estimate": 1.0,
-      "ci_lower": 1.0,
-      "ci_upper": 1.0,
-      "rating": "green",
+      "point_estimate": 0.0,
+      "ci_lower": 0.0,
+      "ci_upper": 0.0,
+      "rating": "blocked",
       "target": "kappa >= 0.70",
-      "detail": "Evaluated across 100 human supervisor ratings"
+      "detail": "insufficient independent human_severity labels; not scored"
     },
     "cluster_agreement": {
       "top_1": {
-        "name": "cluster_agreement_top1",
-        "point_estimate": 0.98,
-        "ci_lower": 0.93,
-        "ci_upper": 0.9945,
-        "rating": "green",
+        "name": "cluster_agreement_unlabeled",
+        "point_estimate": 0.0,
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "rating": "blocked",
         "target": ">= 0.75 top-1",
-        "detail": "98/100 agreed with RCA engineer"
+        "detail": "insufficient independent engineer_cluster_id labels; not scored"
       },
       "top_3": {
-        "name": "cluster_agreement_top3",
-        "point_estimate": 0.98,
-        "ci_lower": 0.93,
-        "ci_upper": 0.9945,
-        "rating": "green",
-        "target": ">= 0.85 top-3",
-        "detail": "98/100 engineer clusters in top-3 candidates"
+        "name": "cluster_agreement_unlabeled",
+        "point_estimate": 0.0,
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "rating": "blocked",
+        "target": ">= 0.75 top-1",
+        "detail": "insufficient independent engineer_cluster_id labels; not scored"
       }
     },
     "cost_per_contact": {
       "name": "cost_per_contact",
-      "point_estimate": 0.0234,
+      "point_estimate": 0.0235,
       "ci_lower": 0.0234,
       "ci_upper": 0.0235,
       "rating": "green",
       "target": "<= $0.45",
-      "detail": "Mean=$0.0234, 95% CI=[$0.0234, $0.0235], p95=$0.0238"
+      "detail": "Mean=$0.0235, 95% CI=[$0.0234, $0.0235], p95=$0.0238"
     }
   },
   "meta": {
     "mode": "batch",
     "pack_id": "automotive_nhtsa",
-    "sample_size": 100,
+    "sample_size": 150,
     "seed": 42,
     "target_cost_usd": 0.45,
     "data_source": "data/safety_eval_corpus.jsonl",
-    "source_type": "empirical_ground_truth"
+    "source_type": "empirical_ground_truth",
+    "synthetic_self_labels": false
   }
 }

@@ -44,7 +44,7 @@ def inter_annotator_report(labels: dict[str, list[str]]) -> dict[str, Any]:
     mean_k = (sum(kappas) / len(kappas)) if kappas else None
     return {"n_items": len(labels), "gold": gold,
             "pairwise_kappa": kappas, "mean_kappa": mean_k,
-            "promotion_gate": "mean_kappa >= 0.65 and n_items >= 100"}
+            "promotion_gate": "mean_kappa >= 0.70 and n_items >= 100"}
 
 
 def load_transcript_corpus(path: str | Path) -> list[dict[str, Any]]:

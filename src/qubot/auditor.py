@@ -317,6 +317,25 @@ def _verify_evidence_id(
             ).fetchone()
         return row is not None, "live:interaction"
 
+    # Diagnostic question ids: dq_XXXX (spoken read-back cites the question)
+    if eid.startswith("dq_"):
+        if snap is not None:
+            return True, "snapshot:diagnostic_question"
+        try:
+            with ops_con(read_only=True) as con:
+                row = con.execute(
+                    "SELECT question_id FROM diagnostic_questions WHERE question_id = ?",
+                    [eid],
+                ).fetchone()
+                if row is None:
+                    row = con.execute(
+                        "SELECT question_id FROM diagnostic_answers WHERE question_id = ?",
+                        [eid],
+                    ).fetchone()
+        except Exception:
+            row = None
+        return row is not None, "live:diagnostic_question"
+
     # Case ids: case_XXXX
     if eid.startswith("case_"):
         if snap is not None:
