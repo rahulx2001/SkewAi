@@ -19,7 +19,6 @@ import json
 import math
 import os
 import random
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -292,7 +291,7 @@ def load_empirical_cohort(
         _check_kill_switch,
         _extract_year,
         _extract_via_gazetteer,
-        _CATEGORY_SYNONYMS,
+        match_category_synonym,
     )
 
     p = Path(input_path)
@@ -347,12 +346,8 @@ def load_empirical_cohort(
         if mod:
             ai_slots["entity_3"] = mod
 
-        # Category extraction
-        matched_cat = None
-        for syn, cat_val in _CATEGORY_SYNONYMS.items():
-            if re.search(rf"\b{re.escape(syn)}\b", text.lower()):
-                matched_cat = cat_val
-                break
+        # Category extraction: longest synonym wins, then gazetteer.
+        matched_cat = match_category_synonym(text)
         if not matched_cat:
             matched_cat = _extract_via_gazetteer(text, ctx, "category")
         if not matched_cat:
@@ -442,6 +437,26 @@ def format_scorecard_table(report: dict[str, Any], target_cost_usd: float = 0.45
         ci = f"[{v['ci_lower']:.4f}, {v['ci_upper']:.4f}]"
         rating = f"[{v['rating'].upper()}]"
         lines.append(f"{name:<34} {est:<10} {ci:<20} {v['target']:<14} {rating}")
+
+    comp = m.get("category_composition") or {}
+    subset = comp.get("matched_subset") or {}
+    residual = comp.get("residual_unknown") or {}
+    if subset:
+        est = f"{subset['point_estimate']:.4f}"
+        ci = f"[{subset['ci_lower']:.4f}, {subset['ci_upper']:.4f}]"
+        lines.append(
+            f"{'Category matched-subset':<34} {est:<10} {ci:<20} "
+            f"{'diagnostic':<14} {subset.get('detail', '')}"
+        )
+    if residual:
+        est = f"{residual['point_estimate']:.4f}"
+        ci = f"[{residual['ci_lower']:.4f}, {residual['ci_upper']:.4f}]"
+        lines.append(
+            f"{'Category residual UNKNOWN':<34} {est:<10} {ci:<20} "
+            f"{'diagnostic':<14} {residual.get('detail', '')}"
+        )
+    if comp.get("note"):
+        lines.append(comp["note"])
 
     # Kill switch
     for k, v in ks.items():

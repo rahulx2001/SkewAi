@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from src.agents.base import InteractionContext
-from src.agents.intake import IntakeAgent, _check_kill_switch, _extract_year
+from src.agents.intake import IntakeAgent, _check_kill_switch, _extract_year, match_category_synonym
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
@@ -91,6 +91,58 @@ async def test_category_synonym_airbag(pack):
     agent = IntakeAgent(ctx)
     res = await agent.run(customer_turn="My 2017 Toyota Camry airbag warning is on.")
     assert res["extracted"].get("category") == "AIR BAGS"
+
+
+def test_match_category_synonym_longest_match_and_speed_control_phrase():
+    """Leftmost span after nested-longest; speed-control phrases outrank engine."""
+    assert (
+        match_category_synonym(
+            "Tie rod snapped while driving my 2020 HONDA CR-V, wheel turned sideways and vehicle spun out."
+        )
+        == "STEERING"
+    )
+    assert (
+        match_category_synonym(
+            "Engine RPM spiked to redline and vehicle took off without input in my 2018 CHEVROLET SILVERADO."
+        )
+        == "VEHICLE SPEED CONTROL"
+    )
+    assert match_category_synonym("My 2019 Honda CR-V has an engine misfire.") == "ENGINE"
+    # Non-overlapping later word must not steal the primary complaint.
+    assert (
+        match_category_synonym(
+            "Seat belt pretensioner failed during impact and driver hit windshield, paramedics attended."
+        )
+        == "SEAT BELTS"
+    )
+    # Nested longer span wins at that position.
+    assert (
+        match_category_synonym(
+            "Electronic parking brake engaged spontaneously at 50 mph."
+        )
+        == "PARKING BRAKE"
+    )
+
+
+def test_extract_slot_category_longest_match_and_speed_control(pack):
+    """Live extractor (gazetteer-filtered) uses the same longest-match rule."""
+    ctx = _ctx(pack)
+    agent = IntakeAgent(ctx)
+    slot = pack.slots_by_name()["category"]
+    assert (
+        agent._extract_slot(
+            slot,
+            "Tie rod snapped while driving my 2020 HONDA CR-V, wheel turned sideways and vehicle spun out.",
+        )
+        == "STEERING"
+    )
+    assert (
+        agent._extract_slot(
+            slot,
+            "Engine RPM spiked to redline and vehicle took off without input in my 2018 CHEVROLET SILVERADO.",
+        )
+        == "VEHICLE SPEED CONTROL"
+    )
 
 
 async def test_description_is_free_text(pack):

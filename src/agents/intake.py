@@ -89,6 +89,8 @@ _CATEGORY_SYNONYMS: dict[str, str] = {
     "sudden acceleration": "VEHICLE SPEED CONTROL",
     "surged forward": "VEHICLE SPEED CONTROL",
     "full throttle": "VEHICLE SPEED CONTROL",
+    "took off without input": "VEHICLE SPEED CONTROL",
+    "spiked to redline": "VEHICLE SPEED CONTROL",
     "tie rod": "STEERING",
     "power steering": "STEERING",
     "rollover": "STRUCTURE",
@@ -140,6 +142,64 @@ _CATEGORY_SYNONYMS: dict[str, str] = {
     "transfer failed": "Transaction issues",
     "transaction failed": "Transaction issues",
 }
+
+# Speed-control phrases outrank a leading "engine"/"motor" mention.
+_SPEED_CONTROL_PHRASES: frozenset[str] = frozenset(
+    {
+        "took off without input",
+        "spiked to redline",
+    }
+)
+
+
+def _category_synonym_hits(
+    text: str,
+    *,
+    allowed: Any | None = None,
+) -> list[tuple[int, int, str, str]]:
+    """Non-contained synonym spans, leftmost-first.
+
+    Nested shorter hits are dropped ("parking brake" keeps PARKING BRAKE,
+    not SERVICE BRAKES). Non-overlapping hits stay; the caller picks.
+    """
+    lower = text.lower()
+    hits: list[tuple[int, int, str, str]] = []
+    for syn, canonical in _CATEGORY_SYNONYMS.items():
+        if allowed is not None and not allowed(canonical):
+            continue
+        for m in re.finditer(rf"\b{re.escape(syn)}\b", lower):
+            hits.append((m.start(), m.end(), syn, canonical))
+    keep: list[tuple[int, int, str, str]] = []
+    for h in hits:
+        h_len = h[1] - h[0]
+        contained = False
+        for o in hits:
+            if o[0] <= h[0] and o[1] >= h[1] and (o[1] - o[0]) > h_len:
+                contained = True
+                break
+        if not contained:
+            keep.append(h)
+    keep.sort(key=lambda span: (span[0], -(span[1] - span[0])))
+    return keep
+
+
+def match_category_synonym(
+    text: str,
+    *,
+    allowed: Any | None = None,
+) -> str | None:
+    """Primary category: speed-control phrase, else leftmost remaining span.
+
+    ``allowed`` is optional ``canonical -> truthy`` (gazetteer lookup) so a
+    finance synonym cannot fire on an automotive pack.
+    """
+    hits = _category_synonym_hits(text, allowed=allowed)
+    if not hits:
+        return None
+    for _start, _end, syn, canonical in hits:
+        if syn in _SPEED_CONTROL_PHRASES:
+            return canonical
+    return hits[0][3]
 
 
 def _extract_year(text: str, year_range: tuple[int, int] | None) -> str | None:
@@ -683,17 +743,18 @@ class IntakeAgent(Agent):
         if slot.validation == "gazetteer":
             # 2. For category slots, try the synonym map and capture secondary issues.
             if slot.name == "category":
-                lower = text.lower()
-                matched_categories: list[str] = []
-                # Direct gazetteer match if any
-                v = _extract_via_gazetteer(text, self.ctx, slot.name)
-                if v:
-                    matched_categories.append(v)
                 gaz = self.ctx.pack.gazetteer_for_slot(slot.name)
-                for syn, canonical in _CATEGORY_SYNONYMS.items():
-                    if re.search(rf"\b{re.escape(syn)}\b", lower):
-                        if gaz and gaz.lookup(canonical) and canonical not in matched_categories:
-                            matched_categories.append(canonical)
+                allowed = gaz.lookup if gaz is not None else None
+                matched_categories: list[str] = []
+                primary = match_category_synonym(text, allowed=allowed)
+                if primary:
+                    matched_categories.append(primary)
+                for _s, _e, _syn, canonical in _category_synonym_hits(text, allowed=allowed):
+                    if canonical not in matched_categories:
+                        matched_categories.append(canonical)
+                v = _extract_via_gazetteer(text, self.ctx, slot.name)
+                if v and v not in matched_categories:
+                    matched_categories.append(v)
                 if matched_categories:
                     if len(matched_categories) > 1:
                         self.ctx.slots["secondary_categories"] = matched_categories[1:]

@@ -320,7 +320,61 @@ class ShadowPilotEvaluator:
                 "severity_agreement": sev.__dict__,
                 "cluster_agreement": {k: v.__dict__ for k, v in clu.items()},
                 "cost_per_contact": cost.__dict__,
+                "category_composition": self.evaluate_category_composition(),
             },
+        }
+
+    def evaluate_category_composition(self) -> dict[str, Any]:
+        """Split category accuracy into specific-class vs residual UNKNOWN.
+
+        Residual UNKNOWN credit tracks corpus mix, not extraction. Diagnostic
+        only: this dict is not a gate and does not affect overall_verdict.
+        """
+        unknown = "UNKNOWN OR OTHER"
+        specific_pos = specific_tot = 0
+        residual_pos = residual_tot = 0
+        for c in self.contacts:
+            h = (c.human_slots.get("category") or "").strip().upper()
+            if not h:
+                continue
+            a = (c.ai_slots.get("category") or "").strip().upper()
+            if h == unknown:
+                residual_tot += 1
+                if a == h:
+                    residual_pos += 1
+            else:
+                specific_tot += 1
+                if a == h:
+                    specific_pos += 1
+        p_s, lo_s, hi_s = wilson_score_interval(specific_pos, specific_tot)
+        p_r, lo_r, hi_r = wilson_score_interval(residual_pos, residual_tot)
+        total = specific_tot + residual_tot
+        return {
+            "human_specific": specific_tot,
+            "human_unknown": residual_tot,
+            "matched_subset": {
+                "name": "slot_accuracy_category_matched_subset",
+                "point_estimate": p_s,
+                "ci_lower": lo_s,
+                "ci_upper": hi_s,
+                "target": "diagnostic (not a gate)",
+                "detail": f"{specific_pos}/{specific_tot} on human-specific classes",
+            },
+            "residual_unknown": {
+                "name": "slot_accuracy_category_residual_unknown",
+                "point_estimate": p_r,
+                "ci_lower": lo_r,
+                "ci_upper": hi_r,
+                "target": "diagnostic (not a gate)",
+                "detail": (
+                    f"{residual_pos}/{residual_tot} residual UNKNOWN OR OTHER "
+                    "(corpus mix, not extraction)"
+                ),
+            },
+            "note": (
+                f"{residual_tot} of {total} rows are UNKNOWN OR OTHER by construction; "
+                "residual default credit moves with corpus mix."
+            ),
         }
 
 

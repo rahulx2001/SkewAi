@@ -235,6 +235,38 @@ async def test_telephony_latency_benchmark():
     assert "[PASS]" in table
 
 
+def test_category_composition_is_diagnostic_not_a_gate():
+    """Matched-subset sits beside aggregate; residual UNKNOWN is corpus mix."""
+    contacts = []
+    for i in range(10):
+        human = "ENGINE" if i < 6 else "UNKNOWN OR OTHER"
+        ai = human if i != 0 else "STEERING"
+        contacts.append(
+            ShadowContact(
+                contact_id=f"c{i}",
+                ai_slots={"category": ai},
+                human_slots={"category": human},
+                ai_kill_switch_triggered=False,
+                human_kill_switch_needed=False,
+                ai_severity="Medium",
+                human_severity="Medium",
+                ai_cluster_id=40,
+                ai_top_3_clusters=[40, 14, 22],
+                engineer_verified_cluster_id=40,
+                cost_usd=0.01,
+            )
+        )
+    report = ShadowPilotEvaluator(contacts).run_full_evaluation(target_cost_usd=0.45)
+    comp = report["metrics"]["category_composition"]
+    assert comp["human_specific"] == 6
+    assert comp["human_unknown"] == 4
+    assert comp["matched_subset"]["detail"].startswith("5/6")
+    assert comp["residual_unknown"]["detail"].startswith("4/4")
+    assert "not a gate" in comp["matched_subset"]["target"]
+    # Composition must not be folded into the slot ratings that drive the verdict.
+    assert "category_matched_subset" not in report["metrics"]["slots"]
+
+
 def test_shadow_pilot_empirical_runner(tmp_path):
     from src.frontline.shadow_pilot import format_scorecard_table, run_shadow_pilot
 
