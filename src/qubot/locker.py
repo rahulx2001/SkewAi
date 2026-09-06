@@ -103,22 +103,34 @@ def build_locker_bundle(interaction_id: str) -> dict[str, Any]:
                 """
                 SELECT action_id, interaction_id, case_id, agent, action_type,
                        input_summary, evidence_ids, output_summary, ok, error,
-                       duration_ms, row_hash, prev_hash, ts, erased
+                       duration_ms, row_hash, prev_hash, ts, erased,
+                       hash_version, content_hash, claims
                 FROM agent_actions WHERE interaction_id = ? ORDER BY ts, action_id
                 """,
                 [interaction_id],
             ).fetchall()
         except Exception:
-            # Pre-erasure schema: no erased column yet.
-            acts = con.execute(
-                """
-                SELECT action_id, interaction_id, case_id, agent, action_type,
-                       input_summary, evidence_ids, output_summary, ok, error,
-                       duration_ms, row_hash, prev_hash, ts
-                FROM agent_actions WHERE interaction_id = ? ORDER BY ts, action_id
-                """,
-                [interaction_id],
-            ).fetchall()
+            try:
+                acts = con.execute(
+                    """
+                    SELECT action_id, interaction_id, case_id, agent, action_type,
+                           input_summary, evidence_ids, output_summary, ok, error,
+                           duration_ms, row_hash, prev_hash, ts, erased
+                    FROM agent_actions WHERE interaction_id = ? ORDER BY ts, action_id
+                    """,
+                    [interaction_id],
+                ).fetchall()
+            except Exception:
+                # Pre-erasure schema: no erased column yet.
+                acts = con.execute(
+                    """
+                    SELECT action_id, interaction_id, case_id, agent, action_type,
+                           input_summary, evidence_ids, output_summary, ok, error,
+                           duration_ms, row_hash, prev_hash, ts
+                    FROM agent_actions WHERE interaction_id = ? ORDER BY ts, action_id
+                    """,
+                    [interaction_id],
+                ).fetchall()
         cols = [d[0] for d in con.description]
         actions = [dict(zip(cols, r)) for r in acts]
         # Interaction header + version stamps (reproducibility)
@@ -359,6 +371,9 @@ def verify_locker_bundle(
                 "input_summary": a.get("input_summary"),
                 "output_summary": a.get("output_summary"),
                 "evidence_ids": a.get("evidence_ids"),
+                "claims": a.get("claims"),
+                "hash_version": a.get("hash_version", 1),
+                "content_hash": a.get("content_hash"),
                 "ok": a.get("ok", True),
                 "error": a.get("error"),
                 "duration_ms": a.get("duration_ms"),

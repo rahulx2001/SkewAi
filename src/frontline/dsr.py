@@ -167,6 +167,26 @@ def tombstone_interaction(interaction_id: str) -> dict[str, Any]:
     out: dict[str, int] = {}
     with ops_con() as con:
         _ensure_pin_table(con)
+        try:
+            from src.ledger.chain import compute_content_hash
+
+            rows = con.execute(
+                "SELECT action_id, interaction_id, case_id, agent, action_type, "
+                "input_summary, output_summary, evidence_ids, ok, error, duration_ms, ts, "
+                "hash_version, claims FROM agent_actions "
+                "WHERE interaction_id = ? AND (content_hash IS NULL OR content_hash = '') AND hash_version >= 2",
+                [iid],
+            ).fetchall()
+            cols = [d[0] for d in con.description]
+            for r in rows:
+                rd = dict(zip(cols, r))
+                ch = compute_content_hash(rd, version=int(rd.get("hash_version") or 2))
+                con.execute(
+                    "UPDATE agent_actions SET content_hash = ? WHERE action_id = ?",
+                    [ch, rd["action_id"]],
+                )
+        except Exception:
+            pass
         for table, col, idcol in (
             ("interaction_turns", "text", "interaction_id"),
             ("agent_actions", "input_summary", "interaction_id"),

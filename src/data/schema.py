@@ -185,6 +185,9 @@ CREATE TABLE IF NOT EXISTS agent_actions (
     schema_version     INTEGER NOT NULL DEFAULT 1,
     prev_hash          VARCHAR,                    -- hash chain: previous row_hash (tamper-evident)
     row_hash           VARCHAR,                    -- sha256 of this row + prev_hash
+    hash_version       INTEGER NOT NULL DEFAULT 1, -- hash version (1: legacy, 2: with claims & content_hash)
+    content_hash       VARCHAR,                    -- sha256 of canonical row content (preserved across erasure)
+    claims             VARCHAR,                    -- serialized claims payload
     erased             BOOLEAN NOT NULL DEFAULT FALSE
     -- chain-preserving erasure (7.3): PII content tombstoned, hashes kept
 );

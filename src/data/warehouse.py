@@ -373,7 +373,15 @@ def apply_ops_schema(con) -> None:
              ("csat", "INTEGER"), ("customer_resolved", "BOOLEAN"),
              ("enrichment_partial", "BOOLEAN")),
         ),
-        ("agent_actions", (("erased", "BOOLEAN"),)),
+        (
+            "agent_actions",
+            (
+                ("erased", "BOOLEAN"),
+                ("hash_version", "INTEGER DEFAULT 1"),
+                ("content_hash", "VARCHAR"),
+                ("claims", "VARCHAR"),
+            ),
+        ),
         ("interaction_turns", (("erased", "BOOLEAN"),)),
     ):
         for col, typ in cols:

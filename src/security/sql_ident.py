@@ -67,6 +67,9 @@ SAFE_COLUMNS = frozenset(
         "erased",
         "description",
         "body",
+        "hash_version",
+        "content_hash",
+        "claims",
     }
 )
 
@@ -87,6 +90,9 @@ SAFE_ALTER_COLUMNS = frozenset(
         "erased",
         "entity_key",
         "provenance",
+        "hash_version",
+        "content_hash",
+        "claims",
     }
 )
 

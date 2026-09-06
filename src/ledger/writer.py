@@ -220,6 +220,8 @@ class AgentAction:
     duration_ms: int | None = None
     action_id: str = field(default_factory=_ulid)
     ts: datetime = field(default_factory=_now)
+    hash_version: int = 2
+    content_hash: str | None = None
 
 
 # ── Writer ──────────────────────────────────────────────────────────────────
@@ -232,9 +234,14 @@ def _insert_action_row(con, action: AgentAction) -> str:
             f"unknown action_type {action.action_type!r}; "
             f"must be one of the ledger ACTION_TYPES vocabulary"
         )
-    from src.ledger.chain import GENESIS, compute_row_hash
+    from src.ledger.chain import GENESIS, compute_content_hash, compute_row_hash
 
     evidence_json = json.dumps(action.evidence_ids)
+    claims_json = (
+        action.claims
+        if isinstance(action.claims, str)
+        else json.dumps(action.claims or [], sort_keys=True)
+    )
     ts_stored = _ts_for_storage(action.ts)
     # Hash chain: previous row for this interaction (append-only order by ts/action_id).
     prev_row = con.execute(
@@ -252,6 +259,8 @@ def _insert_action_row(con, action: AgentAction) -> str:
         prev_ts = _ts_for_storage(prev_row[1])
         if ts_stored <= prev_ts:
             ts_stored = prev_ts + timedelta(microseconds=100)
+
+    hash_v = getattr(action, "hash_version", 2) or 2
     row_payload = {
         "action_id": action.action_id,
         "interaction_id": action.interaction_id,
@@ -261,19 +270,26 @@ def _insert_action_row(con, action: AgentAction) -> str:
         "input_summary": (action.input_summary or "")[:500],
         "output_summary": (action.output_summary or "")[:500],
         "evidence_ids": evidence_json,
+        "claims": claims_json,
         "ok": action.ok,
         "error": action.error,
         "duration_ms": action.duration_ms,
         "ts": str(ts_stored),
+        "hash_version": hash_v,
     }
-    row_hash = compute_row_hash(row_payload, prev_hash)
+    content_hash = compute_content_hash(row_payload, version=hash_v)
+    row_payload["content_hash"] = content_hash
+    action.content_hash = content_hash
+    row_hash = compute_row_hash(row_payload, prev_hash, version=hash_v)
+
     con.execute(
         """
         INSERT INTO agent_actions (
             action_id, interaction_id, case_id, agent, action_type,
             input_summary, output_summary, evidence_ids,
-            ok, error, duration_ms, ts, prev_hash, row_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ok, error, duration_ms, ts, prev_hash, row_hash,
+            hash_version, content_hash, claims
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             action.action_id,
@@ -290,6 +306,9 @@ def _insert_action_row(con, action: AgentAction) -> str:
             ts_stored,
             prev_hash,
             row_hash,
+            hash_v,
+            content_hash,
+            claims_json,
         ],
     )
     return row_hash
@@ -703,6 +722,12 @@ def list_actions(interaction_id: str) -> list[dict[str, Any]]:
                 d["evidence_ids"] = []
         else:
             d["evidence_ids"] = []
+        if d.get("claims"):
+            try:
+                if isinstance(d["claims"], str):
+                    d["claims"] = json.loads(d["claims"])
+            except (json.JSONDecodeError, TypeError):
+                pass
         out.append(d)
     return out
 
