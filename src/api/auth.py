@@ -43,6 +43,10 @@ def _configured_key() -> str:
     return os.getenv("FRONTLINE_API_KEY", "").strip()
 
 
+def _configured_dsr_key() -> str:
+    return os.getenv("FRONTLINE_DSR_API_KEY", "").strip()
+
+
 def auth_required() -> bool:
     """True when protected routes must present a valid key.
 
@@ -56,14 +60,16 @@ def auth_required() -> bool:
             return True
     except Exception:
         pass
-    if _env_bool("FRONTLINE_OPEN_MODE", False):
-        return False
     if _env_bool("FRONTLINE_AUTH_REQUIRED", False):
         return True
+    if _env_bool("FRONTLINE_OPEN_MODE", False):
+        return False
     return bool(_configured_key())
 
 
 def is_open_mode() -> bool:
+    if _env_bool("FRONTLINE_AUTH_REQUIRED", False):
+        return False
     return not auth_required()
 
 
@@ -101,7 +107,8 @@ def check_api_key(
     if allow_open and is_open_mode():
         return
     expected = _configured_key()
-    if not expected:
+    dsr_expected = _configured_dsr_key()
+    if not expected and not dsr_expected:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
@@ -121,7 +128,9 @@ def check_api_key(
                 detail="API key in query string is disabled; use X-API-Key or Authorization: Bearer.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    if not provided or not secrets.compare_digest(provided, expected):
+    matches_service = bool(expected and secrets.compare_digest(provided, expected))
+    matches_dsr = bool(dsr_expected and secrets.compare_digest(provided, dsr_expected))
+    if not provided or (not matches_service and not matches_dsr):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key. Send X-API-Key or Authorization: Bearer.",

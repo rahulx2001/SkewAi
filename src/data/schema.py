@@ -561,6 +561,27 @@ CREATE TABLE IF NOT EXISTS trust_roots (
     revoked_at     TIMESTAMP NULL,
     created_by     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS key_mint_audit (
+    audit_id           VARCHAR PRIMARY KEY,
+    principal          VARCHAR NOT NULL,
+    requested_scopes   VARCHAR NOT NULL,
+    granted_scopes     VARCHAR NOT NULL,
+    tenant_id          VARCHAR NOT NULL,
+    ip                 VARCHAR,
+    success            BOOLEAN NOT NULL,
+    error              VARCHAR,
+    created_at         TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dsr_export_audit (
+    audit_id           VARCHAR PRIMARY KEY,
+    principal          VARCHAR NOT NULL,
+    scope              VARCHAR NOT NULL,
+    record_count       INTEGER NOT NULL,
+    ip                 VARCHAR,
+    created_at         TIMESTAMP NOT NULL
+);
 """
 
 

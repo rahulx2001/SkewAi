@@ -1,12 +1,89 @@
-"""Data-subject request tooling: export/delete by interaction (feature #34)."""
-
 from __future__ import annotations
 
+from collections import defaultdict
 import json
+import os
+import threading
+import time
 from typing import Any
 
 from src.data.timeutil import utc_now
 from src.data.warehouse import ops_con
+from src.ids import new_ulid
+
+_dsr_rate_limit_lock = threading.Lock()
+_dsr_export_history: dict[str, list[float]] = defaultdict(list)
+
+
+def check_dsr_export_rate_limit(
+    principal: str,
+    limit: int | None = None,
+    window_s: float = 3600.0,
+) -> tuple[bool, int]:
+    """Sliding-window rate limiter for DSR exports (default 5/hour per principal)."""
+    if limit is None:
+        try:
+            limit = int(os.getenv("FRONTLINE_DSR_EXPORT_RATE_LIMIT", "5"))
+        except Exception:
+            limit = 5
+    now = time.time()
+    cutoff = now - window_s
+    with _dsr_rate_limit_lock:
+        history = [ts for ts in _dsr_export_history[principal] if ts > cutoff]
+        if len(history) >= limit:
+            oldest = min(history) if history else now
+            retry_after = max(1, int(window_s - (now - oldest)))
+            _dsr_export_history[principal] = history
+            return False, retry_after
+        history.append(now)
+        _dsr_export_history[principal] = history
+        return True, 0
+
+
+def reset_dsr_export_rate_limits() -> None:
+    """Reset rate limit history for tests."""
+    with _dsr_rate_limit_lock:
+        _dsr_export_history.clear()
+
+
+def _ensure_dsr_audit_table(con) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dsr_export_audit (
+            audit_id VARCHAR PRIMARY KEY,
+            principal VARCHAR NOT NULL,
+            scope VARCHAR NOT NULL,
+            record_count INTEGER NOT NULL,
+            ip VARCHAR,
+            created_at TIMESTAMP NOT NULL
+        )
+        """
+    )
+
+
+def log_dsr_export_audit(
+    *,
+    principal: str,
+    scope: str,
+    record_count: int,
+    ip: str | None = None,
+) -> None:
+    """Log an audit row for DSR export."""
+    aid = "dsr_aud_" + new_ulid()
+    now = utc_now()
+    try:
+        with ops_con() as con:
+            _ensure_dsr_audit_table(con)
+            con.execute(
+                """
+                INSERT INTO dsr_export_audit
+                (audit_id, principal, scope, record_count, ip, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [aid, str(principal), str(scope), int(record_count), ip, now],
+            )
+    except Exception:
+        pass
 
 
 def export_interaction(interaction_id: str, *, redact_pii: bool = False) -> dict[str, Any]:

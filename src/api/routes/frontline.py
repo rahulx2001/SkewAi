@@ -159,12 +159,14 @@ def _scrub_or_authorize(
 
 @router.get("/cases/export")
 async def export_cases(
+    request: Request,
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
     limit: int = Query(default=500, ge=1, le=2000),
     scrub_pii: bool = Query(default=True),
-    _role: str = Depends(require_perm_dep("case:read")),
+    _role: str = Depends(get_role),
+    _actor: str = Depends(get_actor),
 ):
     """CSV export of cases (filters match list endpoint).
 
@@ -173,12 +175,32 @@ async def export_cases(
     from fastapi.responses import Response
 
     from src.api.export import build_manifest
+    from src.frontline.dsr import (
+        check_dsr_export_rate_limit,
+        log_dsr_export_audit,
+    )
     from src.frontline.ops import build_cases_csv
 
+    require_perm(_role, "case:read")
     scrub = _scrub_or_authorize(_role, scrub_pii, surface="cases/export")
+    if not scrub:
+        allowed, retry_after = check_dsr_export_rate_limit(_actor)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="DSR export rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
     csv_text, count = build_cases_csv(
         status=status, severity=severity, q=q, limit=limit, scrub_pii=scrub
     )
+    if not scrub:
+        log_dsr_export_audit(
+            principal=_actor,
+            scope=f"cases_export:status={status or '*'}:q={q or '*'}",
+            record_count=count,
+            ip=request.client.host if request.client else None,
+        )
     body = csv_text.encode("utf-8")
     manifest = build_manifest(body, count=count)
     return Response(
@@ -1050,15 +1072,34 @@ async def dsr_export(
     request: Request,
     interaction_id: str,
     role: str = Depends(get_role),
+    actor: str = Depends(get_actor),
 ) -> dict[str, Any]:
     """Export ops rows for one interaction (always auth — FIND-004)."""
     from src.api.rbac import require_perm
-    from src.frontline.dsr import export_interaction
+    from src.frontline.dsr import (
+        check_dsr_export_rate_limit,
+        export_interaction,
+        log_dsr_export_audit,
+    )
     from src.security.audit_log import security_event
 
     require_perm(role, "dsr:export")
+    allowed, retry_after = check_dsr_export_rate_limit(actor)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="DSR export rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         out = export_interaction(interaction_id)
+        rec_count = len(out.get("turns") or []) + len(out.get("cases") or [])
+        log_dsr_export_audit(
+            principal=actor,
+            scope=f"interaction:{interaction_id}",
+            record_count=rec_count,
+            ip=request.client.host if request.client else None,
+        )
         security_event(
             "dsr.export",
             outcome="success",

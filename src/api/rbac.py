@@ -20,13 +20,14 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 from typing import Any
 
 from fastapi import Depends, Header, HTTPException, Request
 
-ROLES = frozenset({"agent", "supervisor", "auditor", "service", "admin"})
-ELEVATED = frozenset({"supervisor", "auditor", "admin"})
+ROLES = frozenset({"agent", "supervisor", "auditor", "service", "admin", "dsr_officer"})
+ELEVATED = frozenset({"supervisor", "auditor", "admin", "dsr_officer"})
 
 #: Session cookie names. ``__Host-`` prefix (item 19) is required where
 #: compatible: production-like deploys set Secure, so the prefixed name is
@@ -71,16 +72,15 @@ PERMS: dict[str, frozenset[str]] = {
         {
             "contact:write",
             "case:read",
-            "case:write",
             "takeover",
-            "approval:decide",
             "audit:read",
             "ledger:read",
             "channel:ingest",
             "biometrics:match",
-            "routing:control",
+            "ops:read",
         }
     ),
+    "dsr_officer": frozenset({"dsr:export", "case:read"}),
     "supervisor": frozenset(
         {
             "contact:write",
@@ -93,9 +93,10 @@ PERMS: dict[str, frozenset[str]] = {
             "channel:ingest",
             "biometrics:match",
             "routing:control",
+            "ops:read",
         }
     ),
-    "auditor": frozenset({"case:read", "audit:read", "ledger:read", "dsr:export"}),
+    "auditor": frozenset({"case:read", "audit:read", "ledger:read", "dsr:export", "ops:read"}),
     "admin": frozenset(
         {
             "*",
@@ -103,7 +104,12 @@ PERMS: dict[str, frozenset[str]] = {
             "dsr:delete",
             "marketplace:install",
             "session:mint",
-            "key:admin",
+            "admin:keys",
+            "admin:cross_tenant",
+            "deploy:activate",
+            "deploy:create",
+            "ops:read",
+            "ops:write",
             "seat:admin",
             "pack:edit",
             "pack:activate",
@@ -161,6 +167,7 @@ def issue_session(
     *,
     issuer_role: str | None = None,
     ttl_s: int = 3600,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Mint a signed session. Elevated roles need an admin issuer (or bootstrap)."""
     requested = (role or "agent").strip().lower()
@@ -195,10 +202,15 @@ def issue_session(
 
     exp = int(time.time()) + max(60, int(ttl_s))
     body = {"sub": subject, "role": requested, "exp": exp}
+    if extra:
+        body.update(extra)
     raw = json.dumps(body, separators=(",", ":"), sort_keys=True)
     sig = hmac.new(_secret(), raw.encode(), hashlib.sha256).hexdigest()[:32]
     token = f"{raw}|{sig}"
-    return {"token": token, "role": requested, "subject": subject, "exp": exp}
+    res = {"token": token, "role": requested, "subject": subject, "exp": exp}
+    if extra:
+        res.update(extra)
+    return res
 
 
 def issue_idp_session(subject: str, *, ttl_s: int = 3600) -> dict[str, Any]:
@@ -228,10 +240,12 @@ def verify_session(token: str) -> dict[str, Any]:
 def role_from_headers(
     x_frontline_role: str | None = None,
     x_frontline_session: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Resolve role.
 
     - Signed session: trust session role.
+    - DSR API key (FRONTLINE_DSR_API_KEY): dsr_officer role.
     - Auth required (shared API key validated by Depends): service principal
       (not full admin — H1). Opt-in full admin via FRONTLINE_SERVICE_IS_ADMIN=1.
     - Open mode / unauthenticated: agent only; bare ``X-Frontline-Role`` cannot elevate.
@@ -247,6 +261,12 @@ def role_from_headers(
             role = "agent"
     else:
         role = "agent"
+
+    # Distinguish dedicated DSR key vs shared service key
+    dsr_key = os.getenv("FRONTLINE_DSR_API_KEY", "").strip()
+    if api_key and dsr_key and secrets.compare_digest(api_key.strip(), dsr_key):
+        return "dsr_officer"
+
     # Shared API key → limited service principal (or legacy full admin opt-in)
     if not _is_open_mode() and _auth_required():
         if _env_bool("FRONTLINE_SERVICE_IS_ADMIN", False):
@@ -257,6 +277,7 @@ def role_from_headers(
 
 def subject_from_headers(
     x_frontline_session: str | None = None,
+    api_key: str | None = None,
     *,
     default: str = "service",
 ) -> str:
@@ -264,9 +285,28 @@ def subject_from_headers(
     if isinstance(x_frontline_session, str) and x_frontline_session:
         body = verify_session(x_frontline_session)
         return str(body.get("sub") or body.get("role") or default)[:80]
+    dsr_key = os.getenv("FRONTLINE_DSR_API_KEY", "").strip()
+    if api_key and dsr_key and secrets.compare_digest(api_key.strip(), dsr_key):
+        return "dsr_officer"
     if not _is_open_mode() and _auth_required():
         return default[:80]
     return "operator"
+
+
+def claims_from_headers(
+    x_frontline_session: str | None = None,
+    cookies: Any = None,
+) -> dict[str, Any]:
+    """Extract claims dictionary from session token (header or cookie)."""
+    token = (x_frontline_session or "").strip()
+    if not token and cookies is not None:
+        token = session_token_from_cookies(cookies)
+    if token:
+        try:
+            return verify_session(token)
+        except Exception:
+            return {}
+    return {}
 
 
 def require_perm(role: str, perm: str, *, open_mode_ok: bool = False) -> None:
@@ -339,21 +379,40 @@ def oidc_discovery() -> dict[str, Any]:
     }
 
 
+def _extract_header_key(request: Request, x_api_key: str | None, authorization: str | None) -> str:
+    key = (x_api_key or "").strip()
+    if not key and authorization:
+        parts = authorization.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            key = parts[1].strip()
+        else:
+            key = authorization.strip()
+    return key
+
+
 async def get_role(
     request: Request,
     x_frontline_role: str | None = Header(default=None),
     x_frontline_session: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
 ) -> str:
+    key = _extract_header_key(request, x_api_key, authorization)
     return role_from_headers(
         x_frontline_role,
         x_frontline_session or session_token_from_cookies(request.cookies),
+        api_key=key,
     )
 
 
 async def get_actor(
     request: Request,
     x_frontline_session: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
 ) -> str:
+    key = _extract_header_key(request, x_api_key, authorization)
     return subject_from_headers(
-        x_frontline_session or session_token_from_cookies(request.cookies) or None
+        x_frontline_session or session_token_from_cookies(request.cookies) or None,
+        api_key=key,
     )

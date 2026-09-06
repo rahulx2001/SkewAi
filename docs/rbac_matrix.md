@@ -6,28 +6,31 @@ build if a route demands a permission no role grants, or if this doc drifts
 from `PERMS`.
 
 Roles: `agent` (default browser caller) · `service` (API-key principal) ·
-`supervisor` · `auditor` · `admin`.
+`supervisor` · `auditor` · `dsr_officer` · `admin`.
 
-| Permission | agent | service | supervisor | auditor | admin | Used by |
-|---|---|---|---|---|---|---|
-| `contact:write` | ✓ | ✓ | ✓ | – | ✓ | start/interact/ingest/handoff accept |
-| `case:read` | ✓ | ✓ | ✓ | ✓ | ✓ | cases, investigations, audits detail, comments |
-| `case:write` | – | ✓ | ✓ | – | ✓ | notes, investigation patch/comments/feedback |
-| `takeover` | – | ✓ | ✓ | – | ✓ | takeover/release/override |
-| `audit:read` | – | ✓ | – | ✓ | ✓ | audit list/rerun |
-| `ledger:read` | – | ✓ | – | ✓ | ✓ | explain |
-| `dsr:export` | – | ✓ | ✓ | ✓ | ✓ | DSR export, PII opt-out reads |
-| `dsr:delete` | – | – | – | – | ✓ | DSR tombstone/erase |
-| `approval:decide` | – | ✓ | ✓ | – | ✓ | approvals |
-| `channel:ingest` | – | ✓ | ✓ | – | ✓ | channel ingest |
-| `biometrics:match` | – | ✓ | ✓ | – | ✓ | biometrics |
-| `session:mint` | – | ✓ | – | – | ✓ | session mint |
-| `pack:edit` | – | – | – | – | ✓ | OIDC config, pack edit |
-| `pack:activate` | – | – | – | – | ✓ | pack activation |
-| `marketplace:install` | – | – | – | – | ✓ | marketplace |
-| `ops:drain` | – | – | – | – | ✓ | drain control |
-| `jobs:run` | – | – | – | – | ✓ | job run-next |
-| `routing:control` | – | ✓ | ✓ | – | ✓ | traffic gate & circuit breaker control |
+| Permission | agent | service | supervisor | auditor | dsr_officer | admin | Used by |
+|---|---|---|---|---|---|---|---|
+| `contact:write` | ✓ | ✓ | ✓ | – | – | ✓ | start/interact/ingest/handoff accept |
+| `case:read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | cases, investigations, audits detail, comments |
+| `case:write` | – | – | ✓ | – | – | ✓ | notes, investigation patch/comments/feedback |
+| `takeover` | – | – | ✓ | – | – | ✓ | takeover/release/override |
+| `audit:read` | – | ✓ | – | ✓ | – | ✓ | audit list/rerun |
+| `ledger:read` | – | ✓ | – | ✓ | – | ✓ | explain |
+| `dsr:export` | – | – | ✓ | ✓ | ✓ | ✓ | DSR export, PII opt-out reads |
+| `dsr:delete` | – | – | – | – | – | ✓ | DSR tombstone/erase |
+| `approval:decide` | – | – | ✓ | – | – | ✓ | approvals |
+| `channel:ingest` | – | ✓ | ✓ | – | – | ✓ | channel ingest |
+| `biometrics:match` | – | ✓ | ✓ | – | – | ✓ | biometrics |
+| `session:mint` | – | – | – | – | – | ✓ | session mint |
+| `admin:keys` | – | – | – | – | – | ✓ | scoped key minting |
+| `pack:edit` | – | – | – | – | – | ✓ | OIDC config, pack edit |
+| `pack:activate` | – | – | – | – | – | ✓ | pack activation |
+| `marketplace:install` | – | – | – | – | – | ✓ | marketplace |
+| `ops:drain` | – | – | – | – | – | ✓ | drain control |
+| `ops:read` | – | ✓ | ✓ | ✓ | – | ✓ | hardening SLOs, retention, metrics |
+| `ops:write` | – | – | – | – | – | ✓ | hardening fairness, cost updates |
+| `jobs:run` | – | – | – | – | – | ✓ | job run-next |
+| `routing:control` | – | – | ✓ | – | – | ✓ | traffic gate & circuit breaker control |
 
 Notes:
 - Bare `X-Frontline-Role` never elevates above `agent`; elevated roles need

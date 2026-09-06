@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Up
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_api_key
-from src.api.rbac import get_role
+from src.api.rbac import get_actor, get_role
 from src.config import REPO_ROOT
 
 router = APIRouter(
@@ -295,20 +295,135 @@ async def seats_assign(body: dict[str, Any], role: str = Depends(get_role)) -> d
 
 
 @router.post("/keys")
-async def keys_create(body: dict[str, Any], role: str = Depends(get_role)) -> dict[str, Any]:
-    from src.api.rbac import require_perm
-    from src.security.scoped_keys import create_scoped_key
+async def keys_create(
+    request: Request,
+    body: dict[str, Any],
+    role: str = Depends(get_role),
+    actor: str = Depends(get_actor),
+    x_frontline_session: str | None = Header(default=None),
+) -> dict[str, Any]:
+    from src.api.rbac import PERMS, claims_from_headers, require_perm
+    from src.security.scoped_keys import (
+        check_key_mint_rate_limit,
+        create_scoped_key,
+        log_key_mint_audit,
+    )
 
-    require_perm(role, "key:admin")
-    tenant = str(body.get("tenant_id") or "default").strip()
-    if not tenant:
+    claims = claims_from_headers(x_frontline_session, request.cookies)
+    client_ip = request.client.host if request.client else "unknown"
+    principal = str(claims.get("sub") or actor or "unknown")
+
+    requested_scopes = list(body.get("scopes") or ["kpi:read"])
+    requested_tenant = str(body.get("tenant_id") or "").strip()
+    if not requested_tenant:
         raise HTTPException(400, "tenant_id required")
-    try:
-        return create_scoped_key(
-            list(body.get("scopes") or ["kpi:read"]),
-            tenant_id=tenant,
+
+    # 1. Rate limiting
+    allowed, retry_after = check_key_mint_rate_limit(principal)
+    if not allowed:
+        log_key_mint_audit(
+            principal=principal,
+            requested_scopes=requested_scopes,
+            granted_scopes=[],
+            tenant_id=requested_tenant,
+            ip=client_ip,
+            success=False,
+            error="rate_limit_exceeded",
         )
+        raise HTTPException(
+            status_code=429,
+            detail="key mint rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # 2. Scope restriction
+    caller_scopes = claims.get("scopes")
+    if caller_scopes is not None:
+        caller_set = set(caller_scopes)
+        for s in requested_scopes:
+            if s not in caller_set or s.startswith("admin:"):
+                log_key_mint_audit(
+                    principal=principal,
+                    requested_scopes=requested_scopes,
+                    granted_scopes=[],
+                    tenant_id=requested_tenant,
+                    ip=client_ip,
+                    success=False,
+                    error="scope_escalation_denied",
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"scope_escalation_denied: scope {s!r} exceeds granted scopes",
+                )
+
+    # 3. Minter authorization
+    try:
+        require_perm(role, "admin:keys")
+    except HTTPException:
+        log_key_mint_audit(
+            principal=principal,
+            requested_scopes=requested_scopes,
+            granted_scopes=[],
+            tenant_id=requested_tenant,
+            ip=client_ip,
+            success=False,
+            error="forbidden",
+        )
+        raise
+
+    # 4. Tenant binding
+    caller_tenant = claims.get("tenant_id")
+    if caller_tenant and caller_tenant != requested_tenant:
+        if caller_scopes is not None and "admin:cross_tenant" not in caller_scopes and "*" not in caller_scopes:
+            log_key_mint_audit(
+                principal=principal,
+                requested_scopes=requested_scopes,
+                granted_scopes=[],
+                tenant_id=requested_tenant,
+                ip=client_ip,
+                success=False,
+                error="tenant_mismatch",
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=f"tenant_mismatch: principal bound to {caller_tenant} cannot mint for {requested_tenant}",
+            )
+        try:
+            require_perm(role, "admin:cross_tenant")
+        except HTTPException:
+            log_key_mint_audit(
+                principal=principal,
+                requested_scopes=requested_scopes,
+                granted_scopes=[],
+                tenant_id=requested_tenant,
+                ip=client_ip,
+                success=False,
+                error="tenant_mismatch",
+            )
+            raise
+
+    # 5. Create scoped key
+    try:
+        res = create_scoped_key(requested_scopes, tenant_id=requested_tenant)
+        log_key_mint_audit(
+            principal=principal,
+            requested_scopes=requested_scopes,
+            granted_scopes=requested_scopes,
+            tenant_id=requested_tenant,
+            ip=client_ip,
+            success=True,
+        )
+        return res
     except ValueError as e:
+        log_key_mint_audit(
+            principal=principal,
+            requested_scopes=requested_scopes,
+            granted_scopes=[],
+            tenant_id=requested_tenant,
+            ip=client_ip,
+            success=False,
+            error=str(e),
+        )
         raise HTTPException(400, str(e)) from e
 
 

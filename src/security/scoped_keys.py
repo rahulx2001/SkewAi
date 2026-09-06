@@ -12,6 +12,10 @@ from src.data.timeutil import utc_now
 from src.data.warehouse import ops_con
 from src.ids import new_ulid
 
+from collections import defaultdict
+import threading
+import time
+
 SCOPES = frozenset(
     {
         "kpi:read",
@@ -22,6 +26,88 @@ SCOPES = frozenset(
         "webhook:manage",
     }
 )
+
+_rate_limit_lock = threading.Lock()
+_mint_history: dict[str, list[float]] = defaultdict(list)
+
+
+def check_key_mint_rate_limit(
+    principal: str,
+    limit: int | None = None,
+    window_s: float = 60.0,
+) -> tuple[bool, int]:
+    """Sliding-window rate limiter for scoped-key minting per principal."""
+    if limit is None:
+        try:
+            limit = int(os.getenv("FRONTLINE_KEY_MINT_RATE_LIMIT", "10"))
+        except Exception:
+            limit = 10
+    now = time.time()
+    cutoff = now - window_s
+    with _rate_limit_lock:
+        history = [ts for ts in _mint_history[principal] if ts > cutoff]
+        if len(history) >= limit:
+            oldest = min(history) if history else now
+            retry_after = max(1, int(window_s - (now - oldest)))
+            _mint_history[principal] = history
+            return False, retry_after
+        history.append(now)
+        _mint_history[principal] = history
+        return True, 0
+
+
+def reset_key_mint_rate_limits() -> None:
+    """Reset rate limit history (testing)."""
+    with _rate_limit_lock:
+        _mint_history.clear()
+
+
+def _ensure_audit_table(con) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_mint_audit (
+            audit_id VARCHAR PRIMARY KEY,
+            principal VARCHAR NOT NULL,
+            requested_scopes VARCHAR NOT NULL,
+            granted_scopes VARCHAR NOT NULL,
+            tenant_id VARCHAR NOT NULL,
+            ip VARCHAR,
+            success BOOLEAN NOT NULL,
+            error VARCHAR,
+            created_at TIMESTAMP NOT NULL
+        )
+        """
+    )
+
+
+def log_key_mint_audit(
+    *,
+    principal: str,
+    requested_scopes: list[str],
+    granted_scopes: list[str],
+    tenant_id: str,
+    ip: str | None = None,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    """Log an audit entry for key minting."""
+    aid = "audit_" + new_ulid()
+    now = utc_now()
+    req_str = ",".join(requested_scopes) if isinstance(requested_scopes, (list, set, tuple)) else str(requested_scopes)
+    grant_str = ",".join(granted_scopes) if isinstance(granted_scopes, (list, set, tuple)) else str(granted_scopes)
+    try:
+        with ops_con() as con:
+            _ensure_audit_table(con)
+            con.execute(
+                """
+                INSERT INTO key_mint_audit
+                (audit_id, principal, requested_scopes, granted_scopes, tenant_id, ip, success, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [aid, str(principal), req_str, grant_str, str(tenant_id), ip, bool(success), error, now],
+            )
+    except Exception:
+        pass
 
 
 def _ensure(con) -> None:
@@ -100,4 +186,11 @@ def authenticate_scoped(token: str, needed: str) -> dict[str, Any]:
     return {"ok": True, "key_id": row[0], "scopes": scopes, "tenant_id": row[2]}
 
 
-__all__ = ["SCOPES", "create_scoped_key", "authenticate_scoped"]
+__all__ = [
+    "SCOPES",
+    "create_scoped_key",
+    "authenticate_scoped",
+    "check_key_mint_rate_limit",
+    "reset_key_mint_rate_limits",
+    "log_key_mint_audit",
+]

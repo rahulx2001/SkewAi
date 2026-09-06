@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.auth import require_api_key
 from src.api.jsonutil import json_safe
+from src.api.rbac import get_role, require_perm
 
 router = APIRouter(
     prefix="/api/v3",
@@ -185,9 +186,10 @@ async def experiments_complete(experiment_id: str) -> dict[str, Any]:
 
 
 @router.post("/governance/deployments")
-async def deploy_create(body: dict[str, Any]) -> dict[str, Any]:
+async def deploy_create(body: dict[str, Any], role: str = Depends(get_role)) -> dict[str, Any]:
     from src.v3.governance import create_deployment
 
+    require_perm(role, "deploy:create", open_mode_ok=True)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
     try:
@@ -215,9 +217,14 @@ async def deploy_list(limit: int = Query(default=50, ge=1, le=200)) -> dict[str,
 
 
 @router.post("/governance/deployments/{deployment_id}/activate")
-async def deploy_activate(deployment_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+async def deploy_activate(
+    deployment_id: str,
+    body: dict[str, Any] | None = None,
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
     from src.v3.governance import activate_deployment
 
+    require_perm(role, "deploy:activate", open_mode_ok=True)
     body = body or {}
     try:
         return activate_deployment(
@@ -229,9 +236,13 @@ async def deploy_activate(deployment_id: str, body: dict[str, Any] | None = None
 
 
 @router.post("/governance/rollback")
-async def deploy_rollback(body: dict[str, Any] | None = None) -> dict[str, Any]:
+async def deploy_rollback(
+    body: dict[str, Any] | None = None,
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
     from src.v3.governance import rollback_deployment
 
+    require_perm(role, "deploy:activate", open_mode_ok=True)
     body = body or {}
     try:
         return rollback_deployment(
