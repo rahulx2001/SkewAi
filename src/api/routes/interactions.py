@@ -455,17 +455,30 @@ async def start_interaction(
                 "interaction_id": None,
             }
 
+        from src.ids import new_ulid
+
         tg = get_traffic_gate()
         raw_hash = request.headers.get("X-Call-Hash")
         if raw_hash is not None and raw_hash.strip().isdigit():
-            call_hash = int(raw_hash.strip())
+            admitted, reason = tg.evaluate_ingress(
+                call_hash=int(raw_hash.strip()),
+                domain=pack_id,
+                circuit_breaker=cb,
+            )
         else:
-            try:
-                call_hash = int(_hashlib.sha256(call_seed.encode()).hexdigest()[:8], 16)
-            except Exception:
-                call_hash = 0
+            seed_source = (
+                request.headers.get("X-Call-Seed")
+                or request.headers.get("X-Call-Sid")
+                or channel_session_id
+                or customer_ref
+                or f"int_{new_ulid()}"
+            )
+            admitted, reason = tg.evaluate_ingress(
+                seed_source=seed_source,
+                domain=pack_id,
+                circuit_breaker=cb,
+            )
 
-        admitted, reason = tg.evaluate_ingress(call_hash, domain=pack_id)
         if not admitted:
             return {
                 "routed_to": "human_control",

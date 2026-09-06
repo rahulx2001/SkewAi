@@ -180,3 +180,25 @@ Date: YYYY-MM-DD | Supervisor on Duty: [Name] | Pack: automotive_nhtsa
 - Supervisor Signature: _______________________ Date: _________
 - Lead Engineer Signature: ____________________ Date: _________
 ```
+
+---
+
+## 6. Traffic Gate Seed Computation & Ingress Hashing Architecture (Remediation F-002)
+
+To maintain an exact, statistically uniform 5% split during Phase 1 live rollout without bias or accidental leakage:
+
+### Deterministic Seed Sources
+1. **Telephony Session Identifiers**: Inbound carrier media streams pass `channel_session_id` (Twilio `CallSid`) or header `X-Call-Sid`.
+2. **Customer References**: Caller E.164 ANI or normalized phone number (`customer_ref`).
+3. **Dedicated Ingress Identifier**: When no upstream telephony SID is present, ingress generates an immutable ULID (`int_{new_ulid()}`).
+
+### Uniform Hash Algorithm
+* **Input**: Deterministic string material UTF-8 encoded.
+* **Digest**: Standard SHA-256 hash.
+* **Bucket Assignment**: First 8 bytes interpreted as a 64-bit unsigned big-endian integer, modulo 100:
+  $$\text{call\_hash} = \text{int.from\_bytes}(\text{SHA256}(\text{seed})[:8], \text{"big"}) \pmod{100}$$
+* **Threshold Evaluation**: $\text{call\_hash} < \lfloor 100 \times \text{target\_ratio} \rfloor$. For 5% ($\text{target\_ratio} = 0.05$), calls with hash $0, 1, 2, 3, 4$ are admitted.
+
+### Fail-Closed Safety Invariant
+* If the seed cannot be computed or is missing/empty, the gate logs a `CRITICAL` event, increments `gate_seed_failure_total`, and **immediately rejects** the call to human control with reason `"seed_computation_failed"`.
+* The gate **never** defaults `call_hash` to `0` or admits calls upon exception.
