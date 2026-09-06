@@ -286,7 +286,12 @@ def verify_bundle_completeness(bundle: dict[str, Any]) -> dict[str, Any]:
         recomputed = merkle_root([str(r.get("leaf")) for r in leaves], merkle_version=mv)
         if recomputed != anchor.get("root"):
             return {"ok": False, "error": "anchor_root_mismatch:bundle modified"}
-        if len(leaves) != int(anchor.get("leaf_count") or -1):
+        expected_leaves = (
+            int(anchor["leaf_count"])
+            if anchor.get("leaf_count") is not None
+            else -1
+        )
+        if len(leaves) != expected_leaves:
             return {"ok": False, "error": "anchor_count_mismatch:bundle incomplete"}
     except Exception as e:
         return {"ok": False, "error": f"completeness_check_failed:{type(e).__name__}"}

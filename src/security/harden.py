@@ -173,6 +173,25 @@ def validate_startup_security() -> dict[str, Any]:
                 "via FRONTLINE_OPEN_BIND_ACK=1 (local pilot only)."
             )
 
+    # ── Pinned Trust Root Gate (F-001): refuse startup if required and missing
+    trust_root_req = os.getenv("FRONTLINE_TRUST_ROOT_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    if trust_root_req:
+        try:
+            from src.security.trust_roots import TrustRootNotFound, TrustRootStore
+
+            store = TrustRootStore()
+            store.get_active_public_key()
+            status["trust_root_configured"] = True
+        except (TrustRootNotFound, Exception) as e:
+            status["ok"] = False
+            err = (
+                f"Security startup check failed: no trust root configured (FRONTLINE_TRUST_ROOT_REQUIRED=1): {e}. "
+                "Register a trust root in the DB, set FRONTLINE_TRUST_ROOT_PATH, or set FRONTLINE_TRUST_ROOT_REQUIRED=0."
+            )
+            problems = status.setdefault("errors", [])
+            problems.append(err)
+            raise RuntimeError(err)
+
     if prod:
         problems: list[str] = []
         if open_mode or not auth_req:

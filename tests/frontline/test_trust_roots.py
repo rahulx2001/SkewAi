@@ -229,3 +229,16 @@ def test_verify_with_ring_is_called_in_production_path() -> None:
     src_locker = inspect.getsource(verify_locker_bundle)
     src_merkle = inspect.getsource(verify_head_signature)
     assert "verify_with_ring" in src_locker or "verify_with_ring" in src_merkle
+
+
+def test_startup_refuses_when_trust_root_required_and_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.security.harden import validate_startup_security
+
+    empty_json = tmp_path / "empty_roots.json"
+    empty_json.write_text(json.dumps({"keys": []}))
+    monkeypatch.setenv("FRONTLINE_TRUST_ROOT_PATH", str(empty_json))
+    monkeypatch.delenv("FRONTLINE_TRUST_ROOT_KEY_ID", raising=False)
+    monkeypatch.setenv("FRONTLINE_TRUST_ROOT_REQUIRED", "1")
+
+    with pytest.raises(RuntimeError, match="no trust root configured"):
+        validate_startup_security()

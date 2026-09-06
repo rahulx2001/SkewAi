@@ -514,8 +514,12 @@ def verify_against_anchor(
     mv = int(anchor.get("merkle_version") or 1)
     stored = collect_leaves(interaction_ids=interaction_ids)
     live = [str(r["leaf"]) for r in stored]
-    root = merkle_root(live, merkle_version=mv)
-    ok = root == str(anchor["root"]) and len(live) == int(anchor.get("leaf_count") or -1)
+    expected_count = (
+        int(anchor["leaf_count"])
+        if anchor.get("leaf_count") is not None
+        else -1
+    )
+    ok = root == str(anchor["root"]) and len(live) == expected_count
     return {
         "ok": ok,
         "root": root,

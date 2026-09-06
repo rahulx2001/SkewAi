@@ -101,12 +101,58 @@ class TrustRootStore:
         except Exception:
             pass
 
+    def _auto_import_initial_key(self, con: Any) -> dict[str, TrustRoot]:
+        if os.getenv("FRONTLINE_TRUST_ROOT_PATH") is not None:
+            return {}
+        pem: str | None = None
+        key_id = (os.getenv("FRONTLINE_TRUST_ROOT_KEY_ID") or "default-locker-key").strip()
+
+        env_key = (os.getenv("FRONTLINE_SIGNING_KEY") or "").strip()
+        if env_key:
+            if "-----BEGIN" in env_key:
+                pem = env_key
+            elif Path(env_key).is_file():
+                try:
+                    pem = Path(env_key).read_text(encoding="utf-8")
+                except Exception:
+                    pem = None
+        if not pem:
+            pub_path = REPO_ROOT / "data" / "locker_keys" / "locker_ed25519.pub.pem"
+            if pub_path.is_file():
+                try:
+                    pem = pub_path.read_text(encoding="utf-8")
+                except Exception:
+                    pem = None
+
+        if pem:
+            cat = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            try:
+                con.execute(
+                    """
+                    INSERT INTO trust_roots (key_id, public_key_pem, created_at, revoked_at, created_by)
+                    VALUES (?, ?, ?, NULL, ?)
+                    ON CONFLICT (key_id) DO NOTHING
+                    """,
+                    [key_id, pem.strip() + "\n", cat.isoformat(), "system-initial-import"],
+                )
+            except Exception:
+                pass
+            return {
+                key_id: TrustRoot(
+                    key_id=key_id,
+                    public_key_pem=pem.strip() + "\n",
+                    created_at=cat,
+                    created_by="system-initial-import",
+                )
+            }
+        return {}
+
     def _load_from_db(self) -> dict[str, TrustRoot]:
         roots: dict[str, TrustRoot] = {}
         try:
             from src.data.warehouse import ops_con
 
-            con_cm = ops_con(read_only=True) if self._con is None else None
+            con_cm = ops_con() if self._con is None else None
             con = self._con or con_cm.__enter__()
             try:
                 self._ensure_table(con)
@@ -122,6 +168,9 @@ class TrustRootStore:
                         revoked_at=_parse_dt(rat),
                         created_by=str(cby or "admin"),
                     )
+                if not roots:
+                    imported = self._auto_import_initial_key(con)
+                    roots.update(imported)
             finally:
                 if con_cm:
                     con_cm.__exit__(None, None, None)
