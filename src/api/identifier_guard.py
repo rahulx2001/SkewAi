@@ -1,4 +1,4 @@
-"""ASGI gate: reject pack_id / interaction_id that cannot be a path or DB name."""
+"""ASGI gate: reject ids that cannot be a path or DuckDB filename."""
 
 from __future__ import annotations
 
@@ -8,11 +8,18 @@ from urllib.parse import parse_qs
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src.security.identifiers import InvalidIdentifier, safe_pack_id, safe_token_id
+from src.security.identifiers import (
+    InvalidIdentifier,
+    safe_cluster_id,
+    safe_pack_id,
+    safe_token_id,
+)
 
 _PACK_PATH = re.compile(r"/packs/([^/]+)")
 _WS_INTERACTION = re.compile(r"^/ws/interaction/([^/]+)")
 _HTTP_INTERACTION = re.compile(r"/interactions/([^/]+)")
+_INVESTIGATION = re.compile(r"/investigations/([^/]+)")
+_CLUSTER = re.compile(r"/clusters/([^/]+)")
 
 
 class IdentifierGuardASGI:
@@ -34,6 +41,12 @@ class IdentifierGuardASGI:
             m = _PACK_PATH.search(path)
             if m and m.group(1) not in {"active", ""}:
                 safe_pack_id(m.group(1))
+            inv = _INVESTIGATION.search(path)
+            if inv:
+                safe_token_id(inv.group(1), kind="investigation_id")
+            cl = _CLUSTER.search(path)
+            if cl and cl.group(1) not in {"rebuild", ""}:
+                safe_cluster_id(cl.group(1))
             if scope["type"] == "websocket":
                 wm = _WS_INTERACTION.match(path)
                 if wm:

@@ -114,6 +114,16 @@ def test_api_pack_id_fuzz_rejected(reset_ops_db, monkeypatch):
                     pass
 
 
+def test_api_investigation_and_cluster_path_ids_rejected(reset_ops_db, monkeypatch):
+    monkeypatch.delenv("FRONTLINE_API_KEY", raising=False)
+    with TestClient(app) as c:
+        assert c.get("/api/frontline/investigations/inv_.._etc").status_code == 400
+        assert c.get("/api/frontline/investigations/%2e%2e%2fetc").status_code == 400
+        assert c.get("/api/frontline/investigations/inv_ok").status_code != 400
+        assert c.post("/api/frontline/clusters/-1/feedback", json={"verdict": "wrong"}).status_code == 400
+        assert c.get("/api/frontline/clusters/14/feedback").status_code != 400
+
+
 def test_api_valid_pack_id_not_rejected_as_400(reset_ops_db, seed_automotive_pack, monkeypatch):
     monkeypatch.delenv("FRONTLINE_API_KEY", raising=False)
     with TestClient(app) as c:
