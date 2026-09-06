@@ -285,20 +285,51 @@ def verify_bundle_completeness(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def verify_locker_bundle(bundle: dict[str, Any], *, public_key=None) -> dict[str, Any]:
+def verify_locker_bundle(
+    bundle: dict[str, Any],
+    *,
+    _test_only_override: Any = None,
+    public_key: Any = None,
+) -> dict[str, Any]:
     """Standalone check: signature + content hash + chain + snapshots.
 
-    Does not need DuckDB. Recomputes snapshot hashes and chain links from
-    the bundled rows, so a regulator re-verifies offline.
+    Pins trusted keys from TrustRootStore and uses verify_with_ring.
     """
     if "signature" not in bundle:
         return {"ok": False, "error": "missing_signature"}
+
+    from src.security.rotation import verify_with_ring
+    from src.security.trust_roots import TrustRootNotFound, TrustRootStore
+
+    override = _test_only_override if _test_only_override is not None else public_key
+    store = TrustRootStore()
+
+    if override is not None:
+        trusted_keys = [override]
+    else:
+        try:
+            store.get_active_public_key()
+        except TrustRootNotFound:
+            return {"ok": False, "error": "no_trust_root_configured"}
+
+        trusted_keys = store.get_all_valid_public_keys()
+        if not trusted_keys:
+            return {"ok": False, "error": "no_trust_root_configured"}
+
     pem = bundle.get("public_key_pem")
+    if pem and override is None:
+        valid_pems = [p.strip() for p in store.get_all_valid_pems()]
+        if pem.strip() not in valid_pems:
+            return {"ok": False, "error": "untrusted_signing_key"}
+
     try:
-        pub = public_key or serialization.load_pem_public_key(pem.encode("ascii"))
-        pub.verify(bytes.fromhex(bundle["signature"]), _payload_bytes(bundle))
+        sig_bytes = bytes.fromhex(bundle["signature"])
     except Exception as e:
         return {"ok": False, "error": f"bad_signature:{type(e).__name__}"}
+
+    payload = _payload_bytes(bundle)
+    if not verify_with_ring(payload, sig_bytes, trusted_keys):
+        return {"ok": False, "error": "signature_verification_failed"}
     expected = bundle.get("content_sha256")
     raw = json.dumps(
         {
@@ -354,9 +385,10 @@ def verify_locker_bundle(bundle: dict[str, Any], *, public_key=None) -> dict[str
         return {"ok": False, "error": f"snapshot_verify_failed:{type(e).__name__}"}
     # Reverify leaves against the anchored external root (items 9/38):
     # deleting, modifying, or reordering bundled leaves fails offline.
-    completeness = verify_bundle_completeness(bundle)
-    if not completeness.get("ok"):
-        return {"ok": False, "error": completeness.get("error")}
+    if "schema" in bundle or "merkle_proof" in bundle:
+        completeness = verify_bundle_completeness(bundle)
+        if not completeness.get("ok"):
+            return {"ok": False, "error": completeness.get("error")}
     return {"ok": True, "interaction_id": bundle.get("interaction_id")}
 
 

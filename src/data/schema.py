@@ -550,6 +550,14 @@ CREATE TABLE IF NOT EXISTS entity_observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_interaction ON entity_observations(interaction_id);
 CREATE INDEX IF NOT EXISTS idx_obs_canonical ON entity_observations(canonical_id);
+
+CREATE TABLE IF NOT EXISTS trust_roots (
+    key_id         TEXT PRIMARY KEY,
+    public_key_pem TEXT NOT NULL,
+    created_at     TIMESTAMP NOT NULL,
+    revoked_at     TIMESTAMP NULL,
+    created_by     TEXT NOT NULL
+);
 """
 
 

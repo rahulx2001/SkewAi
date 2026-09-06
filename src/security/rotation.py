@@ -54,12 +54,27 @@ def record_rotation(*, old_key_id: str, new_key_id: str, actor: str = "ops") -> 
     return evt
 
 
-def verify_with_ring(payload: bytes, signature: bytes, public_keys: list[bytes]) -> bool:
+def verify_with_ring(payload: bytes, signature: bytes, public_keys: list[Any]) -> bool:
     """True if ANY ring pubkey verifies (old signatures survive rotation)."""
+    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
     for raw in public_keys:
         try:
-            Ed25519PublicKey.from_public_bytes(raw).verify(signature, payload)
+            if isinstance(raw, Ed25519PublicKey):
+                pub = raw
+            elif isinstance(raw, (bytes, bytearray)):
+                if len(raw) == 32:
+                    pub = Ed25519PublicKey.from_public_bytes(bytes(raw))
+                elif b"BEGIN PUBLIC KEY" in raw:
+                    pub = serialization.load_pem_public_key(bytes(raw))
+                else:
+                    pub = serialization.load_der_public_key(bytes(raw))
+            elif isinstance(raw, str):
+                pub = serialization.load_pem_public_key(raw.encode("ascii"))
+            else:
+                continue
+            pub.verify(signature, payload)
             return True
         except Exception:
             continue

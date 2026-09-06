@@ -328,29 +328,66 @@ def latest_head() -> dict[str, Any] | None:
         return head
 
 
-def verify_head_signature(head: dict[str, Any]) -> bool:
-    """Verify a head's Ed25519 signature (offline-capable)."""
-    try:
-        from cryptography.hazmat.primitives import serialization
+class SignatureResult(dict):
+    """Dict-compatible verification result that evaluates truthy when ok=True."""
 
-        pem = head.get("public_key_pem") or ""
-        if not pem:
-            return False
-        pub = serialization.load_pem_public_key(pem.encode("ascii"))
-        pub.verify(
-            bytes.fromhex(str(head.get("signature") or "")),
-            _head_bytes(
-                str(head.get("head_id") or ""),
-                str(head.get("root") or ""),
-                int(head.get("leaf_count") or 0),
-                str(head.get("created_at") or ""),
-                str(head.get("prev_head") or ""),
-                str(head.get("scope") or "global"),
-            ),
-        )
-        return True
+    def __bool__(self) -> bool:
+        return bool(self.get("ok", False))
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, bool):
+            return bool(self) == other
+        return super().__eq__(other)
+
+
+def verify_head_signature(
+    head: dict[str, Any],
+    *,
+    _test_only_override: Any = None,
+) -> SignatureResult:
+    """Verify a head's Ed25519 signature against pinned trust roots."""
+    from src.security.rotation import verify_with_ring
+    from src.security.trust_roots import TrustRootNotFound, TrustRootStore
+
+    store = TrustRootStore()
+
+    if _test_only_override is not None:
+        trusted_keys = [_test_only_override]
+    else:
+        try:
+            store.get_active_public_key()
+        except TrustRootNotFound:
+            return SignatureResult({"ok": False, "error": "no_trust_root_configured"})
+
+        trusted_keys = store.get_all_valid_public_keys()
+        if not trusted_keys:
+            return SignatureResult({"ok": False, "error": "no_trust_root_configured"})
+
+    pem = (head.get("public_key_pem") or "").strip()
+    if pem and _test_only_override is None:
+        valid_pems = [p.strip() for p in store.get_all_valid_pems()]
+        if pem not in valid_pems:
+            return SignatureResult({"ok": False, "error": "untrusted_signing_key"})
+
+    sig_hex = str(head.get("signature") or "")
+    if not sig_hex:
+        return SignatureResult({"ok": False, "error": "missing_signature"})
+    try:
+        sig_bytes = bytes.fromhex(sig_hex)
     except Exception:
-        return False
+        return SignatureResult({"ok": False, "error": "bad_signature:invalid_hex"})
+
+    head_bytes = _head_bytes(
+        str(head.get("head_id") or ""),
+        str(head.get("root") or ""),
+        int(head.get("leaf_count") or 0),
+        str(head.get("created_at") or ""),
+        str(head.get("prev_head") or ""),
+        str(head.get("scope") or "global"),
+    )
+    if not verify_with_ring(head_bytes, sig_bytes, trusted_keys):
+        return SignatureResult({"ok": False, "error": "signature_verification_failed"})
+    return SignatureResult({"ok": True, "head_id": head.get("head_id")})
 
 
 def verify_head_chain() -> dict[str, Any]:

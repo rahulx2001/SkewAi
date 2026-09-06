@@ -626,7 +626,7 @@ def test_item9_anchor_detects_modification_and_reorder(reset_ops_db):
 
     append_action_leaf("int_anchor_2", "act_1", "hash-a")
     anchor = anchor_tree_head(signer="test")
-    assert verify_head_signature(anchor) is True
+    assert verify_head_signature(anchor)["ok"] is True
     assert verify_head_chain()["ok"] is True
     with ops_con() as con:
         con.execute(
