@@ -37,8 +37,9 @@ Notes:
   a signed session, and the shared API key resolves to `service` (not admin).
 - Open (dev) mode: `open_mode_ok=True` routes skip checks; everything else
   still requires the key when configured.
-- Multi-tenancy: single-tenant pilot — packs share one DB, separated by
-  `pack_id` scoping, not by tenant isolation. True multi-tenancy is out of
-  scope (see report).
+- Tenancy: **single-tenant**. There is no `admin:cross_tenant`. Scoped keys
+  may only be minted for the process tenant (`src.ops.tenant.get_tenant()`,
+  default `default`). Packs share one ops DB, separated by `pack_id`, not
+  by row-level tenant isolation.
 - LLM backpressure: `FRONTLINE_LLM_TURN_CAP` (default 6/contact) + daily
   cost cap in `src/ai/provider.py`; narration degrades to templates on miss.

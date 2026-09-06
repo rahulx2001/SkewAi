@@ -72,7 +72,7 @@ def test_keys_route_allows_subset_scopes(auth_env, reset_ops_db):
         "sub_admin",
         "admin",
         issuer_role="admin",
-        extra={"scopes": ["kpi:read", "queue:read"], "tenant_id": "tenant-A"},
+        extra={"scopes": ["kpi:read", "queue:read"], "tenant_id": "default"},
     )["token"]
     headers = {"X-API-Key": TEST_SERVICE_KEY, "X-Frontline-Session": token}
 
@@ -80,12 +80,12 @@ def test_keys_route_allows_subset_scopes(auth_env, reset_ops_db):
         resp = client.post(
             "/api/frontline/keys",
             headers=headers,
-            json={"scopes": ["kpi:read"], "tenant_id": "tenant-A"},
+            json={"scopes": ["kpi:read"], "tenant_id": "default"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["scopes"] == ["kpi:read"]
-        assert data["tenant_id"] == "tenant-A"
+        assert data["tenant_id"] == "default"
 
 
 def test_keys_route_enforces_tenant_binding(auth_env, reset_ops_db):
@@ -105,16 +105,17 @@ def test_keys_route_enforces_tenant_binding(auth_env, reset_ops_db):
             json={"scopes": ["kpi:read"], "tenant_id": "tenant-B"},
         )
         assert resp.status_code == 403
-        assert "tenant_mismatch" in resp.json().get("detail", "")
+        detail = resp.json().get("detail", "")
+        assert "tenant_mismatch" in detail or "single_tenant" in detail
 
 
-def test_keys_route_allows_cross_tenant_with_permission(auth_env, reset_ops_db):
-    """6. Auth with tenant_id='tenant-A' and admin:cross_tenant -> mint for 'tenant-B' -> 200."""
+def test_keys_route_rejects_cross_tenant_even_for_admin(auth_env, reset_ops_db):
+    """Single-tenant: admin cannot mint a key for another tenant."""
     token = issue_session(
         "sub_superadmin",
         "admin",
         issuer_role="admin",
-        extra={"tenant_id": "tenant-A", "scopes": ["kpi:read", "admin:cross_tenant"]},
+        extra={"tenant_id": "default", "scopes": ["kpi:read", "*"]},
     )["token"]
     headers = {"X-API-Key": TEST_SERVICE_KEY, "X-Frontline-Session": token}
 
@@ -124,8 +125,8 @@ def test_keys_route_allows_cross_tenant_with_permission(auth_env, reset_ops_db):
             headers=headers,
             json={"scopes": ["kpi:read"], "tenant_id": "tenant-B"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["tenant_id"] == "tenant-B"
+        assert resp.status_code == 403
+        assert "single_tenant" in resp.json().get("detail", "")
 
 
 def test_keys_route_rate_limited(auth_env, reset_ops_db, monkeypatch):
@@ -136,15 +137,15 @@ def test_keys_route_rate_limited(auth_env, reset_ops_db, monkeypatch):
 
     with TestClient(app) as client:
         # Request 1: ok
-        r1 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "t1"})
+        r1 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "default"})
         assert r1.status_code == 200
 
         # Request 2: ok
-        r2 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "t1"})
+        r2 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "default"})
         assert r2.status_code == 200
 
         # Request 3: rate limited -> 429
-        r3 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "t1"})
+        r3 = client.post("/api/frontline/keys", headers=headers, json={"scopes": ["kpi:read"], "tenant_id": "default"})
         assert r3.status_code == 429
         assert "Retry-After" in r3.headers or "retry-after" in r3.headers
 
@@ -158,13 +159,13 @@ def test_keys_route_audits_every_mint(auth_env, reset_ops_db):
         resp = client.post(
             "/api/frontline/keys",
             headers=headers,
-            json={"scopes": ["kpi:read", "billing:read"], "tenant_id": "audit_tenant"},
+            json={"scopes": ["kpi:read", "billing:read"], "tenant_id": "default"},
         )
         assert resp.status_code == 200
 
     with ops_con(read_only=True) as con:
         rows = con.execute(
-            "SELECT principal, requested_scopes, tenant_id, success FROM key_mint_audit WHERE tenant_id = 'audit_tenant'"
+            "SELECT principal, requested_scopes, tenant_id, success FROM key_mint_audit WHERE principal = 'audited_admin'"
         ).fetchall()
         assert len(rows) >= 1
         assert rows[0][0] == "audited_admin"

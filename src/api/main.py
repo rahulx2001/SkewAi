@@ -237,6 +237,12 @@ app = FastAPI(
 # Wire slowapi
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+from src.security.identifiers import InvalidIdentifier
+
+@app.exception_handler(InvalidIdentifier)
+async def _invalid_identifier(_request, exc: InvalidIdentifier):
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
 register_exception_handlers(app)
 install_openapi_problem(app)
 
@@ -276,6 +282,9 @@ app.add_middleware(
 )
 # Pure ASGI (not BaseHTTPMiddleware) so /ws/* is gated too.
 app.add_middleware(FrontlineEnabledASGI)  # type: ignore[arg-type]
+from src.api.identifier_guard import IdentifierGuardASGI
+
+app.add_middleware(IdentifierGuardASGI)  # type: ignore[arg-type]
 
 # Security headers (CSP, frame deny, nosniff, HSTS) — SOC 2 CC6 baseline.
 from src.security.headers import SecurityHeadersASGI

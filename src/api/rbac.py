@@ -105,7 +105,6 @@ PERMS: dict[str, frozenset[str]] = {
             "marketplace:install",
             "session:mint",
             "admin:keys",
-            "admin:cross_tenant",
             "deploy:activate",
             "deploy:create",
             "ops:read",
@@ -317,7 +316,7 @@ def require_perm(role: str, perm: str, *, open_mode_ok: bool = False) -> None:
     customer call is gated even on a laptop.
     """
     _never_open = frozenset({
-        "dsr:export", "dsr:delete", "admin:keys", "admin:cross_tenant",
+        "dsr:export", "dsr:delete", "admin:keys",
         "deploy:activate",
     })
     if open_mode_ok and perm in _never_open:

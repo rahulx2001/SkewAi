@@ -49,4 +49,25 @@ if _storage:
     _kwargs["storage_uri"] = _storage
 limiter = Limiter(**_kwargs)
 
-__all__ = ["limiter", "rate_limit_key"]
+# WebSocket connect budget (slowapi is HTTP-only). 30 connects / 60s / client.
+_WS_CONNECT_LIMIT = 30
+_WS_WINDOW_S = 60.0
+_ws_hits: dict[str, list[float]] = {}
+
+
+def check_ws_connect_rate(client_key: str) -> bool:
+    """Return True if this WebSocket connect is within budget."""
+    import time
+
+    now = time.time()
+    key = (client_key or "unknown").strip() or "unknown"
+    window = [t for t in _ws_hits.get(key, []) if now - t < _WS_WINDOW_S]
+    if len(window) >= _WS_CONNECT_LIMIT:
+        _ws_hits[key] = window
+        return False
+    window.append(now)
+    _ws_hits[key] = window
+    return True
+
+
+__all__ = ["limiter", "rate_limit_key", "check_ws_connect_rate"]

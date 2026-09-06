@@ -1034,6 +1034,16 @@ async def interaction_ws(websocket: WebSocket, interaction_id: str) -> None:
         await websocket.close(code=1013)
         return
 
+    from src.api.limiter import check_ws_connect_rate
+
+    ws_key = websocket.client.host if websocket.client else "unknown"
+    if not check_ws_connect_rate(f"ix:{ws_key}"):
+        try:
+            await websocket.close(code=1013)
+        except Exception:
+            pass
+        return
+
     try:
         await authenticate_websocket(websocket)
     except HTTPException:
@@ -1179,6 +1189,16 @@ async def console_ws(websocket: WebSocket) -> None:
     """
     if not frontline_enabled():
         await websocket.close(code=1013)
+        return
+
+    from src.api.limiter import check_ws_connect_rate
+
+    ws_key = websocket.client.host if websocket.client else "unknown"
+    if not check_ws_connect_rate(f"console:{ws_key}"):
+        try:
+            await websocket.close(code=1013)
+        except Exception:
+            pass
         return
 
     try:

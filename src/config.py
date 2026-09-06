@@ -181,7 +181,10 @@ class Settings:
         return REPO_ROOT / "domains"
 
     def pack_dir(self, pack_id: str) -> Path:
-        return self.packs_root / pack_id
+        from src.security.identifiers import safe_pack_id
+
+        safe = safe_pack_id(pack_id)
+        return self.packs_root / str(safe)
 
     # ── Databases (live env — so pytest can isolate without re-import) ────
     @property
@@ -195,7 +198,10 @@ class Settings:
         return resolve_domain_db_dir()
 
     def domain_db_path(self, pack_id: str) -> Path:
-        return self.domain_db_dir / f"{pack_id}.duckdb"
+        from src.security.identifiers import safe_pack_id
+
+        safe = safe_pack_id(pack_id)
+        return self.domain_db_dir / f"{safe}.duckdb"
 
 
 @lru_cache(maxsize=1)

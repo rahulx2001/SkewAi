@@ -213,6 +213,10 @@ def ingest_mapped_csv(
     copier cannot silently bypass the contract.
     """
     from src.data.trust import DEFAULT_FRESHNESS_SLA_DAYS, evaluate_ingest
+    from src.security.identifiers import safe_csv_path, safe_pack_id
+
+    pack_id = str(safe_pack_id(pack_id))
+    csv_path = safe_csv_path(csv_path)
 
     if enforce_trust is False and not allow_untrusted_historical_backfill:
         raise ValueError(

@@ -107,6 +107,9 @@ def domain_con(pack_id: str, read_only: bool = True) -> Iterator[duckdb.DuckDBPy
     ``src.domains.mapping_ingest.ingest_mapped_csv`` /
     ``python -m scripts.ingest_nhtsa``.
     """
+    from src.security.identifiers import safe_pack_id
+
+    pack_id = str(safe_pack_id(pack_id))
     path = settings.domain_db_path(pack_id)
     if not path.exists():
         # Try the pack's own domain_db override

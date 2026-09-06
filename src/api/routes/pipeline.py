@@ -389,36 +389,30 @@ async def keys_create(
         )
         raise
 
-    # 4. Tenant binding
-    caller_tenant = claims.get("tenant_id")
-    if caller_tenant and caller_tenant != requested_tenant:
-        if caller_scopes is not None and "admin:cross_tenant" not in caller_scopes and "*" not in caller_scopes:
-            log_key_mint_audit(
-                principal=principal,
-                requested_scopes=requested_scopes,
-                granted_scopes=[],
-                tenant_id=requested_tenant,
-                ip=client_ip,
-                success=False,
-                error="tenant_mismatch",
-            )
-            raise HTTPException(
-                status_code=403,
-                detail=f"tenant_mismatch: principal bound to {caller_tenant} cannot mint for {requested_tenant}",
-            )
-        try:
-            require_perm(role, "admin:cross_tenant")
-        except HTTPException:
-            log_key_mint_audit(
-                principal=principal,
-                requested_scopes=requested_scopes,
-                granted_scopes=[],
-                tenant_id=requested_tenant,
-                ip=client_ip,
-                success=False,
-                error="tenant_mismatch",
-            )
-            raise
+    # 4. Single-tenant: keys may only be minted for this process tenant.
+    from src.ops.tenant import get_tenant
+
+    process_tenant = get_tenant()
+    caller_tenant = claims.get("tenant_id") or process_tenant
+    if requested_tenant != process_tenant or (
+        caller_tenant and caller_tenant != requested_tenant
+    ):
+        log_key_mint_audit(
+            principal=principal,
+            requested_scopes=requested_scopes,
+            granted_scopes=[],
+            tenant_id=requested_tenant,
+            ip=client_ip,
+            success=False,
+            error="tenant_mismatch",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"single_tenant: cannot mint for {requested_tenant!r} "
+                f"(process tenant is {process_tenant!r})"
+            ),
+        )
 
     # 5. Create scoped key
     try:

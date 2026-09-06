@@ -17,7 +17,9 @@ from src.qubot.auditor import REPORTS_DIR
 
 def build_audit_archive(interaction_id: str, *, out_dir: Path | None = None) -> dict[str, Any]:
     """Write a timestamped JSON bundle with SHA256 manifest."""
-    iid = interaction_id
+    from src.security.identifiers import safe_out_dir, safe_token_id
+
+    iid = safe_token_id(interaction_id, kind="interaction_id")
     data = export_interaction(iid)
     actions = list_actions(iid)
     chain = verify_chain(actions)
@@ -33,7 +35,7 @@ def build_audit_archive(interaction_id: str, *, out_dir: Path | None = None) -> 
         hashlib.sha256(report_text.encode("utf-8")).hexdigest() if report_text else None
     )
 
-    base = out_dir or (REPO_ROOT / "reports" / "qubot" / "archives")
+    base = safe_out_dir(out_dir, default=REPO_ROOT / "reports" / "qubot" / "archives")
     base.mkdir(parents=True, exist_ok=True)
     ts = utc_now().strftime("%Y%m%dT%H%M%SZ")
     bundle_path = base / f"{iid}_{ts}.json"

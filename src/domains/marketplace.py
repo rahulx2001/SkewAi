@@ -168,10 +168,9 @@ def assert_source_path_allowed(source_path: str) -> Path:
 
 def pack_install(pack_id: str, *, source_path: str | None = None) -> dict[str, Any]:
     """Install/register a pack. If source_path given, copy into domains/ (jailed)."""
-    # Reject path traversal in pack_id
-    safe_id = Path(pack_id).name
-    if safe_id != pack_id or not safe_id or safe_id in {".", ".."}:
-        raise ValueError(f"invalid pack_id: {pack_id!r}")
+    from src.security.identifiers import safe_pack_id
+
+    safe_id = str(safe_pack_id(pack_id))
     dest = REPO_ROOT / "domains" / safe_id
     if source_path:
         src = assert_source_path_allowed(source_path)

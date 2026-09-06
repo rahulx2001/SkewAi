@@ -395,7 +395,9 @@ def export_audit_regressions(
 
     from src.data.timeutil import utc_now as _now
 
-    dest = _Path(out_dir) if out_dir else _Path("reports") / "regression"
+    from src.security.identifiers import safe_out_dir
+
+    dest = safe_out_dir(out_dir, default=_Path("reports") / "regression")
     dest.mkdir(parents=True, exist_ok=True)
     cutoff = _now() - _td(days=max(1, int(since_days)))
     with ops_con(read_only=True) as con:

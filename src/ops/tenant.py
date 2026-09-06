@@ -1,7 +1,9 @@
-"""Multi-tenancy with row-level isolation (feature #52) — pilot query layer.
+"""Single-tenant process identity (pilot).
 
-Every ops query that goes through ``tenant_clause`` gets ``tenant_id = ?``.
-Default tenant is ``default``. Not full SaaS isolation; single query seam.
+This process serves one tenant (default ``default``). ``tenant_clause`` is a
+query seam for a future multi-tenant warehouse — it is not SaaS isolation.
+``admin:cross_tenant`` does not exist; keyed minting cannot target another
+tenant. Do not add a half-implemented tenant filter without row ownership.
 """
 
 from __future__ import annotations

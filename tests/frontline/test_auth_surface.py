@@ -79,13 +79,13 @@ def test_f005_scoped_key_minting_forbidden_for_service_and_unauth(auth_env, rese
         resp = client.post(
             "/api/frontline/keys",
             headers=admin_headers,
-            json={"scopes": ["kpi:read"], "tenant_id": "cust_123"},
+            json={"scopes": ["kpi:read"], "tenant_id": "default"},
         )
         assert resp.status_code == 200, f"Expected 200 for admin on /keys, got {resp.status_code}"
         body = resp.json()
         assert "token" in body
         assert body["token"].startswith("sk_live_")
-        assert body["tenant_id"] == "cust_123"
+        assert body["tenant_id"] == "default"
 
 
 def test_f005_marketplace_install_requires_admin(auth_env, reset_ops_db):

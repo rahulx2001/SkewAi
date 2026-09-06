@@ -18,12 +18,9 @@ from src.domains.loader import load_pack, lint_pack
 
 def _safe_pack_id(pack_id: str) -> str:
     """Reject path traversal in pack_id (function-layer jail)."""
-    from pathlib import Path as _P
+    from src.security.identifiers import safe_pack_id
 
-    safe = _P(pack_id).name
-    if safe != pack_id or not safe or safe in {".", ".."} or safe.startswith("_"):
-        raise ValueError(f"invalid pack_id: {pack_id!r}")
-    return safe
+    return str(safe_pack_id(pack_id))
 
 
 def pack_dir(pack_id: str) -> Path:

@@ -185,6 +185,9 @@ def load_pack(pack_id: str, *, reload: bool = False) -> LoadedPack:
     Raises pydantic.ValidationError if the manifest is invalid.
     Raises ValueError on referential integrity failures (missing gazetteers).
     """
+    from src.security.identifiers import safe_pack_id
+
+    pack_id = str(safe_pack_id(pack_id))
     if not reload and pack_id in _pack_cache:
         return _pack_cache[pack_id]
 

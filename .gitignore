@@ -21,6 +21,8 @@ dashboard/node_modules/
 dashboard/dist/
 
 # Runtime data (DuckDB + connector outbox + reports)
+*.duckdb
+*.duckdb.wal
 data/**/*.duckdb
 data/**/*.duckdb.wal
 data/connectors/outbox/
