@@ -30,16 +30,56 @@ def leaf_hash(interaction_id: str, action_id: str, row_hash: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def merkle_root(leaves: Sequence[str]) -> str:
+def merkle_root(
+    leaves: Sequence[str],
+    *,
+    merkle_version: int = 2,
+    version: int | None = None,
+) -> str:
+    v = version if version is not None else merkle_version
+    if v == 1:
+        if not leaves:
+            return hashlib.sha256(b"empty").hexdigest()
+        layer = list(leaves)
+        while len(layer) > 1:
+            nxt: list[str] = []
+            if len(layer) % 2 == 1:
+                layer = list(layer) + [layer[-1]]
+            for i in range(0, len(layer), 2):
+                nxt.append(hashlib.sha256((layer[i] + layer[i + 1]).encode("utf-8")).hexdigest())
+            layer = nxt
+        return layer[0]
+
+    # merkle_version >= 2: RFC 6962 style domain separation
     if not leaves:
-        return hashlib.sha256(b"empty").hexdigest()
-    layer = list(leaves)
+        return hashlib.sha256(b"FRONTLINE:empty").hexdigest()
+    layer = [
+        hashlib.sha256(
+            b"FRONTLINE:leaf:" + (l.encode("utf-8") if isinstance(l, str) else l)
+        ).hexdigest()
+        for l in leaves
+    ]
     while len(layer) > 1:
         nxt: list[str] = []
-        if len(layer) % 2 == 1:
-            layer = list(layer) + [layer[-1]]
-        for i in range(0, len(layer), 2):
-            nxt.append(hashlib.sha256((layer[i] + layer[i + 1]).encode("utf-8")).hexdigest())
+        i = 0
+        while i < len(layer):
+            if i + 1 < len(layer):
+                left = layer[i]
+                right = layer[i + 1]
+                nxt.append(
+                    hashlib.sha256(
+                        b"FRONTLINE:internal:" + (left + right).encode("utf-8")
+                    ).hexdigest()
+                )
+                i += 2
+            else:
+                odd_node = layer[i]
+                nxt.append(
+                    hashlib.sha256(
+                        b"FRONTLINE:promoted:" + odd_node.encode("utf-8")
+                    ).hexdigest()
+                )
+                i += 1
         layer = nxt
     return layer[0]
 
@@ -74,7 +114,8 @@ def _ensure(con) -> None:
             prev_head    VARCHAR,
             signer       VARCHAR NOT NULL,
             signature    VARCHAR NOT NULL,
-            public_key_pem TEXT
+            public_key_pem TEXT,
+            merkle_version INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -197,8 +238,9 @@ def _head_bytes(
     created_at: str,
     prev_head: str,
     scope: str = "global",
+    merkle_version: int | None = None,
 ) -> bytes:
-    body = {
+    body: dict[str, Any] = {
         "head_id": head_id,
         "root": root,
         "leaf_count": leaf_count,
@@ -206,6 +248,8 @@ def _head_bytes(
         "created_at": created_at,
         "prev_head": prev_head,
     }
+    if merkle_version is not None and merkle_version > 1:
+        body["merkle_version"] = merkle_version
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -219,6 +263,7 @@ def anchor_tree_head(
     *,
     signer: str = "local",
     interaction_ids: list[str] | None = None,
+    merkle_version: int = 2,
 ) -> dict[str, Any]:
     """Sign the current tree state and append a tree head. Returns the head.
 
@@ -240,6 +285,10 @@ def anchor_tree_head(
             con.execute("ALTER TABLE merkle_tree_heads ADD COLUMN scope VARCHAR")
         except Exception:
             pass
+        try:
+            con.execute("ALTER TABLE merkle_tree_heads ADD COLUMN merkle_version INTEGER DEFAULT 1")
+        except Exception:
+            pass
         if interaction_ids:
             ph = ",".join("?" * len(interaction_ids))
             leaves = con.execute(
@@ -251,7 +300,7 @@ def anchor_tree_head(
                 "SELECT leaf FROM global_log_leaves ORDER BY seq"
             ).fetchall()
         live = [str(r[0]) for r in leaves]
-        root = merkle_root(live)
+        root = merkle_root(live, merkle_version=merkle_version)
         try:
             prev = con.execute(
                 "SELECT root FROM merkle_tree_heads ORDER BY created_at DESC, head_id DESC LIMIT 1"
@@ -263,7 +312,9 @@ def anchor_tree_head(
         created = utc_now().replace(tzinfo=None).isoformat()
         priv = load_private_key()
         sig = priv.sign(
-            _head_bytes(head_id, root, len(live), created, prev_head, scope)
+            _head_bytes(
+                head_id, root, len(live), created, prev_head, scope, merkle_version=merkle_version
+            )
         ).hex()
         try:
             pub_pem = (
@@ -286,10 +337,10 @@ def anchor_tree_head(
             """
             INSERT INTO merkle_tree_heads
             (head_id, root, leaf_count, scope, created_at, prev_head, signer,
-             signature, public_key_pem)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             signature, public_key_pem, merkle_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [head_id, root, len(live), scope, created, prev_head, signer, sig, pub_pem],
+            [head_id, root, len(live), scope, created, prev_head, signer, sig, pub_pem, merkle_version],
         )
     return {
         "head_id": head_id,
@@ -301,6 +352,7 @@ def anchor_tree_head(
         "signer": signer,
         "signature": sig,
         "public_key_pem": pub_pem,
+        "merkle_version": merkle_version,
     }
 
 
@@ -312,19 +364,31 @@ def latest_head() -> dict[str, Any] | None:
             cur = con.execute(
                 """
                 SELECT head_id, root, leaf_count, created_at, prev_head,
-                       signer, signature, public_key_pem
+                       signer, signature, public_key_pem, merkle_version
                 FROM merkle_tree_heads
                 ORDER BY created_at DESC, head_id DESC LIMIT 1
                 """
             )
             row = cur.fetchone()
         except Exception:
-            return None
+            try:
+                cur = con.execute(
+                    """
+                    SELECT head_id, root, leaf_count, created_at, prev_head,
+                           signer, signature, public_key_pem
+                    FROM merkle_tree_heads
+                    ORDER BY created_at DESC, head_id DESC LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+            except Exception:
+                return None
         if not row:
             return None
         cols = [d[0] for d in cur.description]
         head = dict(zip(cols, row))
         head["created_at"] = str(head.get("created_at"))
+        head["merkle_version"] = int(head.get("merkle_version") or 1)
         return head
 
 
@@ -377,6 +441,7 @@ def verify_head_signature(
     except Exception:
         return SignatureResult({"ok": False, "error": "bad_signature:invalid_hex"})
 
+    mv = int(head.get("merkle_version") or 1)
     head_bytes = _head_bytes(
         str(head.get("head_id") or ""),
         str(head.get("root") or ""),
@@ -384,6 +449,7 @@ def verify_head_signature(
         str(head.get("created_at") or ""),
         str(head.get("prev_head") or ""),
         str(head.get("scope") or "global"),
+        merkle_version=mv,
     )
     if not verify_with_ring(head_bytes, sig_bytes, trusted_keys):
         return SignatureResult({"ok": False, "error": "signature_verification_failed"})
@@ -398,7 +464,7 @@ def verify_head_chain() -> dict[str, Any]:
             cur = con.execute(
                 """
                 SELECT head_id, root, leaf_count, created_at, prev_head,
-                       signer, signature, public_key_pem
+                       signer, signature, public_key_pem, merkle_version
                 FROM merkle_tree_heads
                 ORDER BY created_at ASC, head_id ASC
                 """
@@ -406,7 +472,19 @@ def verify_head_chain() -> dict[str, Any]:
             cols = [d[0] for d in cur.description]
             heads = [dict(zip(cols, r)) for r in cur.fetchall()]
         except Exception:
-            return {"ok": True, "heads": 0, "detail": "no head table"}
+            try:
+                cur = con.execute(
+                    """
+                    SELECT head_id, root, leaf_count, created_at, prev_head,
+                           signer, signature, public_key_pem
+                    FROM merkle_tree_heads
+                    ORDER BY created_at ASC, head_id ASC
+                    """
+                )
+                cols = [d[0] for d in cur.description]
+                heads = [dict(zip(cols, r)) for r in cur.fetchall()]
+            except Exception:
+                return {"ok": True, "heads": 0, "detail": "no head table"}
     prev = "genesis"
     for h in heads:
         h["created_at"] = str(h.get("created_at"))
@@ -433,9 +511,10 @@ def verify_against_anchor(
         return {"ok": False, "error": "no anchor supplied"}
     if not verify_head_signature(anchor):
         return {"ok": False, "error": "bad anchor signature"}
+    mv = int(anchor.get("merkle_version") or 1)
     stored = collect_leaves(interaction_ids=interaction_ids)
     live = [str(r["leaf"]) for r in stored]
-    root = merkle_root(live)
+    root = merkle_root(live, merkle_version=mv)
     ok = root == str(anchor["root"]) and len(live) == int(anchor.get("leaf_count") or -1)
     return {
         "ok": ok,
@@ -444,6 +523,7 @@ def verify_against_anchor(
         "leaf_count": len(live),
         "anchor_count": anchor.get("leaf_count"),
         "head_id": anchor.get("head_id"),
+        "merkle_version": mv,
     }
 
 

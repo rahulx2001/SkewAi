@@ -282,7 +282,8 @@ def verify_bundle_completeness(bundle: dict[str, Any]) -> dict[str, Any]:
         leaves = proof.get("leaves") or []
         if not leaves and (bundle.get("actions") or []):
             return {"ok": False, "error": "missing_leaves:actions without merkle leaves"}
-        recomputed = merkle_root([str(r.get("leaf")) for r in leaves])
+        mv = int(anchor.get("merkle_version") or 1)
+        recomputed = merkle_root([str(r.get("leaf")) for r in leaves], merkle_version=mv)
         if recomputed != anchor.get("root"):
             return {"ok": False, "error": "anchor_root_mismatch:bundle modified"}
         if len(leaves) != int(anchor.get("leaf_count") or -1):
