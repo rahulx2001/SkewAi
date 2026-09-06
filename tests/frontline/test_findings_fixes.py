@@ -104,8 +104,29 @@ def test_m6_untrusted_ingest_requires_explicit_flag():
             "/tmp/does-not-matter.csv",
             enforce_trust=False,
         )
+    # Same control must still fire for a path inside the identifier jail.
+    with pytest.raises(ValueError, match="allow_untrusted_historical_backfill"):
+        ingest_mapped_csv(
+            "automotive_nhtsa",
+            "domains/automotive_nhtsa/gazetteers/makes.csv",
+            enforce_trust=False,
+        )
     nhtsa = Path("scripts/ingest_nhtsa.py").read_text(encoding="utf-8")
     assert "allow_untrusted_historical_backfill=True" in nhtsa
+
+
+def test_regulator_watch_error_does_not_leak_paths(monkeypatch, reset_ops_db):
+    def _boom(*_a, **_k):
+        raise FileNotFoundError("/Users/rahulkumarsinghj/secret.duckdb")
+
+    monkeypatch.setattr("src.domains.loader.load_pack", _boom)
+    from src.frontline.analytics import regulator_filing_watch
+
+    out = regulator_filing_watch(pack_id="automotive_nhtsa")
+    blob = str(out)
+    assert "/Users/" not in blob
+    assert "secret.duckdb" not in blob
+    assert out.get("error") == "FileNotFoundError"
 
 
 def test_l1_browser_helper_has_no_passwordless_signin():

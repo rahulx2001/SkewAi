@@ -49,6 +49,7 @@ data/security_audit.jsonl
 data/.pilot_marker_audit
 dashboard/test-results/
 data/builder_packs/builder_preview/demo/demo_script.md
+data/active_pack.json
 
 # IDE / OS
 .DS_Store

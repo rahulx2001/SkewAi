@@ -515,7 +515,7 @@ def regulator_filing_watch(*, pack_id: str | None = None) -> dict[str, Any]:
                         }
                     )
     except Exception as e:
-        return {"matches": [], "error": f"{type(e).__name__}: {e}", "pack_id": pid}
+        return {"matches": [], "error": type(e).__name__, "pack_id": pid}
     return {"pack_id": pid, "matches": matches, "count": len(matches)}
 
 

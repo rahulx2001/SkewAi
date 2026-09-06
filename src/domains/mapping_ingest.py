@@ -216,12 +216,13 @@ def ingest_mapped_csv(
     from src.security.identifiers import safe_csv_path, safe_pack_id
 
     pack_id = str(safe_pack_id(pack_id))
-    csv_path = safe_csv_path(csv_path)
-
+    # Policy gate before path jail so a missing/out-of-jail CSV cannot
+    # shadow allow_untrusted_historical_backfill.
     if enforce_trust is False and not allow_untrusted_historical_backfill:
         raise ValueError(
             "untrusted ingest requires allow_untrusted_historical_backfill=True"
         )
+    csv_path = safe_csv_path(csv_path)
     mpath = Path(mapping_path) if mapping_path else default_mapping_path(pack_id)
     mapping = load_mapping(mpath)
     rows = list(iter_mapped_rows(csv_path, mapping, limit=limit))
