@@ -76,6 +76,10 @@ async def _lifespan(app: FastAPI):
     from src.security.harden import validate_startup_security
 
     validate_startup_security()
+    # ML semantic fail-closed validation (audit F-007):
+    from src.ml_runtime.embedding_runtime import validate_startup_config
+
+    validate_startup_config()
     # Production-like: refuse to serve if pack/gazetteer/DB/secrets are dead.
     # Local tests and demos skip this; override with FRONTLINE_READINESS_SKIP_STARTUP=1.
     if is_production_like() and os.getenv(
@@ -661,16 +665,27 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
         except Exception:
             _check("cost_model", False, "no cost_model on manifest")
     try:
-        from src.ml_runtime.embedding_runtime import embedding_mode, try_semantic_embedder
+        from src.ml_runtime.embedding_runtime import (
+            embedding_mode,
+            try_semantic_embedder,
+            validate_startup_config,
+        )
 
         mode = embedding_mode()
         if mode == "semantic":
-            sem = try_semantic_embedder()
-            _check(
-                "semantic_embedder",
-                bool(sem and sem.ready()),
-                "semantic mode requires a verified local ONNX artifact",
-            )
+            try:
+                cfg = validate_startup_config()
+                _check(
+                    "semantic_embedder",
+                    cfg.get("ok", False),
+                    "; ".join(cfg.get("errors", [])) or "semantic config validated",
+                )
+            except Exception as e:
+                _check(
+                    "semantic_embedder",
+                    False,
+                    f"semantic validation failed: {e}",
+                )
         else:
             _check("semantic_embedder", True, f"not required in {mode} mode")
     except Exception as e:

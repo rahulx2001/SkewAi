@@ -8,9 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-router = APIRouter(prefix="/api/frontline/hardening", tags=["frontline"])
+from src.api.auth import require_api_key
+
+router = APIRouter(
+    prefix="/api/frontline/hardening",
+    tags=["frontline"],
+    dependencies=[Depends(require_api_key)],
+)
 
 
 @router.get("/slos")

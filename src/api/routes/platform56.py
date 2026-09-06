@@ -185,9 +185,7 @@ async def marketplace_install(
     from src.domains.marketplace import pack_install
     from src.security.audit_log import security_event
 
-    # Filesystem source_path is admin-only; registry install stays available.
-    if body.get("source_path"):
-        require_perm(role, "marketplace:install")
+    require_perm(role, "marketplace:install")
     pid = body.get("pack_id")
     if not pid:
         raise HTTPException(400, "pack_id required")

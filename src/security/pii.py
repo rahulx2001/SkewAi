@@ -83,35 +83,131 @@ import hashlib
 import secrets
 
 
+def _ensure_dek_table(con) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subject_deks (
+            subject_id VARCHAR PRIMARY KEY,
+            dek_hex VARCHAR NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            shredded BOOLEAN DEFAULT FALSE,
+            shredded_at TIMESTAMP
+        )
+        """
+    )
+
+
 class SubjectKeyStore:
     """Vault for per-subject data encryption keys enabling crypto-shredding (audit 5.1).
 
     Destroying the subject's DEK renders stored encrypted ciphertext permanently
     unrecoverable without breaking historical hash chains or Merkle tree leaves.
+    Keys are persisted across restarts and replicas in DuckDB ops warehouse.
     """
     _keys: dict[str, bytes] = {}
 
     @classmethod
     def get_or_create_dek(cls, subject_id: str) -> bytes:
-        if subject_id not in cls._keys:
-            cls._keys[subject_id] = secrets.token_bytes(32)
-        return cls._keys[subject_id]
+        if subject_id in cls._keys:
+            return cls._keys[subject_id]
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+
+        with ops_con() as con:
+            _ensure_dek_table(con)
+            row = con.execute(
+                "SELECT dek_hex, shredded FROM subject_deks WHERE subject_id = ?",
+                [subject_id],
+            ).fetchone()
+            if row:
+                dek_hex, shredded = row
+                if shredded:
+                    raise KeyError(f"Subject DEK for '{subject_id}' has been shredded (GDPR/CCPA Art. 17)")
+                dek = bytes.fromhex(dek_hex)
+                cls._keys[subject_id] = dek
+                return dek
+            new_key = secrets.token_bytes(32)
+            con.execute(
+                """
+                INSERT INTO subject_deks (subject_id, dek_hex, created_at, shredded)
+                VALUES (?, ?, ?, FALSE)
+                """,
+                [subject_id, new_key.hex(), utc_now().replace(tzinfo=None)],
+            )
+            cls._keys[subject_id] = new_key
+            return new_key
 
     @classmethod
     def shred_dek(cls, subject_id: str) -> bool:
         """Permanently erase the subject's encryption key (GDPR Art. 17)."""
-        if subject_id in cls._keys:
-            del cls._keys[subject_id]
-            return True
-        return False
+        cls._keys.pop(subject_id, None)
+        from src.data.timeutil import utc_now
+        from src.data.warehouse import ops_con
+
+        with ops_con() as con:
+            _ensure_dek_table(con)
+            now = utc_now().replace(tzinfo=None)
+            row = con.execute(
+                "SELECT shredded FROM subject_deks WHERE subject_id = ?",
+                [subject_id],
+            ).fetchone()
+            if row:
+                if not row[0]:
+                    con.execute(
+                        "UPDATE subject_deks SET dek_hex = '', shredded = TRUE, shredded_at = ? WHERE subject_id = ?",
+                        [now, subject_id],
+                    )
+                    return True
+                return False
+            # If subject_id exists in interactions table, record shredding tombstones
+            try:
+                int_row = con.execute(
+                    "SELECT 1 FROM interactions WHERE interaction_id = ?",
+                    [subject_id],
+                ).fetchone()
+                if int_row:
+                    con.execute(
+                        """
+                        INSERT INTO subject_deks (subject_id, dek_hex, created_at, shredded, shredded_at)
+                        VALUES (?, '', ?, TRUE, ?)
+                        """,
+                        [subject_id, now, now],
+                    )
+                    return True
+            except Exception:
+                pass
+            return False
 
     @classmethod
     def has_dek(cls, subject_id: str) -> bool:
-        return subject_id in cls._keys
+        if subject_id in cls._keys:
+            return True
+        try:
+            from src.data.warehouse import ops_con
+
+            with ops_con(read_only=True) as con:
+                _ensure_dek_table(con)
+                row = con.execute(
+                    "SELECT shredded FROM subject_deks WHERE subject_id = ?",
+                    [subject_id],
+                ).fetchone()
+                if row and not row[0]:
+                    return True
+        except Exception:
+            pass
+        return False
 
     @classmethod
     def clear(cls) -> None:
         cls._keys.clear()
+        try:
+            from src.data.warehouse import ops_con
+
+            with ops_con() as con:
+                _ensure_dek_table(con)
+                con.execute("DELETE FROM subject_deks")
+        except Exception:
+            pass
 
 
 def encrypt_subject_pii(subject_id: str, plaintext: str) -> str:
@@ -120,9 +216,11 @@ def encrypt_subject_pii(subject_id: str, plaintext: str) -> str:
         return ""
     dek = SubjectKeyStore.get_or_create_dek(subject_id)
     nonce = secrets.token_bytes(12)
-    stream_key = hashlib.blake2b(dek, key=nonce, digest_size=max(1, len(plaintext.encode()))).digest()
-    cipher_bytes = bytes(b ^ k for b, k in zip(plaintext.encode("utf-8"), stream_key))
-    payload = nonce + cipher_bytes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aesgcm = AESGCM(dek)
+    ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
+    payload = nonce + ciphertext
     return "enc:v1:" + base64.urlsafe_b64encode(payload).decode("ascii")
 
 
@@ -135,8 +233,16 @@ def decrypt_subject_pii(subject_id: str, token: str) -> str:
     dek = SubjectKeyStore.get_or_create_dek(subject_id)
     raw = base64.urlsafe_b64decode(token[len("enc:v1:"):].encode("ascii"))
     nonce, cipher_bytes = raw[:12], raw[12:]
-    stream_key = hashlib.blake2b(dek, key=nonce, digest_size=max(1, len(cipher_bytes))).digest()
-    return bytes(b ^ k for b, k in zip(cipher_bytes, stream_key)).decode("utf-8", errors="replace")
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        aesgcm = AESGCM(dek)
+        return aesgcm.decrypt(nonce, cipher_bytes, None).decode("utf-8", errors="replace")
+    except Exception:
+        if len(cipher_bytes) <= 64:
+            stream_key = hashlib.blake2b(dek, key=nonce, digest_size=max(1, len(cipher_bytes))).digest()
+            return bytes(b ^ k for b, k in zip(cipher_bytes, stream_key)).decode("utf-8", errors="replace")
+        raise
 
 
 __all__ = [

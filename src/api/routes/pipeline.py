@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Up
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_api_key
+from src.api.rbac import get_role
 from src.config import REPO_ROOT
 
 router = APIRouter(
@@ -226,9 +227,11 @@ async def pack_builder_insight(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/marketplace/install/{pack_id}")
-async def marketplace_install(pack_id: str) -> dict[str, Any]:
+async def marketplace_install(pack_id: str, role: str = Depends(get_role)) -> dict[str, Any]:
+    from src.api.rbac import require_perm
     from src.domains.marketplace import install_vertical
 
+    require_perm(role, "marketplace:install")
     try:
         return install_vertical(pack_id)
     except FileNotFoundError as e:
@@ -276,9 +279,11 @@ async def billing_webhook(request: Request, body: dict[str, Any]) -> dict[str, A
 
 
 @router.post("/seats")
-async def seats_assign(body: dict[str, Any]) -> dict[str, Any]:
+async def seats_assign(body: dict[str, Any], role: str = Depends(get_role)) -> dict[str, Any]:
+    from src.api.rbac import require_perm
     from src.frontline.billing import assign_seat
 
+    require_perm(role, "seat:admin")
     try:
         return assign_seat(
             str(body.get("tenant_id") or "default"),
@@ -290,13 +295,21 @@ async def seats_assign(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/keys")
-async def keys_create(body: dict[str, Any]) -> dict[str, Any]:
+async def keys_create(body: dict[str, Any], role: str = Depends(get_role)) -> dict[str, Any]:
+    from src.api.rbac import require_perm
     from src.security.scoped_keys import create_scoped_key
 
-    return create_scoped_key(
-        list(body.get("scopes") or ["kpi:read"]),
-        tenant_id=str(body.get("tenant_id") or "default"),
-    )
+    require_perm(role, "key:admin")
+    tenant = str(body.get("tenant_id") or "default").strip()
+    if not tenant:
+        raise HTTPException(400, "tenant_id required")
+    try:
+        return create_scoped_key(
+            list(body.get("scopes") or ["kpi:read"]),
+            tenant_id=tenant,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.get("/webhooks/catalog")

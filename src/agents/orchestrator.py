@@ -2035,6 +2035,14 @@ async def create_interaction(
         await ops_in_thread(_insert)
         record_action(_build_started_action(interaction_id, pack.id))
 
+        # Initialize subject DEK for crypto-shredding (GDPR/CCPA Art. 17 compliance, audit F-008)
+        try:
+            from src.security.pii import SubjectKeyStore
+
+            SubjectKeyStore.get_or_create_dek(interaction_id)
+        except Exception:
+            pass
+
         orch = Orchestrator(interaction_id, pack, channel=channel, hooks=hooks)
         orch.ctx.customer_ref = customer_ref
         greeting = await orch.start()
