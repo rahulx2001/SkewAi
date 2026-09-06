@@ -185,7 +185,7 @@ async def marketplace_install(
     from src.domains.marketplace import pack_install
     from src.security.audit_log import security_event
 
-    require_perm(role, "marketplace:install")
+    require_perm(role, "marketplace:install", open_mode_ok=not bool(body.get("source_path")))
     pid = body.get("pack_id")
     if not pid:
         raise HTTPException(400, "pack_id required")

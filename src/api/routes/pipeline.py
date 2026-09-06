@@ -231,7 +231,7 @@ async def marketplace_install(pack_id: str, role: str = Depends(get_role)) -> di
     from src.api.rbac import require_perm
     from src.domains.marketplace import install_vertical
 
-    require_perm(role, "marketplace:install")
+    require_perm(role, "marketplace:install", open_mode_ok=True)
     try:
         return install_vertical(pack_id)
     except FileNotFoundError as e:
