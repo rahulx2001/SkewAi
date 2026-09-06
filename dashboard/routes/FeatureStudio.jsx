@@ -613,7 +613,7 @@ export default function FeatureStudio() {
           <div className="row" style={{ marginBottom: 14 }}>
             <label style={{ minWidth: 220 }}>
               Phone or channel
-              <input value={phone} onChange={(e) => setPhone(e.target.value)} />
+              <input value={phone} onChange={(e) => setPhone(e.target.value)} aria-label="Phone or channel" />
             </label>
             <button
               type="button"
@@ -684,7 +684,7 @@ export default function FeatureStudio() {
               </label>
               <label>
                 Resource id
-                <input value={resourceId} onChange={(e) => setResourceId(e.target.value)} />
+                <input value={resourceId} onChange={(e) => setResourceId(e.target.value)} aria-label="Resource ID" />
               </label>
               <button
                 type="button"
@@ -726,11 +726,11 @@ export default function FeatureStudio() {
             <div className="stack">
               <label>
                 Approval id
-                <input value={approvalId} onChange={(e) => setApprovalId(e.target.value)} />
+                <input value={approvalId} onChange={(e) => setApprovalId(e.target.value)} aria-label="Approval ID" />
               </label>
               <label>
                 Reviewer (must differ from requester)
-                <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
+                <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} aria-label="Reviewer username" />
               </label>
               <div className="row">
                 <button
@@ -796,7 +796,7 @@ export default function FeatureStudio() {
           <div className="row" style={{ marginBottom: 14 }}>
             <label style={{ minWidth: 200 }}>
               Job type
-              <input value={jobType} onChange={(e) => setJobType(e.target.value)} />
+              <input value={jobType} onChange={(e) => setJobType(e.target.value)} aria-label="Job type" />
             </label>
             <button
               type="button"
@@ -919,7 +919,7 @@ export default function FeatureStudio() {
             <div className="stack">
               <label>
                 Interaction id
-                <input value={coachIid} onChange={(e) => setCoachIid(e.target.value)} />
+                <input value={coachIid} onChange={(e) => setCoachIid(e.target.value)} aria-label="Interaction ID" />
               </label>
               <label>
                 Message to agent
@@ -969,7 +969,7 @@ export default function FeatureStudio() {
             <div className="stack">
               <label>
                 Subject
-                <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} />
+                <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} aria-label="Email subject" />
               </label>
               <label>
                 Body
@@ -1225,7 +1225,7 @@ export default function FeatureStudio() {
               <div className="row" style={{ marginBottom: 12 }}>
                 <label style={{ minWidth: 200 }}>
                   Email target
-                  <input value={subTarget} onChange={(e) => setSubTarget(e.target.value)} />
+                  <input value={subTarget} onChange={(e) => setSubTarget(e.target.value)} aria-label="Subscription email target" />
                 </label>
                 <button
                   type="button"

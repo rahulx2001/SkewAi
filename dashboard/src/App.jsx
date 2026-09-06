@@ -81,7 +81,8 @@ const THEMES = ["dark", "light"];
 
 function hashRouteId() {
   const raw = window.location.hash.slice(1) || "command";
-  return raw.split("?")[0] || "command";
+  const cleaned = raw.split("?")[0].replace(/^\/+/, "") || "command";
+  return cleaned;
 }
 
 function useHashRoute() {

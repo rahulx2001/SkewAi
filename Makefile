@@ -88,7 +88,7 @@ backtest:
 	$(PY) -c "from src.backtest.engine import run_backtest, best_lead_time; r=run_backtest('$(PACK)'); print(len(r), 'rows'); print('best', best_lead_time('$(PACK)'))"
 
 verify-chain:
-	$(PY) -m scripts.verify_ledger_chain --interaction $(ID)
+	$(if $(ID),$(PY) -m scripts.verify_ledger_chain --interaction $(ID),$(PY) -m scripts.verify_ledger_chain --all)
 
 cluster:
 	$(PY) -c "from src.ml_runtime.clustering import rebuild_clusters; print(rebuild_clusters('$(PACK)'))"

@@ -60,6 +60,7 @@ export default function InsightsBoard() {
               max={90}
               value={windowDays}
               onChange={(e) => setWindowDays(Number(e.target.value) || 14)}
+              aria-label="Window in days"
             />
           </label>
           <button type="button" onClick={load} disabled={loading}>

@@ -644,6 +644,7 @@ export default function EnterpriseOps() {
                   type="checkbox"
                   checked={riskPersist}
                   onChange={(e) => setRiskPersist(e.target.checked)}
+                  aria-label="Persist snapshots"
                 />
                 persist snapshots
               </label>
@@ -828,8 +829,14 @@ export default function EnterpriseOps() {
         <div className="panel">
           <h2>Scenario playbook builder</h2>
           <div className="field" style={{ marginBottom: 8 }}>
-            <label>name</label>
-            <input value={scnName} onChange={(e) => setScnName(e.target.value)} style={{ width: "100%" }} />
+            <label htmlFor="scn-name-input">name</label>
+            <input
+              id="scn-name-input"
+              value={scnName}
+              onChange={(e) => setScnName(e.target.value)}
+              aria-label="Scenario name"
+              style={{ width: "100%" }}
+            />
           </div>
           <div className="field" style={{ marginBottom: 8 }}>
             <label>customer steps (one line each)</label>

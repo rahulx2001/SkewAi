@@ -148,6 +148,7 @@ export default function EarlyWarningBoard() {
               type="checkbox"
               checked={includeSimulated}
               onChange={(e) => setIncludeSimulated(e.target.checked)}
+              aria-label="Include simulated traffic"
             />
             Include simulated
           </label>
@@ -559,6 +560,7 @@ export default function EarlyWarningBoard() {
                   max={100}
                   value={simCount}
                   onChange={(e) => setSimCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+                  aria-label="Simulation interaction count"
                 />
               </div>
               <div className="field" style={{ flex: 1 }}>

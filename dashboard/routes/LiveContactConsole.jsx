@@ -419,7 +419,9 @@ export default function LiveContactConsole() {
                   <span className={"fr-meter-label" + (flagged ? " err-text" : "")}>{f.toFixed(2)}</span>
                 </div>
                 <div className="row" style={{ gap: 4 }}>
-                  <span className="chip">{it.channel}</span>
+                  <span className={"chip" + (it.channel === "simulated" ? " purple" : "")}>
+                    {it.channel === "simulated" ? "⚡ simulated" : it.channel}
+                  </span>
                   {it.supervised && <span className="chip teal">supervised</span>}
                   {flagged && <span className="chip red pulse">fr high</span>}
                   {it.enrichment_partial && <span className="chip">partial enrichment</span>}
@@ -473,6 +475,11 @@ export default function LiveContactConsole() {
             <div style={{ marginBottom: 12, fontSize: 12 }}>
               <span className="muted">state:</span>{" "}
               <span className="mono">{selected.status}</span>
+              {selected.channel === "simulated" && (
+                <span className="chip purple" style={{ marginLeft: 8 }}>
+                  ⚡ simulated demo
+                </span>
+              )}
               {isFlagged && (
                 <span className="chip red pulse" style={{ marginLeft: 8 }}>
                   high frustration

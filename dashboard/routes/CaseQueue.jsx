@@ -250,6 +250,7 @@ export default function CaseQueue() {
             onChange={(e) => setSearchQ(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && load()}
             placeholder="case id, category, text…"
+            aria-label="Search cases"
           />
         </div>
         <div className="field">

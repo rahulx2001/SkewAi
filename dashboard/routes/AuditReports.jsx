@@ -352,6 +352,7 @@ export default function AuditReports() {
               type="checkbox"
               checked={mismatchOnly}
               onChange={(e) => setMismatchOnly(e.target.checked)}
+              aria-label="Show only MISMATCH verdicts"
             />
             <span className="muted">show only MISMATCH verdicts</span>
           </label>

@@ -91,7 +91,7 @@ export default function PackBuilder() {
       <section className="panel">
         <label>
           Source CSV
-          <input type="file" accept=".csv,text/csv" onChange={onFile} disabled={busy} />
+          <input type="file" accept=".csv,text/csv" onChange={onFile} disabled={busy} aria-label="Source CSV file" />
         </label>
       </section>
       {columns.length > 0 && (

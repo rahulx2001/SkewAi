@@ -821,7 +821,8 @@ async def get_digest(window_days: int = 1, regenerate: bool = False) -> dict[str
         if not path.exists():
             path = write_daily_digest(window_days=window_days)
     return {
-        "digest_path": str(path),
+        "digest_name": path.name,
+        "digest_path": path.name,
         "digest_markdown": path.read_text(encoding="utf-8") if path.exists() else "",
     }
 
@@ -843,14 +844,15 @@ async def run_digest_scheduled(
                 event="early_warning_threshold",
                 summary=f"Daily digest ready ({path.name})",
                 ref_id=f"digest:{path.name}",
-                extra={"digest_path": str(path), "chars": len(md)},
+                extra={"digest_name": path.name, "chars": len(md)},
             )
             posted = True
         except Exception:
             posted = False
     return {
         "ok": True,
-        "digest_path": str(path),
+        "digest_name": path.name,
+        "digest_path": path.name,
         "digest_markdown": md[:2000],
         "webhook_posted": posted,
     }

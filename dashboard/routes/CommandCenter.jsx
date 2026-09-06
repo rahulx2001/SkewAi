@@ -231,7 +231,13 @@ export default function CommandCenter({ refreshKey }) {
                   <div className="meta">
                     {[row.pack_id, row.category].filter(Boolean).join(" · ") || "intake in progress"}
                   </div>
-                  <div className="chan">{row.channel || "open →"}</div>
+                  <div className="chan">
+                    {row.channel === "simulated" ? (
+                      <span className="chip purple" style={{ fontSize: 10, padding: "2px 6px" }}>simulated</span>
+                    ) : (
+                      row.channel || "open →"
+                    )}
+                  </div>
                 </button>
               ))}
             </div>

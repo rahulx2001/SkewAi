@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { apiHeaders } from "../src/apiAuth.js";
+import { apiHeaders, getStoredApiKey } from "../src/apiAuth.js";
 import { goHash, openCases, openConsole, simulateTraffic } from "../src/ui/opsActions.js";
 import {
   IconMic,
@@ -28,13 +28,21 @@ export default function UserJourneyGuide() {
   }, []);
 
   async function handleSimulate(count = 15) {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `This generates ${count} synthetic demo contacts (tagged channel='simulated') for UI testing. They are excluded from real pilot metrics by default. Proceed?`
+      )
+    ) {
+      return;
+    }
     setSimRunning(true);
     setSimFeedback(null);
     try {
       const res = await simulateTraffic({ count, speed: "instant" });
       setSimFeedback({
         ok: true,
-        msg: `Successfully generated ${res.simulated || count} contacts. Tables, cases, and early warning clusters are populated!`,
+        msg: `Generated ${res.simulated || count} simulated demo contacts (channel: simulated). Real customer pilot metrics remain uncontaminated.`,
       });
     } catch (e) {
       setSimFeedback({ ok: false, msg: String(e.message || e) });
@@ -68,12 +76,12 @@ export default function UserJourneyGuide() {
         {
           label: "Warranty Defect (Brakes)",
           text: "My front brakes make a loud grinding sound every time I slow down under 20 mph.",
-          tests: "Cluster 14 match (SERVICE BRAKES), NHTSA advisory lookup, automatic remedy drafting.",
+          tests: "SERVICE BRAKES category cluster match, NHTSA advisory lookup, automatic remedy drafting.",
         },
         {
           label: "Electrical / Auxiliary",
           text: "The driver side power window will not go up after being parked in the rain.",
-          tests: "Cluster 31 match (ELECTRICAL SYSTEM), component slot extraction.",
+          tests: "ELECTRICAL SYSTEM category cluster match, component slot extraction.",
         },
       ],
       ctaLabel: "Launch Voice Agent",
@@ -121,14 +129,14 @@ export default function UserJourneyGuide() {
       title: "Qubot v2 Audit & Cryptographic Merkle Ledger",
       route: "audits",
       icon: IconShield,
-      tagline: "100% grounded assertions, zero hallucination, and tamper-proof hash chains",
+      tagline: "Cryptographic hash chains and automated Qubot groundedness verification against domain evidence",
       description:
-        "Every single agent utterance, recommendation, and state transition is hashed into an append-only cryptographic Merkle tree. Immediately upon call completion, the Qubot v2 auditor scans the transcript against domain database facts to ensure no ungrounded claims or hallucinated advice were given to the caller.",
+        "Every single agent utterance, recommendation, and state transition is hashed into an append-only cryptographic hash chain. Immediately upon call completion, the Qubot v2 auditor scans the transcript against domain database facts to flag ungrounded claims, unverifiable assertions, or unsupported advice given to the caller.",
       whatHappens: [
         "Merkle Tree Anchoring: Generates a tamper-evident root hash for every interaction, verifiable with `make verify-chain`.",
         "Evidence Pinning: Every cited recall advisory, repair procedure, or cluster attribution is pinned to source database rows.",
         "Qubot Audit Report: Flags uncited advisory IDs, unsupported promises, or hallucinated failure modes.",
-        "Audit Status Badges: Green badge guarantees mathematical proof of factual groundedness.",
+        "Audit Status Badges: Green badge indicates transcript assertions verified against cited database evidence and the cryptographic hash chain is intact.",
       ],
       ctaLabel: "View Audit Reports",
       action: () => goHash("audits"),
@@ -199,7 +207,7 @@ export default function UserJourneyGuide() {
     {
       title: "Compliance & Risk Officer",
       badge: "Governance & Trust",
-      desc: "Verifies regulatory compliance, ensures zero hallucination, and audits tamper-proof evidence.",
+      desc: "Verifies regulatory compliance, audits groundedness verification reports, and inspects tamper-evident hash chains.",
       keySteps: [
         "Review Qubot v2 post-contact audit reports on the Audit Reports page (g then a).",
         "Verify that 100% of cited advisories and repair remedies are pinned to database records.",
@@ -215,7 +223,7 @@ export default function UserJourneyGuide() {
       keySteps: [
         "Verify embedding runtime health at /health (ensuring mode=legacy until calibrated).",
         "Monitor rank overlap and divergence rates in the embedding_shadow_comparisons table.",
-        "Supervise external annotators on the Label Desk (/ui/#/labels) to achieve kappa >= 0.70.",
+        "Supervise external annotators on the Label Desk (#labels) to achieve kappa >= 0.70.",
         "Execute offline ONNX backfills using scripts.embedding_backfill without altering live clusters.",
       ],
       targetHash: "labels",
@@ -227,6 +235,44 @@ export default function UserJourneyGuide() {
 
   return (
     <div className="panel user-journey-guide">
+      {healthInfo?.auth_required && !getStoredApiKey() && (
+        <div
+          style={{
+            background: "rgba(201, 122, 114, 0.15)",
+            border: "1px solid var(--danger, #c97a72)",
+            borderRadius: "var(--radius, 10px)",
+            padding: "12px 16px",
+            marginBottom: "20px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "13px", color: "var(--ink)" }}>
+            <span style={{ fontSize: "18px" }}>⚠️</span>
+            <span>
+              <strong>API Authentication Required:</strong> The backend requires an API key for live operations. You are currently browsing without a configured key.
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => goHash("settings")}
+            style={{
+              padding: "6px 12px",
+              fontSize: "12px",
+              fontWeight: "600",
+              background: "var(--danger, #c97a72)",
+              color: "#fff",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Configure Key in Settings →
+          </button>
+        </div>
+      )}
+
       {/* Top Banner & Quick Controls */}
       <div
         style={{
@@ -279,10 +325,10 @@ export default function UserJourneyGuide() {
           }}
         >
           <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--ink)", marginBottom: "4px" }}>
-            Quick Data Starter
+            Quick Data Starter (Demo Only)
           </div>
           <div style={{ fontSize: "12px", color: "var(--ink-soft)", marginBottom: "10px" }}>
-            Populate all tables, cases, and early warning boards instantly with real NHTSA complaints:
+            Populate tables and demo boards with synthetic simulated contacts (isolated from real pilot traffic):
           </div>
           <button
             type="button"
@@ -303,7 +349,7 @@ export default function UserJourneyGuide() {
             }}
           >
             <IconLayers style={{ width: 14, height: 14 }} />
-            {simRunning ? "Simulating Traffic…" : "⚡ Populate 15 Real Contacts"}
+            {simRunning ? "Simulating Demo Traffic…" : "⚡ Populate 15 Simulated Demo Contacts (Demo Only)"}
           </button>
           {simFeedback && (
             <div
@@ -812,15 +858,14 @@ export default function UserJourneyGuide() {
               <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
                 <span style={{ fontSize: "18px" }}>⚡</span>
                 <h4 style={{ margin: 0, fontSize: "15px", fontWeight: "600", color: "var(--ink)" }}>
-                  Path B: Batch Fleet Simulation
+                  Path B: Batch Fleet Simulation (Demo Only)
                 </h4>
               </div>
               <p style={{ fontSize: "13px", color: "var(--ink-soft)", lineHeight: "1.4", margin: "0 0 12px 0" }}>
-                Instantly replay 25 real historical NHTSA complaints through the intake and triage pipeline to
-                populate charts, investigations, and queues.
+                Instantly replay 25 synthetic/simulated complaints through the intake and triage pipeline for demonstration and UI exploration.
               </p>
               <ol style={{ fontSize: "12.5px", color: "var(--ink)", margin: "0 0 16px 0", paddingLeft: "18px" }}>
-                <li>Click <strong>Run 25-Call Simulation</strong>.</li>
+                <li>Click <strong>Run 25-Call Simulation (Demo Only)</strong>.</li>
                 <li>Observe cases generated in <strong>Case Queue</strong>.</li>
                 <li>Check <strong>Early Warning</strong> for cluster spikes.</li>
                 <li>Verify <strong>Audit Reports</strong> for green badges.</li>
@@ -840,7 +885,7 @@ export default function UserJourneyGuide() {
                   fontSize: "13px",
                 }}
               >
-                {simRunning ? "Simulating…" : "Run 25-Call Simulation →"}
+                {simRunning ? "Simulating Demo…" : "Run 25-Call Simulation (Demo Only) →"}
               </button>
             </div>
 
@@ -859,8 +904,7 @@ export default function UserJourneyGuide() {
                 </h4>
               </div>
               <p style={{ fontSize: "13px", color: "var(--ink-soft)", lineHeight: "1.4", margin: "0 0 12px 0" }}>
-                Inspect the mathematical proof of truth: see how Qubot v2 verifies that every AI claim is
-                anchored to NHTSA database rows.
+                Inspect verifiable groundedness: see how Qubot v2 checks that AI claims are anchored to domain database rows.
               </p>
               <ol style={{ fontSize: "12.5px", color: "var(--ink)", margin: "0 0 16px 0", paddingLeft: "18px" }}>
                 <li>Open <strong>Audit Reports</strong> page.</li>

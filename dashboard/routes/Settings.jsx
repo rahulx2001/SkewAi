@@ -261,6 +261,7 @@ export default function Settings() {
             type="checkbox"
             checked={rememberKey}
             onChange={(e) => setRememberKey(e.target.checked)}
+            aria-label="Remember API key on this device"
           />
           Remember on this device (otherwise the key lives in memory only)
         </label>
@@ -367,6 +368,7 @@ export default function Settings() {
             readOnly
             style={{ width: "100%" }}
             placeholder="Configured on server"
+            aria-label="Alert webhook URL"
           />
           <span className="faint" style={{ fontSize: 11, marginTop: 4 }}>
             Display only. Set the webhook URL on the server environment and
@@ -467,6 +469,7 @@ export default function Settings() {
               type="checkbox"
               checked={connEnabled}
               onChange={(e) => setConnEnabled(e.target.checked)}
+              aria-label="Enable outbound connectors"
             />
             <span>
               Enabled
@@ -486,6 +489,7 @@ export default function Settings() {
                 ? `Configured: ${connStatus.webhook_url_redacted} — type to replace`
                 : "https://hooks.example.com/skewai"
             }
+            aria-label="Connector webhook URL"
             style={{ width: "100%" }}
           />
           <span className="faint" style={{ fontSize: 11, marginTop: 4 }}>
@@ -504,6 +508,7 @@ export default function Settings() {
                 ? "(set — enter to replace)"
                 : "Optional"
             }
+            aria-label="Connector shared secret"
             style={{ width: "100%" }}
           />
         </div>
