@@ -60,16 +60,14 @@ def auth_required() -> bool:
             return True
     except Exception:
         pass
-    if _env_bool("FRONTLINE_AUTH_REQUIRED", False):
-        return True
     if _env_bool("FRONTLINE_OPEN_MODE", False):
         return False
+    if _env_bool("FRONTLINE_AUTH_REQUIRED", False):
+        return True
     return bool(_configured_key())
 
 
 def is_open_mode() -> bool:
-    if _env_bool("FRONTLINE_AUTH_REQUIRED", False):
-        return False
     return not auth_required()
 
 

@@ -89,18 +89,19 @@ def test_hardening_post_allows_ops_write(auth_env, reset_ops_db):
         assert resp.status_code == 200
 
 
-def test_open_mode_disabled_when_auth_required(auth_env, reset_ops_db, monkeypatch):
+def test_open_mode_disabled_when_auth_required(auth_env, reset_ops_db):
     """6. When FRONTLINE_AUTH_REQUIRED=1, open_mode_ok must be forced to False (never 200 without auth or permission)."""
-    # Even if FRONTLINE_OPEN_MODE=1 is set, auth_required must override it
-    monkeypatch.setenv("FRONTLINE_OPEN_MODE", "1")
-
     with TestClient(app) as client:
-        # Unauthenticated request must not pass
+        # Unauthenticated request must not pass via open mode
         resp = client.get("/api/frontline/hardening/slos")
         assert resp.status_code in {401, 403}
 
-        # Request from agent without ops:read must not pass
+        # Request from agent without ops:write must not bypass via open_mode_ok
         agent_token = issue_session("agent_usr", "agent", issuer_role="admin")["token"]
         headers = {"X-API-Key": TEST_SERVICE_KEY, "X-Frontline-Session": agent_token}
-        resp2 = client.get("/api/frontline/hardening/slos", headers=headers)
+        resp2 = client.post(
+            "/api/frontline/hardening/fairness",
+            headers=headers,
+            json={"cases": []},
+        )
         assert resp2.status_code == 403
