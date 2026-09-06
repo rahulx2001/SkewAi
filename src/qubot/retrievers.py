@@ -47,6 +47,9 @@ def contact_audit(interaction_id: str) -> dict[str, Any]:
             "SELECT * FROM interaction_turns WHERE interaction_id = ? ORDER BY seq",
             [interaction_id],
         )
+        from src.data.turns import decrypt_turn_rows
+
+        turns = decrypt_turn_rows(interaction_id, turns)
         actions = _rows(
             con,
             "SELECT * FROM agent_actions WHERE interaction_id = ? ORDER BY ts",

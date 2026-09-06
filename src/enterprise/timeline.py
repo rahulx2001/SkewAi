@@ -80,6 +80,8 @@ def build_incident_timeline(interaction_id: str) -> dict[str, Any]:
         }
     )
 
+    from src.data.turns import reveal_turn_text
+
     for row in turns:
         t = dict(zip(tcols, row))
         events.append(
@@ -88,7 +90,7 @@ def build_incident_timeline(interaction_id: str) -> dict[str, Any]:
                 "ts": _iso(t.get("ts")),
                 "label": f"{t.get('speaker')} turn #{t.get('seq')}",
                 "detail": {
-                    "text": (t.get("text") or "")[:500],
+                    "text": reveal_turn_text(interaction_id, t.get("text"))[:500],
                     "frustration_score": t.get("frustration_score"),
                     "latency_ms": t.get("latency_ms"),
                     "seq": t.get("seq"),

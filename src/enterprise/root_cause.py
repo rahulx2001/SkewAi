@@ -55,7 +55,11 @@ def analyze_root_cause(interaction_id: str) -> dict[str, Any]:
         ).fetchone()
 
     action_rows = [dict(zip(acols, r)) for r in actions]
-    turn_rows = [dict(zip(tcols, r)) for r in turns]
+    from src.data.turns import decrypt_turn_rows
+
+    turn_rows = decrypt_turn_rows(
+        interaction_id, [dict(zip(tcols, r)) for r in turns]
+    )
 
     factors: list[dict[str, Any]] = []
     blame_agent: str | None = None

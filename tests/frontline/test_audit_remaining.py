@@ -44,6 +44,62 @@ def test_f008_encrypt_roundtrip_and_shred(reset_ops_db):
         decrypt_subject_pii(iid, token)
 
 
+def test_encrypted_turns_decrypt_on_read_paths(reset_ops_db):
+    from src.data.turns import ERASED_TURN, persist_turn, reveal_turn_text
+    from src.data.warehouse import ops_con
+    from src.frontline.dsr import export_interaction
+    from src.qubot.retrievers import contact_audit
+
+    SubjectKeyStore.clear()
+    iid = "int_read_" + new_ulid()[:12]
+    with ops_con() as con:
+        con.execute(
+            """
+            INSERT INTO interactions
+            (interaction_id, pack_id, pack_version, started_at, channel, status)
+            VALUES (?, 'automotive_nhtsa', 't', ?, 'web_text', 'active')
+            """,
+            [iid, datetime.now(timezone.utc)],
+        )
+    persist_turn(iid, {
+        "turn_id": iid + "_t1",
+        "seq": 1,
+        "speaker": "customer",
+        "text": "My 2019 Honda CR-V grinds. Call 555-0199.",
+        "ts": datetime.now(timezone.utc),
+    })
+    persist_turn(iid, {
+        "turn_id": iid + "_t2",
+        "seq": 2,
+        "speaker": "agent",
+        "text": "I heard grinding on the Honda.",
+        "ts": datetime.now(timezone.utc),
+    })
+    with ops_con(read_only=True) as con:
+        stored = con.execute(
+            "SELECT speaker, text FROM interaction_turns WHERE interaction_id = ? ORDER BY seq",
+            [iid],
+        ).fetchall()
+    assert stored[0][0] == "customer"
+    assert str(stored[0][1]).startswith("enc:v1:")
+    assert "555-0199" not in str(stored[0][1])
+    assert stored[1][1] == "I heard grinding on the Honda."
+
+    audit = contact_audit(iid)
+    cust = next(t for t in audit["turns"] if t["speaker"] == "customer")
+    assert cust["text"].startswith("My 2019 Honda")
+    assert "enc:v1:" not in cust["text"]
+    exported = export_interaction(iid)
+    exp_cust = next(t for t in exported["turns"] if t["speaker"] == "customer")
+    assert "555-0199" in exp_cust["text"]
+
+    SubjectKeyStore.shred_dek(iid)
+    assert reveal_turn_text(iid, stored[0][1]) == ERASED_TURN
+    shredded = contact_audit(iid)
+    shredded_cust = next(t for t in shredded["turns"] if t["speaker"] == "customer")
+    assert shredded_cust["text"] == ERASED_TURN
+
+
 @pytest.mark.asyncio
 async def test_f017_simulated_case_kind(reset_ops_db, seed_automotive_pack, pack):
     from src.agents.orchestrator import Orchestrator

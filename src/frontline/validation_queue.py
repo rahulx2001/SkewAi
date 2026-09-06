@@ -421,7 +421,8 @@ def export_audit_regressions(
             if iid:
                 try:
                     with ops_con(read_only=True) as con2:
-                        from src.security.pii import decrypt_subject_pii, redact_pii
+                        from src.data.turns import reveal_turn_text
+                        from src.security.pii import redact_pii
 
                         turns = []
                         for r in con2.execute(
@@ -430,12 +431,7 @@ def export_audit_regressions(
                             " ORDER BY seq",
                             [iid],
                         ).fetchall():
-                            raw = str(r[0] or "")
-                            try:
-                                raw = decrypt_subject_pii(iid, raw)
-                            except Exception:
-                                pass
-                            turns.append(redact_pii(raw))
+                            turns.append(redact_pii(reveal_turn_text(iid, str(r[0] or ""))))
                 except Exception:
                     turns = []
             fh.write(_json.dumps({

@@ -114,6 +114,10 @@ def export_interaction(interaction_id: str, *, redact_pii: bool = False) -> dict
                     for k, v in list(r.items()):
                         if hasattr(v, "isoformat"):
                             r[k] = v.isoformat()
+                if name == "turns":
+                    from src.data.turns import decrypt_turn_rows
+
+                    rows = decrypt_turn_rows(iid, rows)
                 out[name] = rows if name != "interaction" else (rows[0] if rows else None)
             except Exception as e:
                 out[name] = {"error": f"{type(e).__name__}:{e}"}
