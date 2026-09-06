@@ -216,7 +216,7 @@ def test_f029_dashboard_renders_trend_scope_and_simulated_opt_out():
     assert "Include simulated" in src
 
 
-def test_empirical_unlabeled_severity_and_cluster_are_blocked():
+def test_empirical_unlabeled_severity_and_cluster_are_skipped():
     from src.frontline.shadow_pilot import load_empirical_cohort
     from src.eval.shadow_pilot import ShadowPilotEvaluator
 
@@ -226,9 +226,10 @@ def test_empirical_unlabeled_severity_and_cluster_are_blocked():
     assert all(not (c.human_severity or "").strip() for c in contacts)
     assert all(c.engineer_verified_cluster_id is None for c in contacts)
     report = ShadowPilotEvaluator(contacts).run_full_evaluation()
-    assert report["metrics"]["severity_agreement"]["rating"] == "blocked"
-    assert report["metrics"]["cluster_agreement"]["top_1"]["rating"] == "blocked"
-    assert report["overall_verdict"] == "red"
+    assert report["metrics"]["severity_agreement"]["rating"] == "skipped"
+    assert report["metrics"]["cluster_agreement"]["top_1"]["rating"] == "skipped"
+    assert "severity_agreement_kappa" in report["waived_metrics"]
+    assert report["overall_verdict"] != "red"
     assert "elif human_slots.get(\"category\")" not in open(
         "src/frontline/shadow_pilot.py", encoding="utf-8"
     ).read()

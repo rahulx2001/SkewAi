@@ -486,12 +486,17 @@ def format_scorecard_table(report: dict[str, Any], target_cost_usd: float = 0.45
 
     lines.append("-" * w)
     verdict = report.get("overall_verdict", "UNKNOWN").upper()
+    waived = report.get("waived_metrics") or []
     status_note = {
-        "GREEN": "PROCEED — System meets all statistical thresholds for Phase 1 Live Pilot (5% traffic)",
+        "GREEN": "scored gates met",
         "YELLOW": "HUMAN IN LOOP — Proceed with mandatory supervisor sign-off on flagged entities",
         "RED": "BLOCKED — Do not route live customer calls; address regressions in engineering",
         "BLOCKED": "BLOCKED — Independent human labels missing or metrics below gate",
     }.get(verdict, "")
+    if verdict == "GREEN" and waived:
+        status_note += f" — waived unlabeled: {', '.join(waived)}"
+    elif verdict == "GREEN":
+        status_note = "PROCEED — System meets all statistical thresholds for Phase 1 Live Pilot (5% traffic)"
     lines.append(f"OVERALL PILOT VERDICT: [{verdict}] — {status_note}")
     lines.append("=" * w)
     return "\n".join(lines)

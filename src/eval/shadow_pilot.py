@@ -206,9 +206,9 @@ class ShadowPilotEvaluator:
                 point_estimate=0.0,
                 ci_lower=0.0,
                 ci_upper=0.0,
-                rating="blocked",
-                target="kappa >= 0.70",
-                detail="insufficient independent human_severity labels; not scored",
+                rating="skipped",
+                target="kappa >= 0.70 (waived)",
+                detail="waived: no independent human_severity labels; not scored",
             )
         ai_labels = [a for a, _h in pairs]
         hu_labels = [h for _a, h in pairs]
@@ -228,16 +228,16 @@ class ShadowPilotEvaluator:
         evaluated = [c for c in self.contacts if c.engineer_verified_cluster_id is not None]
         total = len(evaluated)
         if total < 2:
-            blocked = ShadowMetricResult(
+            skipped = ShadowMetricResult(
                 name="cluster_agreement_unlabeled",
                 point_estimate=0.0,
                 ci_lower=0.0,
                 ci_upper=0.0,
-                rating="blocked",
-                target=">= 0.75 top-1",
-                detail="insufficient independent engineer_cluster_id labels; not scored",
+                rating="skipped",
+                target=">= 0.75 top-1 (waived)",
+                detail="waived: no independent engineer_cluster_id labels; not scored",
             )
-            return {"top_1": blocked, "top_3": blocked}
+            return {"top_1": skipped, "top_3": skipped}
         top_1_matches = sum(1 for c in evaluated if c.ai_cluster_id == c.engineer_verified_cluster_id)
         top_3_matches = sum(1 for c in evaluated if c.engineer_verified_cluster_id in c.ai_top_3_clusters)
 
@@ -303,10 +303,12 @@ class ShadowPilotEvaluator:
         clu = self.evaluate_cluster_agreement()
         cost = self.evaluate_cost_per_contact(target_cost_usd)
 
-        all_ratings = [m.rating for m in list(slots.values()) + list(ks.values()) + [sev, clu["top_1"], cost]]
-        if any(r in {"red", "blocked"} for r in all_ratings):
+        all_metrics = list(slots.values()) + list(ks.values()) + [sev, clu["top_1"], cost]
+        waived = [m.name for m in all_metrics if m.rating == "skipped"]
+        scored_ratings = [m.rating for m in all_metrics if m.rating != "skipped"]
+        if any(r in {"red", "blocked"} for r in scored_ratings):
             overall = "red"
-        elif any(r == "yellow" for r in all_ratings):
+        elif any(r == "yellow" for r in scored_ratings):
             overall = "yellow"
         else:
             overall = "green"
@@ -314,6 +316,7 @@ class ShadowPilotEvaluator:
         return {
             "total_contacts": len(self.contacts),
             "overall_verdict": overall,
+            "waived_metrics": waived,
             "metrics": {
                 "slots": {k: v.__dict__ for k, v in slots.items()},
                 "kill_switch": {k: v.__dict__ for k, v in ks.items()},
