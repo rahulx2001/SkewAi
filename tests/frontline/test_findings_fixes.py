@@ -97,14 +97,17 @@ def test_m3_oidc_finish_does_not_use_admin_issuer():
 
 def test_m6_untrusted_ingest_requires_explicit_flag():
     from src.domains.mapping_ingest import ingest_mapped_csv
+    from src.security.identifiers import InvalidIdentifier
 
-    with pytest.raises(ValueError, match="allow_untrusted_historical_backfill"):
+    # Path jail fires first. /tmp is tempfile.gettempdir() on Linux CI, so
+    # pytest adds it to the jail; /etc is never an allowed root.
+    with pytest.raises(InvalidIdentifier):
         ingest_mapped_csv(
             "automotive_nhtsa",
-            "/tmp/does-not-matter.csv",
+            "/etc/does-not-matter.csv",
             enforce_trust=False,
         )
-    # Same control must still fire for a path inside the identifier jail.
+    # Inside the jail, the untrusted-ingest flag is still required.
     with pytest.raises(ValueError, match="allow_untrusted_historical_backfill"):
         ingest_mapped_csv(
             "automotive_nhtsa",

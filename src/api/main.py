@@ -492,13 +492,13 @@ async def health() -> dict:
         await ops_in_thread(_ping)
         db_ok = True
     except Exception as e:
-        detail["db_error"] = f"{type(e).__name__}: {e}"
+        detail["db_error"] = type(e).__name__
     pack = None
     try:
         pack = load_pack(pack_id)
         pack_ok = True
     except Exception as e:
-        detail["pack_error"] = f"{type(e).__name__}: {e}"
+        detail["pack_error"] = type(e).__name__
     # Readiness (audit 0.5): a booted process with a missing model, empty
     # gazetteers, or no cost_model would silently run degraded forever.
     # Readiness fails CLOSED (503) unless explicitly waived per check via
@@ -751,7 +751,7 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
             dcon.execute("SELECT 1").fetchone()
         _check("domain_warehouse", True, "domain warehouse queryable")
     except Exception as e:
-        _check("domain_warehouse", False, f"{type(e).__name__}: {e}")
+        _check("domain_warehouse", False, type(e).__name__)
     try:
         from src.api.auth import _configured_key
         from src.security.harden import is_production_like, key_strength_problems

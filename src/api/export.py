@@ -163,7 +163,7 @@ async def build_audit_export(
             except Exception as e:
                 row["audit"] = {
                     "overall_verdict": "error",
-                    "error": f"{type(e).__name__}: {e}",
+                    "error": type(e).__name__,
                 }
         else:
             row["audit"] = None

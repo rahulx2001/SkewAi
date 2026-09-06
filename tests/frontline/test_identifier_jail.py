@@ -28,6 +28,8 @@ def test_safe_pack_id_rejects_traversal_null_oversize_and_unicode():
         safe_pack_id("ａｕｔｏｍｏｔｉｖｅ")  # fullwidth, NFKC-shifted
     assert safe_pack_id("automotive_nhtsa") == "automotive_nhtsa"
     assert safe_pack_id(None, optional=True) is None
+    with pytest.raises(InvalidIdentifier):
+        safe_pack_id("_template")
 
 
 def test_safe_token_and_cluster_id():
@@ -62,6 +64,7 @@ def test_gitignore_covers_root_duckdb():
     assert "*.duckdb" in text.splitlines() or any(
         line.strip() == "*.duckdb" for line in text.splitlines()
     )
+    assert "data/active_pack.json" in text
 
 
 def test_api_pack_id_fuzz_rejected(reset_ops_db, monkeypatch):
@@ -74,6 +77,7 @@ def test_api_pack_id_fuzz_rejected(reset_ops_db, monkeypatch):
         "a" * 10_000,
         "packs/../../secret",
         "AUTO\u2044nhtsa",
+        "_template",
     ]
     paths = [
         "/api/frontline/simulate",
@@ -129,6 +133,15 @@ def test_api_valid_pack_id_not_rejected_as_400(reset_ops_db, seed_automotive_pac
     with TestClient(app) as c:
         r = c.get("/api/frontline/analytics/fairness", params={"pack_id": "automotive_nhtsa"})
         assert r.status_code != 400
+
+
+def test_template_pack_id_is_unreachable(reset_ops_db, monkeypatch):
+    """domains/_template is a scaffold; PACK_ID_RE rejects a leading underscore."""
+    monkeypatch.delenv("FRONTLINE_API_KEY", raising=False)
+    with TestClient(app) as c:
+        r = c.get("/api/frontline/analytics/fairness", params={"pack_id": "_template"})
+        assert r.status_code == 400
+        assert "invalid pack_id" in r.text
 
 
 def test_ws_connect_rate_limiter():
