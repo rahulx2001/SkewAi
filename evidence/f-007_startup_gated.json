@@ -1,0 +1,8 @@
+{
+  "finding": "F-007",
+  "status": "Wired",
+  "legacy_pass": true,
+  "semantic_blocked_without_build": true,
+  "activation_performed": "None \u2014 FRONTLINE_EMBEDDING_MODE remains legacy",
+  "note": "Startup caller added; gate fails-closed; no synthetic activation"
+}
