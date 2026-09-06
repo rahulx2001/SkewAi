@@ -291,7 +291,7 @@ def load_empirical_cohort(
         _check_kill_switch,
         _extract_year,
         _extract_via_gazetteer,
-        match_category_synonym,
+        extract_pack_category,
     )
 
     p = Path(input_path)
@@ -346,10 +346,8 @@ def load_empirical_cohort(
         if mod:
             ai_slots["entity_3"] = mod
 
-        # Category extraction: longest synonym wins, then gazetteer.
-        matched_cat = match_category_synonym(text)
-        if not matched_cat:
-            matched_cat = _extract_via_gazetteer(text, ctx, "category")
+        # Category extraction: shared intake matcher (skip/negation/phrases).
+        matched_cat = extract_pack_category(text, ctx)
         if not matched_cat:
             # Residual NHTSA class when no specific system is named. Not a
             # ground-truth copy: unmatched text is UNKNOWN OR OTHER.

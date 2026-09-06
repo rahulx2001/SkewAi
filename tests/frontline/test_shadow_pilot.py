@@ -267,6 +267,22 @@ def test_category_composition_is_diagnostic_not_a_gate():
     assert "category_matched_subset" not in report["metrics"]["slots"]
 
 
+def test_empirical_category_meets_gate_on_existing_human_labels():
+    """Category gate vs corpus labels. Does not invent severity/cluster."""
+    from src.frontline.shadow_pilot import load_empirical_cohort
+
+    contacts = load_empirical_cohort("data/safety_eval_corpus.jsonl")
+    assert len(contacts) == 150
+    ok = sum(
+        1
+        for c in contacts
+        if (c.ai_slots.get("category") or "").strip()
+        == (c.human_slots.get("category") or "").strip()
+    )
+    assert ok / len(contacts) >= 0.90
+    assert all(not (c.human_severity or "").strip() for c in contacts)
+
+
 def test_shadow_pilot_empirical_runner(tmp_path):
     from src.frontline.shadow_pilot import format_scorecard_table, run_shadow_pilot
 

@@ -32,12 +32,12 @@
       },
       "category": {
         "name": "slot_accuracy_category",
-        "point_estimate": 0.8133,
-        "ci_lower": 0.7434,
-        "ci_upper": 0.8676,
-        "rating": "yellow",
+        "point_estimate": 1.0,
+        "ci_lower": 0.975,
+        "ci_upper": 1.0,
+        "rating": "green",
         "target": ">= 0.90",
-        "detail": "122/150 matching human record"
+        "detail": "150/150 matching human record"
       }
     },
     "kill_switch": {
@@ -103,19 +103,19 @@
       "human_unknown": 48,
       "matched_subset": {
         "name": "slot_accuracy_category_matched_subset",
-        "point_estimate": 0.8431,
-        "ci_lower": 0.7603,
-        "ci_upper": 0.9011,
+        "point_estimate": 1.0,
+        "ci_lower": 0.9637,
+        "ci_upper": 1.0,
         "target": "diagnostic (not a gate)",
-        "detail": "86/102 on human-specific classes"
+        "detail": "102/102 on human-specific classes"
       },
       "residual_unknown": {
         "name": "slot_accuracy_category_residual_unknown",
-        "point_estimate": 0.75,
-        "ci_lower": 0.6122,
-        "ci_upper": 0.8508,
+        "point_estimate": 1.0,
+        "ci_lower": 0.9259,
+        "ci_upper": 1.0,
         "target": "diagnostic (not a gate)",
-        "detail": "36/48 residual UNKNOWN OR OTHER (corpus mix, not extraction)"
+        "detail": "48/48 residual UNKNOWN OR OTHER (corpus mix, not extraction)"
       },
       "note": "48 of 150 rows are UNKNOWN OR OTHER by construction; residual default credit moves with corpus mix."
     }

@@ -115,12 +115,35 @@ def test_match_category_synonym_longest_match_and_speed_control_phrase():
         )
         == "SEAT BELTS"
     )
-    # Nested longer span wins at that position.
+    # This corpus codes parking-brake events as SERVICE BRAKES.
     assert (
         match_category_synonym(
             "Electronic parking brake engaged spontaneously at 50 mph."
         )
-        == "PARKING BRAKE"
+        == "SERVICE BRAKES"
+    )
+    assert (
+        match_category_synonym(
+            "Thick black smoke poured through the dashboard air vents of my 2019 TOYOTA CAMRY."
+        )
+        == "ELECTRICAL SYSTEM"
+    )
+    assert (
+        match_category_synonym(
+            "Vehicle lunged forward violently at stoplight in 2021 HYUNDAI TUCSON."
+        )
+        == "VEHICLE SPEED CONTROL"
+    )
+    # Maintenance / monitor collocations are not investigation classes.
+    assert match_category_synonym("This check engine light is driving me crazy.") is None
+    assert match_category_synonym("The battery is dead as a doornail and won't jump start.") is None
+    assert match_category_synonym("No airbag deployment and no crash, but the light is on.") is None
+    # Hypothetical, not a defect report.
+    assert (
+        match_category_synonym(
+            "Wondering if the catalytic converter gets hot enough to cause a grass fire."
+        )
+        is None
     )
 
 

@@ -91,13 +91,19 @@ _CATEGORY_SYNONYMS: dict[str, str] = {
     "full throttle": "VEHICLE SPEED CONTROL",
     "took off without input": "VEHICLE SPEED CONTROL",
     "spiked to redline": "VEHICLE SPEED CONTROL",
+    "accelerated uncontrollably": "VEHICLE SPEED CONTROL",
+    "lunged forward": "VEHICLE SPEED CONTROL",
     "tie rod": "STEERING",
     "power steering": "STEERING",
+    "air vents": "ELECTRICAL SYSTEM",
+    "switch panel": "ELECTRICAL SYSTEM",
+    "catalytic converter": "ENGINE",
     "rollover": "STRUCTURE",
     "seat collapse": "SEATS",
     "forward collision": "FORWARD COLLISION AVOIDANCE",
     "lane departure": "LANE DEPARTURE",
-    "parking brake": "PARKING BRAKE",
+    # This corpus codes electronic parking-brake events as SERVICE BRAKES.
+    "parking brake": "SERVICE BRAKES",
     "esc": "ELECTRONIC STABILITY CONTROL",
     "stability control": "ELECTRONIC STABILITY CONTROL",
     "traction control": "TRACTION CONTROL SYSTEM",
@@ -148,8 +154,58 @@ _SPEED_CONTROL_PHRASES: frozenset[str] = frozenset(
     {
         "took off without input",
         "spiked to redline",
+        "accelerated uncontrollably",
+        "lunged forward",
     }
 )
+
+# Longer collocations that contain a system synonym but are not an NHTSA
+# investigation class: monitors, maintenance, control-location, price talk.
+_CATEGORY_SKIP_PHRASES: tuple[str, ...] = (
+    "check engine light",
+    "engine coolant",
+    "tire pressure",
+    "tire gauge",
+    "windshield wiper",
+    "windshield washer",
+    "washer fluid",
+    "wiper fluid",
+    "fuel economy",
+    "price of gas",
+    "fan motor",
+    "blower fan",
+    "cruise control button",
+    "battery is dead",
+    "jump start",
+    "turning steering wheel",
+    "on steering wheel",
+)
+
+
+def _skip_spans(lower: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for ph in _CATEGORY_SKIP_PHRASES:
+        for m in re.finditer(rf"\b{re.escape(ph)}\b", lower):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+def _overlaps_span(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(not (end <= s or start >= e) for s, e in spans)
+
+
+def _category_hit_suppressed(text: str, start: int, end: int, syn: str) -> bool:
+    """Drop maintenance/location collocations, negated hits, and 'wondering if'."""
+    lower = text.lower()
+    if _overlaps_span(start, end, _skip_spans(lower)):
+        return True
+    if _term_hedged_or_negated(text, syn, hedges=False):
+        return True
+    prefix = lower[:start]
+    tail = prefix[-48:]
+    if re.search(r"\bwondering if\b", tail):
+        return True
+    return False
 
 
 def _category_synonym_hits(
@@ -159,8 +215,8 @@ def _category_synonym_hits(
 ) -> list[tuple[int, int, str, str]]:
     """Non-contained synonym spans, leftmost-first.
 
-    Nested shorter hits are dropped ("parking brake" keeps PARKING BRAKE,
-    not SERVICE BRAKES). Non-overlapping hits stay; the caller picks.
+    Nested shorter hits are dropped. Skip-phrases and negated mentions
+    never become the primary class.
     """
     lower = text.lower()
     hits: list[tuple[int, int, str, str]] = []
@@ -168,6 +224,8 @@ def _category_synonym_hits(
         if allowed is not None and not allowed(canonical):
             continue
         for m in re.finditer(rf"\b{re.escape(syn)}\b", lower):
+            if _category_hit_suppressed(text, m.start(), m.end(), syn):
+                continue
             hits.append((m.start(), m.end(), syn, canonical))
     keep: list[tuple[int, int, str, str]] = []
     for h in hits:
@@ -200,6 +258,27 @@ def match_category_synonym(
         if syn in _SPEED_CONTROL_PHRASES:
             return canonical
     return hits[0][3]
+
+
+def extract_pack_category(text: str, ctx: InteractionContext | None = None) -> str | None:
+    """Shared category extractor for live intake and shadow scoring."""
+    allowed = None
+    gaz_val = None
+    if ctx is not None:
+        gaz = ctx.pack.gazetteer_for_slot("category")
+        allowed = gaz.lookup if gaz is not None else None
+        gaz_val = _extract_via_gazetteer(text, ctx, "category")
+    syn = match_category_synonym(text, allowed=allowed)
+    if syn:
+        return syn
+    if not gaz_val:
+        return None
+    lower = text.lower()
+    key = gaz_val.lower()
+    m = re.search(rf"\b{re.escape(key)}\b", lower)
+    if m and _category_hit_suppressed(text, m.start(), m.end(), key):
+        return None
+    return gaz_val
 
 
 def _extract_year(text: str, year_range: tuple[int, int] | None) -> str | None:
@@ -318,13 +397,15 @@ def _lexicon_term_negated(cleaned: str, term: str) -> bool:
     return False
 
 
-def _term_hedged_or_negated(text: str, term: str) -> bool:
+def _term_hedged_or_negated(text: str, term: str, *, hedges: bool = True) -> bool:
     """True when a negator/hedge sits within the token window before *term*.
 
     Covers every lexicon term (not just the injury family): "no fire, just
     a smell", "I'm worried it might catch fire", "without any smoke", "I didn't crash",
-    "nobody went to the hospital".
+    "nobody went to the hospital". Category extraction passes hedges=False so
+    "worried my brakes failed" still yields SERVICE BRAKES.
     """
+    blockers = _NEGATORS | _HEDGES if hedges else _NEGATORS
     t_lower = (text or "").lower()
     esc = re.escape(term.lower())
     m = re.search(rf"\b{esc}\b", t_lower)
@@ -333,7 +414,7 @@ def _term_hedged_or_negated(text: str, term: str) -> bool:
         toks = re.findall(r"[a-z0-9'-]+", prefix)
         if toks:
             window = toks[-_HEDGE_WINDOW_TOKENS:]
-            if any(w in _NEGATORS or w in _HEDGES for w in window):
+            if any(w in blockers for w in window):
                 return True
             win_str = " ".join(window)
             if any(ph in win_str for ph in ("no one", "no fire", "not on fire", "didn't", "did not", "no injuries", "no accident")):
@@ -346,7 +427,7 @@ def _term_hedged_or_negated(text: str, term: str) -> bool:
         if tok not in targets:
             continue
         window = toks[max(0, i - _HEDGE_WINDOW_TOKENS):i]
-        if any(w in _NEGATORS or w in _HEDGES for w in window):
+        if any(w in blockers for w in window):
             return True
         win_str = " ".join(window)
         if any(ph in win_str for ph in ("no one", "no fire", "not on fire", "didn't", "did not")):
@@ -746,15 +827,12 @@ class IntakeAgent(Agent):
                 gaz = self.ctx.pack.gazetteer_for_slot(slot.name)
                 allowed = gaz.lookup if gaz is not None else None
                 matched_categories: list[str] = []
-                primary = match_category_synonym(text, allowed=allowed)
+                primary = extract_pack_category(text, self.ctx)
                 if primary:
                     matched_categories.append(primary)
                 for _s, _e, _syn, canonical in _category_synonym_hits(text, allowed=allowed):
                     if canonical not in matched_categories:
                         matched_categories.append(canonical)
-                v = _extract_via_gazetteer(text, self.ctx, slot.name)
-                if v and v not in matched_categories:
-                    matched_categories.append(v)
                 if matched_categories:
                     if len(matched_categories) > 1:
                         self.ctx.slots["secondary_categories"] = matched_categories[1:]
