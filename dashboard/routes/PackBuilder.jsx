@@ -12,7 +12,7 @@ const CANON = [
   "source",
 ];
 
-export default function PackBuilder() {
+export default function PackBuilder({ embedded }) {
   const [columns, setColumns] = useState([]);
   const [mapping, setMapping] = useState({});
   const [csvPath, setCsvPath] = useState("");
@@ -26,6 +26,10 @@ export default function PackBuilder() {
     if (!file) return;
     setErr("");
     setInsight(null);
+    setColumns([]);
+    setMapping({});
+    setCsvPath("");
+    setLint(null);
     setBusy(true);
     try {
       const body = new FormData();
@@ -45,6 +49,7 @@ export default function PackBuilder() {
       setErr(String(ex.message || ex));
     } finally {
       setBusy(false);
+      e.target.value = "";
     }
   }
 
@@ -77,12 +82,14 @@ export default function PackBuilder() {
 
   return (
     <div>
-      <header className="page-header">
-        <div>
-          <h1>Pack builder</h1>
-          <p className="sub">Upload a CSV, confirm column mapping, lint, then get a first insight.</p>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="page-header">
+          <div>
+            <h1>Pack builder</h1>
+            <p className="sub">Upload a CSV, confirm column mapping, lint, then get a first insight.</p>
+          </div>
+        </header>
+      )}
       {err && (
         <div className="banner banner-error" role="alert">
           {err}

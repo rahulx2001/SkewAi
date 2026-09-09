@@ -780,5 +780,26 @@ def _readiness_report(pack_id: str, pack: Any | None, *, db_ok: bool) -> dict[st
 
 # Serve built dashboard (Docker / pilot one-box). Prefer SPA at /ui.
 _DASH_DIST = REPO_ROOT / "dashboard" / "dist"
+
+
+class _StreamedStaticFiles(StaticFiles):
+    """Disable sendfile/pathsend so ASGI middleware can wrap ``send``.
+
+    Uvicorn advertises ``http.response.pathsend``. Starlette FileResponse then
+    sends headers (with Content-Length) and a pathsend frame. Wrapped ``send``
+    in our header/obs middleware drops that extension, so clients see
+    IncompleteRead / a 200 with an empty body. Streaming the bytes instead
+    keeps /ui/ working behind those wrappers.
+    """
+
+    async def __call__(self, scope, receive, send):  # type: ignore[override]
+        if scope.get("type") == "http":
+            extensions = dict(scope.get("extensions") or {})
+            extensions.pop("http.response.pathsend", None)
+            extensions.pop("http.response.zerocopysend", None)
+            scope = {**scope, "extensions": extensions}
+        await super().__call__(scope, receive, send)
+
+
 if _DASH_DIST.is_dir():
-    app.mount("/ui", StaticFiles(directory=str(_DASH_DIST), html=True), name="dashboard")
+    app.mount("/ui", _StreamedStaticFiles(directory=str(_DASH_DIST), html=True), name="dashboard")

@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
+import { includeSimQuery, openWarning } from "../src/ui/opsActions.js";
+import { outcomeLabel } from "../src/ui/labels.js";
 
 /**
  * CSAT proxy + product-gap board — industry ops layout (stats + tables).
  * Honest: satisfaction_proxy is friction-based, not survey NPS.
  */
-export default function InsightsBoard() {
+export default function InsightsBoard({ embedded }) {
   const [csat, setCsat] = useState(null);
   const [gap, setGap] = useState(null);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [windowDays, setWindowDays] = useState(14);
-  const [lineage, setLineage] = useState(null);
 
   const load = useCallback(async () => {
     setErr("");
@@ -19,8 +20,8 @@ export default function InsightsBoard() {
     try {
       const h = apiHeaders();
       const [a, b] = await Promise.all([
-        fetch(`/api/frontline/insights/csat?window_days=${windowDays}`, { headers: h }),
-        fetch(`/api/frontline/insights/product-gap?window_days=${windowDays}`, { headers: h }),
+        fetch(`/api/frontline/insights/csat?window_days=${windowDays}&include_simulated=${includeSimQuery()}`, { headers: h }),
+        fetch(`/api/frontline/insights/product-gap?window_days=${windowDays}&include_simulated=${includeSimQuery()}`, { headers: h }),
       ]);
       if (!a.ok) throw new Error(`csat ${a.status}`);
       if (!b.ok) throw new Error(`gap ${b.status}`);
@@ -38,20 +39,43 @@ export default function InsightsBoard() {
   }, [load]);
 
   const satPct =
-    csat && typeof csat.satisfaction_proxy === "number"
+    csat && csat.contact_count > 0 && typeof csat.satisfaction_proxy === "number"
       ? Math.round(csat.satisfaction_proxy * 100)
       : null;
 
   return (
     <div>
-      <header className="page-header">
-        <div>
-          <h1>Insights</h1>
-          <p className="sub">
-            Satisfaction proxy from friction signals, plus product-gap themes. Not survey NPS.
-          </p>
-        </div>
-        <div className="page-actions">
+      {!embedded && (
+        <header className="page-header">
+          <div>
+            <h1>Insights</h1>
+            <p className="sub">
+              Friction proxy, not survey NPS. Percentage is hidden until the window has contacts.
+            </p>
+          </div>
+          <div className="page-actions">
+            <label style={{ minWidth: 120 }}>
+              Window (days)
+              <input
+                type="number"
+                min={1}
+                max={90}
+                value={windowDays}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n >= 1) setWindowDays(Math.min(90, n));
+                }}
+                aria-label="Window in days"
+              />
+            </label>
+            <button type="button" onClick={load} disabled={loading}>
+              {loading ? "Loading…" : "Refresh"}
+            </button>
+          </div>
+        </header>
+      )}
+      {embedded && (
+        <div className="row" style={{ gap: 8, marginBottom: 12 }}>
           <label style={{ minWidth: 120 }}>
             Window (days)
             <input
@@ -59,7 +83,10 @@ export default function InsightsBoard() {
               min={1}
               max={90}
               value={windowDays}
-              onChange={(e) => setWindowDays(Number(e.target.value) || 14)}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n) && n >= 1) setWindowDays(Math.min(90, n));
+              }}
               aria-label="Window in days"
             />
           </label>
@@ -67,7 +94,7 @@ export default function InsightsBoard() {
             {loading ? "Loading…" : "Refresh"}
           </button>
         </div>
-      </header>
+      )}
 
       {err && (
         <div className="banner banner-error" role="alert">
@@ -76,25 +103,13 @@ export default function InsightsBoard() {
       )}
 
       <div className="stat-grid" style={{ marginBottom: 16 }}>
-        <div
-          className="stat-card accent"
-          role="button"
-          tabIndex={0}
-          onClick={async () => {
-            try {
-              const r = await fetch("/api/frontline/provenance/kpis/contacts_started", {
-                headers: apiHeaders(),
-              });
-              if (r.ok) setLineage(await r.json());
-            } catch {
-              /* keep the figure visible even if lineage fetch fails */
-            }
-          }}
-        >
-          <div className="label">Satisfaction proxy</div>
-          <div className="value">{satPct != null ? `${satPct}%` : "—"}</div>
+        <div className="stat-card accent">
+          <div className="label">Friction</div>
+          <div className="value">
+            {satPct == null ? "—" : satPct >= 99 ? "Low" : `${100 - satPct}%`}
+          </div>
           <div className="hint">
-            {lineage?.badge?.why_trusted || csat?.label || "friction-based"}
+            Peak-frustration proxy · {csat?.contact_count ?? 0} contacts · {windowDays}d
           </div>
         </div>
         <div className="stat-card">
@@ -137,7 +152,7 @@ export default function InsightsBoard() {
                 <tbody>
                   {Object.entries(csat.outcome_mix || {}).map(([k, v]) => (
                     <tr key={k}>
-                      <td>{k}</td>
+                      <td>{outcomeLabel(k)}</td>
                       <td className="mono">{v}</td>
                     </tr>
                   ))}
@@ -202,7 +217,21 @@ export default function InsightsBoard() {
                 </thead>
                 <tbody>
                   {(gap.top_issues || []).map((i) => (
-                    <tr key={i.issue_key}>
+                    <tr
+                      key={i.issue_key}
+                      style={{ cursor: i.cluster_id != null ? "pointer" : undefined }}
+                      tabIndex={i.cluster_id != null ? 0 : undefined}
+                      onClick={() => {
+                        if (i.cluster_id != null) openWarning({ clusterId: i.cluster_id, tab: "risk" });
+                      }}
+                      onKeyDown={(e) => {
+                        if (i.cluster_id == null) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openWarning({ clusterId: i.cluster_id, tab: "risk" });
+                        }
+                      }}
+                    >
                       <td>
                         {i.category || i.issue_key}
                         {i.cluster_id != null ? (

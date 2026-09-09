@@ -523,10 +523,10 @@ async def compliance_template(key: str) -> dict[str, Any]:
 
 
 @router.get("/copq/rank")
-async def copq_rank(window_days: int = 7) -> dict[str, Any]:
+async def copq_rank(window_days: int = 7, include_simulated: bool = False) -> dict[str, Any]:
     from src.qubot.retrievers import live_risk_by_dollar
 
-    rows = live_risk_by_dollar(window_days)
+    rows = live_risk_by_dollar(window_days, include_simulated=include_simulated)
     return {"clusters": rows}
 
 

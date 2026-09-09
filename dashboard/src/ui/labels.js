@@ -23,6 +23,24 @@ const WEAKNESS_LABELS = {
   unknown: "Unknown",
 };
 
+const OUTCOME_LABELS = {
+  advisory_notified: "Advisory sent",
+  orphan_db_sweep: "Orphan sweep",
+  escalated_safety: "Safety escalation",
+  case_created: "Case created",
+  completed: "Completed",
+  resolved: "Resolved",
+  escalated: "Escalated",
+  incomplete: "Incomplete",
+};
+
+const PACK_LABELS = {
+  automotive_nhtsa: "Automotive",
+  finance_cfpb: "Finance",
+  consumer_cpsc: "Consumer products",
+  medical_maude: "Medical devices",
+};
+
 const CAPABILITY_LABELS = {
   stt: "Speech to text",
   tts: "Text to speech",
@@ -54,6 +72,53 @@ export function capabilityLabel(value) {
   const key = String(value);
   if (CAPABILITY_LABELS[key] != null) return CAPABILITY_LABELS[key];
   return humanizeKey(key);
+}
+
+export function outcomeLabel(value) {
+  if (value == null || value === "") return "—";
+  const key = String(value);
+  if (OUTCOME_LABELS[key] != null) return OUTCOME_LABELS[key];
+  return humanizeKey(key);
+}
+
+export function packLabel(id) {
+  if (id == null || id === "") return "—";
+  const key = String(id);
+  if (PACK_LABELS[key]) return PACK_LABELS[key];
+  return humanizeKey(key);
+}
+
+export function safetyFlagLabel(value) {
+  const s = String(value || "");
+  const q = /^safety_q_(\d+)$/i.exec(s);
+  if (q) return `Safety check ${q[1]}`;
+  return humanizeKey(s);
+}
+
+export function whyTrustedLabel(raw) {
+  if (!raw) return "";
+  return humanizeKey(
+    String(raw)
+      .replace(/→/g, " ")
+      .replace(/\blive\b/g, "live data")
+      .replace(/\bcomputed\b/g, "calculated"),
+  );
+}
+
+export function displayCopy(text) {
+  return String(text || "").replace(/\bP1\b/g, "Critical");
+}
+
+export function caseDescription(raw) {
+  const s = String(raw || "").trim();
+  if (!s || /^nothing$/i.test(s) || s === "—" || s === "-") return "";
+  return s;
+}
+
+export function cleanFollowupDraft(raw) {
+  const s = String(raw || "");
+  if (/\(\s*\)/.test(s) && /support case/i.test(s)) return "";
+  return s;
 }
 
 /** snake_case / kebab → Title Case words. */

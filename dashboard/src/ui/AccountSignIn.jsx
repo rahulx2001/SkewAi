@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AUTH_EVENT, fetchMe, getStoredSubject, signOut } from "../apiAuth.js";
 
-export default function AccountSignIn({ pack }) {
+export default function AccountSignIn() {
   const [open, setOpen] = useState(false);
   const [me, setMe] = useState(null);
   const box = useRef(null);
@@ -43,7 +43,7 @@ export default function AccountSignIn({ pack }) {
 
   const signedIn = Boolean(me?.signed_in);
   const who = signedIn ? me.subject || getStoredSubject() || "Signed in" : "Sign in";
-  const sub = signedIn ? me.role || "agent" : pack || "Google account";
+  const sub = signedIn ? me.role || "agent" : "Google account";
 
   function onFoot() {
     if (signedIn) {

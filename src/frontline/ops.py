@@ -264,8 +264,10 @@ def build_cases_csv(
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
+    cluster: str | None = None,
     limit: int = 500,
     scrub_pii: bool = True,
+    include_simulated: bool = False,
 ) -> tuple[str, int]:
     """Return (csv_text, row_count) for case export.
 
@@ -294,6 +296,14 @@ def build_cases_csv(
             "OR description_summary ILIKE ? OR investigation_id ILIKE ?)"
         )
         params.extend([like, like, like, like, like])
+    if cluster and str(cluster).strip():
+        clauses.append("CAST(cluster_match_id AS VARCHAR) = ?")
+        params.append(str(cluster).strip())
+    if not include_simulated:
+        clauses.append(
+            "(interaction_id IS NULL OR interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated'))"
+        )
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY created_at DESC LIMIT ?"

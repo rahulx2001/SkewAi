@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
+import { hashQueryObject, patchHashQuery } from "../src/ui/opsActions.js";
+import { humanizeKey } from "../src/ui/labels.js";
 
 const TABS = [
   { id: "analytics", label: "Analytics" },
@@ -58,26 +60,28 @@ function StatusTag({ ok, children }) {
 /**
  * Feature Studio — product UI for platform surfaces (no raw JSON dumps).
  */
-export default function FeatureStudio() {
-  const [tab, setTab] = useState("analytics");
+export default function FeatureStudio({ embedded }) {
+  const tabFromHash = hashQueryObject().view;
+  const tab = TABS.some((t) => t.id === tabFromHash) ? tabFromHash : "analytics";
   const [err, setErr] = useState("");
   const [okMsg, setOkMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [data, setData] = useState({});
 
-  const [phone, setPhone] = useState("+15550001111");
+  const [phone, setPhone] = useState("");
   const [slotStart, setSlotStart] = useState("");
   const [actionType, setActionType] = useState("open_investigation");
-  const [resourceId, setResourceId] = useState("inv_demo");
-  const [reviewer, setReviewer] = useState("bob");
+  const [resourceId, setResourceId] = useState("");
+  const [reviewer, setReviewer] = useState("");
   const [approvalId, setApprovalId] = useState("");
   const [jobType, setJobType] = useState("audit_contact");
   const [coachText, setCoachText] = useState("Ask for the VIN before closing.");
-  const [coachIid, setCoachIid] = useState("int_demo");
+  const [coachIid, setCoachIid] = useState("");
   const [emailSubject, setEmailSubject] = useState("Brake grind 2019 Camry");
   const [emailBody, setEmailBody] = useState("My Toyota Camry 2019 brakes grind and spark.");
   const [i18nText, setI18nText] = useState("problema con frenos y peligro");
   const [subTarget, setSubTarget] = useState("ops@example.com");
+  const [coachPrompt, setCoachPrompt] = useState("brakes grind");
 
   const flash = (msg) => {
     setOkMsg(msg);
@@ -117,6 +121,7 @@ export default function FeatureStudio() {
   }, []);
 
   const loadTab = useCallback(async () => {
+    if (["booking", "approvals", "coach", "channels"].includes(tab)) return;
     setErr("");
     setBusy(true);
     try {
@@ -168,20 +173,26 @@ export default function FeatureStudio() {
 
   return (
     <div>
-      <header className="page-header">
-        <div>
-          <h1>Feature studio</h1>
-          <p className="sub">
-            Analytics, booking, callbacks, approvals, jobs, coach, and ops — readable boards, not
-            raw payloads.
-          </p>
-        </div>
-        <div className="page-actions">
-          <button type="button" onClick={loadTab} disabled={busy}>
-            {busy ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="page-header">
+          <div>
+            <h1>Feature studio</h1>
+            <p className="sub">
+              Analytics, booking, callbacks, approvals, jobs, coach, and ops — readable boards, not
+              raw payloads.
+            </p>
+          </div>
+          <div className="page-actions">
+            <button
+              type="button"
+              onClick={loadTab}
+              disabled={busy || ["booking", "approvals", "coach", "channels"].includes(tab)}
+            >
+              {busy ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+        </header>
+      )}
 
       <div className="tabs" role="tablist" aria-label="Feature areas">
         {TABS.map((t) => (
@@ -191,7 +202,7 @@ export default function FeatureStudio() {
             role="tab"
             aria-selected={tab === t.id}
             className={"tab" + (tab === t.id ? " active" : "")}
-            onClick={() => setTab(t.id)}
+            onClick={() => patchHashQuery({ view: t.id })}
           >
             {t.label}
           </button>
@@ -232,8 +243,8 @@ export default function FeatureStudio() {
             </div>
             <div className={`stat-card ${data.fair?.flag ? "danger" : "ok"}`}>
               <div className="label">Fairness flag</div>
-              <div className="value" style={{ fontSize: 22 }}>
-                {data.fair?.flag ? "REVIEW" : "OK"}
+              <div className="value" style={{ fontSize: 28 }}>
+                {data.fair?.flag ? "Review" : "Ok"}
               </div>
               <div className="hint">disparity {data.fair?.handoff_rate_disparity ?? "—"}</div>
             </div>
@@ -270,7 +281,7 @@ export default function FeatureStudio() {
                           </td>
                           <td>
                             <StatusTag ok={f.status === "ok"}>
-                              {f.status || "—"}
+                              {humanizeKey(f.status || "—")}
                             </StatusTag>
                           </td>
                         </tr>
@@ -316,7 +327,7 @@ export default function FeatureStudio() {
             </section>
           </div>
 
-          <div className="grid-3">
+          <div className="lab-triple">
             <section className="panel">
               <h2>Cross-pack patterns</h2>
               {patterns.length === 0 ? (
@@ -510,9 +521,9 @@ export default function FeatureStudio() {
                     try {
                       setErr("");
                       const offer = await jpost("/api/frontline/booking/offer", {
-                        advisory_id: "demo-adv",
+                        advisory_id: resourceId || "advisory-from-case",
                         pack_id: "automotive_nhtsa",
-                        case_id: "case_demo",
+                        case_id: resourceId || undefined,
                       });
                       setData((d) => ({ ...d, offer }));
                       if (!slotStart && offer.open_slots?.[0]?.slot_start) {
@@ -528,12 +539,13 @@ export default function FeatureStudio() {
                 </button>
                 <button
                   type="button"
+                  disabled={!slotStart}
                   onClick={async () => {
                     try {
                       setErr("");
                       const booked = await jpost("/api/frontline/booking/book", {
                         pack_id: "automotive_nhtsa",
-                        case_id: "case_demo",
+                        case_id: resourceId || undefined,
                         slot_start: slotStart,
                       });
                       setData((d) => ({ ...d, booked }));
@@ -613,11 +625,12 @@ export default function FeatureStudio() {
           <div className="row" style={{ marginBottom: 14 }}>
             <label style={{ minWidth: 220 }}>
               Phone or channel
-              <input value={phone} onChange={(e) => setPhone(e.target.value)} aria-label="Phone or channel" />
+              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="channel or ANI" aria-label="Phone or channel" />
             </label>
             <button
               type="button"
               className="primary"
+              disabled={!phone.trim()}
               onClick={async () => {
                 try {
                   setErr("");
@@ -678,24 +691,25 @@ export default function FeatureStudio() {
                 Action
                 <select value={actionType} onChange={(e) => setActionType(e.target.value)}>
                   <option value="open_investigation">Open investigation</option>
-                  <option value="close_p1_case">Close P1 case</option>
+                  <option value="close_p1_case">Close Critical case</option>
                   <option value="send_customer_followup">Send customer follow-up</option>
                 </select>
               </label>
               <label>
                 Resource id
-                <input value={resourceId} onChange={(e) => setResourceId(e.target.value)} aria-label="Resource ID" />
+                <input value={resourceId} onChange={(e) => setResourceId(e.target.value)} placeholder="case or investigation id" aria-label="Resource ID" />
               </label>
               <button
                 type="button"
                 className="primary"
+                disabled={!resourceId.trim()}
                 onClick={async () => {
                   try {
                     setErr("");
                     const req = await jpost("/api/frontline/approvals", {
                       action_type: actionType,
                       resource_id: resourceId,
-                      requested_by: "alice",
+                      requested_by: "human-operator",
                     });
                     setApprovalId(req.approval_id || "");
                     setData((d) => ({ ...d, approvalReq: req }));
@@ -730,12 +744,13 @@ export default function FeatureStudio() {
               </label>
               <label>
                 Reviewer (must differ from requester)
-                <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} aria-label="Reviewer username" />
+                <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="human-reviewer" aria-label="Reviewer username" />
               </label>
               <div className="row">
                 <button
                   type="button"
                   className="primary"
+                  disabled={!approvalId.trim() || !reviewer.trim()}
                   onClick={async () => {
                     try {
                       setErr("");
@@ -755,6 +770,7 @@ export default function FeatureStudio() {
                 <button
                   type="button"
                   className="danger"
+                  disabled={!approvalId.trim() || !reviewer.trim()}
                   onClick={async () => {
                     try {
                       setErr("");
@@ -806,7 +822,7 @@ export default function FeatureStudio() {
                   setErr("");
                   await jpost("/api/frontline/jobs", {
                     job_type: jobType,
-                    payload: { interaction_id: "int_demo" },
+                    payload: coachIid ? { interaction_id: coachIid } : {},
                   });
                   await loadTab();
                   flash("Job enqueued");
@@ -881,6 +897,14 @@ export default function FeatureStudio() {
         <div className="grid-2">
           <section className="panel">
             <h2>Suggested supervisor replies</h2>
+            <label>
+              Last customer text
+              <textarea
+                value={coachPrompt}
+                onChange={(e) => setCoachPrompt(e.target.value)}
+                aria-label="Last customer text"
+              />
+            </label>
             <button
               type="button"
               className="primary"
@@ -889,7 +913,7 @@ export default function FeatureStudio() {
                 try {
                   setErr("");
                   const s = await jpost("/api/frontline/coach/suggest", {
-                    last_customer_text: "brakes grind",
+                    last_customer_text: coachPrompt,
                     slots: { entity_1: "Toyota" },
                     severity: "Critical",
                   });
@@ -919,7 +943,7 @@ export default function FeatureStudio() {
             <div className="stack">
               <label>
                 Interaction id
-                <input value={coachIid} onChange={(e) => setCoachIid(e.target.value)} aria-label="Interaction ID" />
+                <input value={coachIid} onChange={(e) => setCoachIid(e.target.value)} placeholder="int_…" aria-label="Interaction ID" />
               </label>
               <label>
                 Message to agent
@@ -928,6 +952,7 @@ export default function FeatureStudio() {
               <button
                 type="button"
                 className="primary"
+                disabled={!coachIid.trim() || !coachText.trim()}
                 onClick={async () => {
                   try {
                     setErr("");
@@ -1046,12 +1071,13 @@ export default function FeatureStudio() {
                 </button>
                 <button
                   type="button"
+                  disabled={!phone.trim()}
                   onClick={async () => {
                     try {
                       setErr("");
                       const r = await jpost("/api/frontline/biometrics/match", {
                         pack_id: "automotive_nhtsa",
-                        ani: "+15551212",
+                        ani: phone,
                       });
                       setData((d) => ({ ...d, bio: r }));
                     } catch (e) {
@@ -1193,22 +1219,47 @@ export default function FeatureStudio() {
               <p className="muted small">
                 Stops new contacts; active calls finish. Maps to SIGTERM in production.
               </p>
-              <button
-                type="button"
-                className="danger"
-                onClick={async () => {
-                  try {
-                    setErr("");
-                    const r = await jpost("/api/frontline/ops/drain", {});
-                    setData((d) => ({ ...d, drain: r }));
-                    flash("Drain started");
-                  } catch (e) {
-                    setErr(String(e.message || e));
-                  }
-                }}
-              >
-                Begin drain
-              </button>
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={async () => {
+                    if (
+                      !window.confirm(
+                        "Begin drain? New contacts will be rejected until you cancel drain or restart the process.",
+                      )
+                    ) {
+                      return;
+                    }
+                    try {
+                      setErr("");
+                      const r = await jpost("/api/frontline/ops/drain", {});
+                      setData((d) => ({ ...d, drain: r }));
+                      flash("Drain started");
+                    } catch (e) {
+                      setErr(String(e.message || e));
+                    }
+                  }}
+                >
+                  Begin drain
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={async () => {
+                    try {
+                      setErr("");
+                      const r = await jpost("/api/frontline/ops/drain/cancel", {});
+                      setData((d) => ({ ...d, drain: r }));
+                      flash("Drain cancelled");
+                    } catch (e) {
+                      setErr(String(e.message || e));
+                    }
+                  }}
+                >
+                  Cancel drain
+                </button>
+              </div>
               {data.drain?.active_interactions?.length > 0 && (
                 <ul className="plain" style={{ marginTop: 12 }}>
                   {data.drain.active_interactions.map((id) => (

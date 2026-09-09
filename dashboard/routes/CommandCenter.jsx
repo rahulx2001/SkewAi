@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
 import {
-  fetchOpenP1Cases,
+  fetchCriticalCases,
+  goHash,
+  includeSimQuery,
   openCases,
   openConsole,
+  openWarning,
+  readIncludeSimulated,
   simulateTraffic,
 } from "../src/ui/opsActions.js";
 import { dayGreeting } from "../src/ui/greeting.js";
 import { formatSnapshotTs } from "../src/ui/formatTime.js";
+import { packLabel } from "../src/ui/labels.js";
 
 /**
  * Command Center — flagship wallboard.
@@ -33,11 +38,11 @@ export default function CommandCenter({ refreshKey }) {
       const h = apiHeaders();
       const [a, b, c, d, e, p1] = await Promise.all([
         fetch("/health"),
-        fetch("/api/frontline/wallboard", { headers: h }),
-        fetch("/api/frontline/metrics", { headers: h }),
+        fetch(`/api/frontline/wallboard?include_simulated=${includeSimQuery()}`, { headers: h }),
+        fetch(`/api/frontline/metrics?include_simulated=${includeSimQuery()}`, { headers: h }),
         fetch("/api/frontline/usage", { headers: h }),
         fetch("/api/frontline/ops/drain", { headers: h }),
-        fetchOpenP1Cases(8),
+        fetchCriticalCases(8),
       ]);
       if (!a.ok) throw new Error(`health ${a.status}`);
       setHealth(await a.json());
@@ -77,11 +82,12 @@ export default function CommandCenter({ refreshKey }) {
     }
   }
 
-  const live = wall?.live_contacts || wall?.active_contacts || [];
-  const clusters = wall?.top_clusters || [];
-  const liveCount = wall?.active_count ?? wall?.live_count ?? live.length ?? 0;
-  const p1 = wall?.p1_count ?? wall?.p1 ?? 0;
-  const openCases = wall?.open_cases ?? 0;
+  const live = Array.isArray(wall?.live_contacts) ? wall.live_contacts : [];
+  const clusters = wall?.top_risk_clusters || wall?.top_clusters || [];
+  const liveCount =
+    wall?.active_contacts ?? wall?.active_count ?? wall?.live_count ?? live.length ?? 0;
+  const p1 = wall?.critical_open ?? wall?.p1_open ?? 0;
+  const openCaseCount = wall?.open_cases ?? 0;
   const draining = Boolean(drain?.draining);
 
   return (
@@ -93,18 +99,6 @@ export default function CommandCenter({ refreshKey }) {
         <div className="cc-hero-meta">
           <button type="button" className="ghost" onClick={load} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh"}
-          </button>
-          <button type="button" onClick={runSimulate} disabled={simBusy}>
-            {simBusy ? "Simulating…" : "Simulate 15"}
-          </button>
-          <button
-            type="button"
-            className="primary"
-            onClick={() => {
-              window.location.hash = "call";
-            }}
-          >
-            Open voice agent
           </button>
         </div>
       </section>
@@ -130,59 +124,58 @@ export default function CommandCenter({ refreshKey }) {
         </div>
       )}
 
+      {readIncludeSimulated() && (
+        <p className="faint" style={{ margin: "0 0 10px" }}>
+          Including simulated contacts (toggle on Early warning).
+        </p>
+      )}
+
       <div className="stat-grid" style={{ marginBottom: 16 }}>
-        <div className="stat-card">
+        <button
+          type="button"
+          className="stat-card stat-card-btn"
+          onClick={() => openConsole()}
+          title="Open live console"
+        >
           <div className="label">Live contacts</div>
           <div className="value">{liveCount}</div>
-          <div className="hint">status = active right now</div>
-        </div>
+          <div className="hint">Active now</div>
+        </button>
         <button
           type="button"
           className={`stat-card ${Number(p1) > 0 ? "danger" : ""} stat-card-btn`}
           onClick={() => openCases({ severity: "Critical", status: "open" })}
           title="Open Critical case queue"
         >
-          <div className="label">P1 / Critical open</div>
+          <div className="label">Critical open</div>
           <div className="value">{p1}</div>
-          <div className="hint">click → case queue filtered</div>
+          <div className="hint">Needs a look</div>
         </button>
-        <div className="stat-card">
+        <button
+          type="button"
+          className="stat-card stat-card-btn"
+          onClick={() => openCases({ status: "open" })}
+          title="Open case queue"
+        >
           <div className="label">Open cases</div>
-          <div className="value">{openCases}</div>
-          <div className="hint">open + pending follow-up</div>
-        </div>
-        <div className={`stat-card ${draining ? "danger" : "ok"}`}>
+          <div className="value">{openCaseCount}</div>
+          <div className="hint">Open and follow-up</div>
+        </button>
+        <button
+          type="button"
+          className={`stat-card ${draining ? "danger" : "ok"} stat-card-btn`}
+          onClick={() => goHash("settings?tab=lab&view=ops")}
+          title="Open drain controls in Feature lab"
+        >
           <div className="label">Deploy drain</div>
           <div className="value" style={{ fontSize: 24, letterSpacing: "-0.04em" }}>
             {draining ? "Draining" : "Ready"}
           </div>
           <div className="hint">
-            active slots: {drain?.active_count ?? 0}
-            {drain?.ready_to_exit ? " · ready to exit" : ""}
+            {draining
+              ? `${drain?.active_count ?? 0} still active`
+              : "New contacts accepted"}
           </div>
-        </div>
-      </div>
-
-      <div className="jump-grid" aria-label="Quick jumps">
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "call")}>
-          <span className="jt-kicker">Operate</span>
-          <span className="jt-title">Voice agent</span>
-          <span className="jt-hint">Start a browser contact with STT / TTS</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "console")}>
-          <span className="jt-kicker">Operate</span>
-          <span className="jt-title">Live console</span>
-          <span className="jt-hint">Watch frustration · take over mid-call</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "cases")}>
-          <span className="jt-kicker">Queue</span>
-          <span className="jt-title">Case queue</span>
-          <span className="jt-hint">Filter by severity · export CSV</span>
-        </button>
-        <button type="button" className="jump-tile" onClick={() => (window.location.hash = "warning")}>
-          <span className="jt-kicker">Risk</span>
-          <span className="jt-title">Early warning</span>
-          <span className="jt-hint">Clusters, funnel, simulate traffic</span>
         </button>
       </div>
 
@@ -202,15 +195,11 @@ export default function CommandCenter({ refreshKey }) {
           {live.length === 0 ? (
             <div className="empty-state">
               <p className="empty-state-text">
-                No active contacts. Start one from Voice agent — or open Live console when a
-                supervisor needs to take over.
+                No active contacts. Start one from Voice agent.
               </p>
               <div className="row" style={{ marginTop: 12 }}>
                 <button type="button" className="primary" onClick={() => (window.location.hash = "call")}>
                   Start a contact
-                </button>
-                <button type="button" className="ghost" onClick={() => (window.location.hash = "console")}>
-                  Open live console
                 </button>
               </div>
             </div>
@@ -269,7 +258,12 @@ export default function CommandCenter({ refreshKey }) {
           ) : (
             <div className="risk-list">
               {clusters.map((c, i) => (
-                <div className="risk-row" key={`${c.pack_id}-${c.cluster_id}`}>
+                <button
+                  type="button"
+                  className="risk-row"
+                  key={`${c.pack_id}-${c.cluster_id}`}
+                  onClick={() => openWarning({ clusterId: c.cluster_id, packId: c.pack_id })}
+                >
                   <div className="risk-rank">#{String(i + 1).padStart(2, "0")}</div>
                   <div className="risk-main">
                     <div className="title">
@@ -278,12 +272,12 @@ export default function CommandCenter({ refreshKey }) {
                         {c.max_severity || "—"}
                       </span>
                     </div>
-                    <div className="hint mono">{c.pack_id}</div>
+                    <div className="hint">{packLabel(c.pack_id)}</div>
                   </div>
                   <div className="risk-count" title="Open cases">
                     {c.open_cases}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -301,8 +295,8 @@ export default function CommandCenter({ refreshKey }) {
               No open Critical cases. Simulate traffic or take live contacts to light this up.
             </p>
             <div className="row" style={{ marginTop: 10 }}>
-              <button type="button" className="primary" onClick={runSimulate} disabled={simBusy}>
-                {simBusy ? "Simulating…" : "Simulate 15 contacts"}
+              <button type="button" className="ghost" onClick={runSimulate} disabled={simBusy}>
+                {simBusy ? "Seeding…" : "Seed demo traffic"}
               </button>
               <button type="button" className="ghost" onClick={() => openCases({ status: "open" })}>
                 All open cases
@@ -316,29 +310,51 @@ export default function CommandCenter({ refreshKey }) {
                 <tr>
                   <th>Case</th>
                   <th>Category</th>
-                  <th>Priority</th>
+                  <th>Severity</th>
                   <th>Status</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {p1Cases.map((c) => (
-                  <tr key={c.case_id}>
+                  <tr
+                    key={c.case_id}
+                    style={{ cursor: "pointer" }}
+                    tabIndex={0}
+                    onClick={() =>
+                      openCases({
+                        severity: "Critical",
+                        status: "open",
+                        caseId: c.case_id,
+                      })
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openCases({
+                          severity: "Critical",
+                          status: "open",
+                          caseId: c.case_id,
+                        });
+                      }
+                    }}
+                  >
                     <td className="mono">{c.case_id}</td>
                     <td>{c.category || "—"}</td>
-                    <td className="mono">P{c.priority ?? "—"}</td>
+                    <td>{c.severity || "Critical"}</td>
                     <td>{c.status}</td>
                     <td>
                       <button
                         type="button"
                         className="ghost"
-                        onClick={() =>
+                        onClick={(e) => {
+                          e.stopPropagation();
                           openCases({
                             severity: "Critical",
                             status: "open",
                             caseId: c.case_id,
-                          })
-                        }
+                          });
+                        }}
                       >
                         Open
                       </button>
@@ -375,6 +391,16 @@ export default function CommandCenter({ refreshKey }) {
           <div className="k">Pack load</div>
           <div className="v">{health?.pack_ok ? "ok" : "failed"}</div>
         </div>
+        <div className="readiness-item">
+          <div className="k">LLM</div>
+          <div className={`v ${health?.llm_available ? "ok-text" : "warn-text"}`}>
+            {health?.llm_available ? "available" : "off"}
+          </div>
+        </div>
+        <div className="readiness-item">
+          <div className="k">Embedding</div>
+          <div className="v">{health?.embedding?.mode || "—"}</div>
+        </div>
       </div>
 
       <div className="grid-2" style={{ marginTop: 16 }}>
@@ -407,20 +433,26 @@ export default function CommandCenter({ refreshKey }) {
           </div>
           {metrics ? (
             <div className="kv-grid">
-              {Object.entries(metrics)
-                .filter(([k, v]) => k !== "ts" && v !== null && typeof v !== "object")
-                .slice(0, 12)
+              {[
+                ["Open cases", metrics.cases?.open],
+                ["Critical open", metrics.cases?.critical_open],
+                ["Pending follow-up", metrics.cases?.pending_followup],
+                ["Investigations", metrics.investigations?.open],
+                ["Active calls", metrics.interactions_active],
+                ["Dead-letters", metrics.alert_dead_letters_pending],
+                ["Connector pending", metrics.connector_deliveries_pending],
+                ["Case notes", metrics.case_notes_in_window],
+                ["Fixes recorded", metrics.fix_loop?.fixes_recorded],
+              ]
+                .filter(([, v]) => v != null)
                 .map(([k, v]) => (
                   <div className="kv-tile" key={k}>
-                    <div className="k">{k.replace(/_/g, " ")}</div>
+                    <div className="k">{k}</div>
                     <div className="v mono">{String(v)}</div>
                   </div>
                 ))}
             </div>
           ) : (
-            <div className="empty">No scalar metrics in snapshot.</div>
-          )}
-          {metrics && Object.keys(metrics).length === 0 && (
             <div className="empty">No scalar metrics in snapshot.</div>
           )}
         </section>

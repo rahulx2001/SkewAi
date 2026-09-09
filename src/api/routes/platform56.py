@@ -352,6 +352,31 @@ async def ops_drain_begin(
     return out
 
 
+@router.post(
+    "/ops/drain/cancel",
+    dependencies=[Depends(require_api_key_strict)],
+)
+async def ops_drain_cancel(
+    request: Request,
+    role: str = Depends(get_role),
+) -> dict[str, Any]:
+    """Clear drain so the process accepts new contacts again."""
+    from src.ops.drain import DRAIN
+    from src.security.audit_log import security_event
+
+    require_perm(role, "ops:drain")
+    DRAIN.reset()
+    out = DRAIN.status()
+    security_event(
+        "ops.drain_cancel",
+        outcome="success",
+        role=role,
+        detail=out if isinstance(out, dict) else {},
+        ip=request.client.host if request.client else None,
+    )
+    return out
+
+
 @router.get("/auth/oidc")
 async def auth_oidc() -> dict[str, Any]:
     from src.api.rbac import oidc_discovery

@@ -3,96 +3,89 @@ import CallWidget from "../routes/CallWidget.jsx";
 import LiveContactConsole from "../routes/LiveContactConsole.jsx";
 import CaseQueue from "../routes/CaseQueue.jsx";
 import EarlyWarningBoard from "../routes/EarlyWarningBoard.jsx";
-import AuditReports from "../routes/AuditReports.jsx";
-import EnterpriseOps from "../routes/EnterpriseOps.jsx";
-import PlatformOS from "../routes/PlatformOS.jsx";
 import Settings from "../routes/Settings.jsx";
-import InsightsBoard from "../routes/InsightsBoard.jsx";
 import CommandCenter from "../routes/CommandCenter.jsx";
-import FeatureStudio from "../routes/FeatureStudio.jsx";
-import TrustPipeline from "../routes/TrustPipeline.jsx";
-import PackBuilder from "../routes/PackBuilder.jsx";
-import QualityEconomics from "../routes/QualityEconomics.jsx";
 import SignIn from "../routes/SignIn.jsx";
-import LabelDesk from "../routes/LabelDesk.jsx";
 import UserJourneyGuide from "../routes/UserJourneyGuide.jsx";
+import TrustDesk from "../routes/TrustDesk.jsx";
+import PlatformDesk from "../routes/PlatformDesk.jsx";
 import CommandPalette from "./ui/CommandPalette.jsx";
 import { ToastProvider, useToast } from "./ui/Toast.jsx";
 import { ErrorBoundary } from "./ui/Feedback.jsx";
 import { useHotkeys, useLocalStorage } from "./ui/hooks.js";
 import { AUTH_EVENT, apiHeaders, completeGoogleHandoff, fetchMe } from "./apiAuth.js";
 import AccountSignIn from "./ui/AccountSignIn.jsx";
-import { goHash, openCases, openConsole, simulateTraffic } from "./ui/opsActions.js";
+import { canonicalizeHash, goHash, hashQueryObject, openCases, openConsole, parseLocationHash, simulateTraffic } from "./ui/opsActions.js";
 import {
   IconAlert,
-  IconBuilding,
   IconFolder,
   IconGear,
   IconGrid,
   IconHeadset,
   IconLayers,
   IconMic,
-  IconPulse,
   IconShield,
   IconSpark,
 } from "./icons.jsx";
+import { packLabel } from "./ui/labels.js";
 
 const NAV_GROUPS = [
-  {
-    label: "Getting started",
-    items: [
-      { id: "guide", label: "User journey & guide", Icon: IconSpark, route: UserJourneyGuide, keywords: "guide walkthrough journey start onboarding howto tutorial" },
-    ],
-  },
   {
     label: "Operate",
     items: [
       { id: "command", label: "Command center", Icon: IconGrid, route: CommandCenter, keywords: "wallboard home overview live" },
       { id: "call", label: "Voice agent", Icon: IconMic, route: CallWidget, keywords: "call widget mic speak contact" },
       { id: "console", label: "Live console", Icon: IconHeadset, route: LiveContactConsole, keywords: "supervisor takeover transcript" },
-      { id: "cases", label: "Case queue", Icon: IconFolder, route: CaseQueue, keywords: "tickets severity priority p1" },
+      { id: "cases", label: "Case queue", Icon: IconFolder, route: CaseQueue, keywords: "tickets severity priority p1 critical" },
     ],
   },
   {
     label: "Intelligence",
     items: [
-      { id: "insights", label: "Insights", Icon: IconPulse, route: InsightsBoard, keywords: "csat product gap analytics" },
-      { id: "economics", label: "Quality economics", Icon: IconPulse, route: QualityEconomics, keywords: "copq dollar roi hotspot map warranty" },
-      { id: "trust", label: "Pipeline trust", Icon: IconShield, route: TrustPipeline, keywords: "lineage provenance validation queue usage" },
-      { id: "builder", label: "Pack builder", Icon: IconFolder, route: PackBuilder, keywords: "csv upload mapping lint insight onboarding" },
-      { id: "warning", label: "Early warning", Icon: IconAlert, route: EarlyWarningBoard, keywords: "clusters risk investigations lead time" },
-      { id: "studio", label: "Feature studio", Icon: IconSpark, route: FeatureStudio, keywords: "experiments alert rules dsr clusters" },
-      { id: "enterprise", label: "Enterprise ops", Icon: IconBuilding, route: EnterpriseOps, keywords: "incidents postmortem copilot memory scenarios" },
+      { id: "warning", label: "Early warning", Icon: IconAlert, route: EarlyWarningBoard, keywords: "clusters risk investigations insights csat dollars copq" },
     ],
   },
   {
     label: "Trust & platform",
     items: [
-      { id: "audits", label: "Audit reports", Icon: IconShield, route: AuditReports, keywords: "groundedness compliance export digest" },
-      { id: "labels", label: "Eval labels", Icon: IconShield, route: LabelDesk, keywords: "annotation kappa embedding eval" },
-      { id: "platform", label: "Platform OS", Icon: IconLayers, route: PlatformOS, keywords: "governance deployments proposals v3" },
-      { id: "settings", label: "Settings", Icon: IconGear, route: Settings, keywords: "api key pack switch webhook theme" },
+      { id: "audits", label: "Trust", Icon: IconShield, route: TrustDesk, keywords: "audit groundedness labels lineage provenance eval" },
+      { id: "platform", label: "Platform", Icon: IconLayers, route: PlatformDesk, keywords: "governance deployments proposals v3 enterprise copilot" },
+      { id: "settings", label: "Settings", Icon: IconGear, route: Settings, keywords: "api key pack switch webhook theme lab builder" },
     ],
   },
 ];
 
 const ALL_NAV = NAV_GROUPS.flatMap((g) => g.items);
+const EXTRA_PAGES = [
+  { id: "guide", label: "User guide", route: UserJourneyGuide, keywords: "guide walkthrough journey onboarding" },
+  { id: "signin", label: "Sign in", route: SignIn, keywords: "google oidc" },
+];
+const ALL_PAGES = [...ALL_NAV, ...EXTRA_PAGES];
 const THEMES = ["dark", "light"];
 
-function hashRouteId() {
-  const raw = window.location.hash.slice(1) || "command";
-  const cleaned = raw.split("?")[0].replace(/^\/+/, "") || "command";
-  return cleaned;
-}
-
 function useHashRoute() {
-  const [hash, setHash] = useState(() => hashRouteId());
+  const [raw, setRaw] = useState(() => {
+    canonicalizeHash();
+    return window.location.hash;
+  });
   useEffect(() => {
-    const on = () => setHash(hashRouteId());
+    const on = () => {
+      canonicalizeHash();
+      setRaw(window.location.hash);
+    };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
-  return [hash, (id) => (window.location.hash = id)];
+  const { id } = parseLocationHash();
+  return [
+    id,
+    (next) => {
+      const { id: cur } = parseLocationHash();
+      if (cur === next) return;
+      window.location.hash = next;
+    },
+    raw,
+  ];
 }
 
 function ShortcutSheet({ open, onClose }) {
@@ -105,13 +98,15 @@ function ShortcutSheet({ open, onClose }) {
     ["g then l", "Live console"],
     ["g then q", "Case queue"],
     ["g then w", "Early warning"],
-    ["g then s", "Feature studio"],
+    ["g then a", "Trust"],
+    ["g then p", "Platform"],
+    ["g then s", "Settings"],
+    ["g then i", "Insights"],
     ["[", "Collapse / expand sidebar"],
     ["t", "Cycle theme (dark / light)"],
     ["r", "Refresh the active view"],
     ["?", "This sheet"],
     ["esc", "Close any overlay"],
-    ["⌘K", "Simulate / jump / P1 queue"],
   ];
   return (
     <div className="palette-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -151,9 +146,12 @@ function Shell() {
   const [me, setMe] = useState(null);
   const toast = useToast();
 
-  const extra = route === "signin" ? { id: "signin", label: "Sign in", route: SignIn } : null;
-  const active = extra || ALL_NAV.find((n) => n.id === route) || ALL_NAV[0];
+  const extra = route === "signin" ? EXTRA_PAGES.find((p) => p.id === "signin") : null;
+  const fallback = ALL_NAV.find((n) => n.id === "command") || ALL_NAV[0];
+  const active = extra || ALL_PAGES.find((n) => n.id === route) || fallback;
   const Page = active.route;
+  const liveSessionRoute = active.id === "call" || active.id === "console";
+  const hashQuery = hashQueryObject();
 
   // Drop retired wallboard theme if still stored
   useEffect(() => {
@@ -175,16 +173,26 @@ function Shell() {
       if (!r.ok) throw new Error(String(r.status));
       setHealth(await r.json());
       setHealthError(false);
-    } catch {
+    } catch (e) {
       setHealthError(true);
+      throw e;
     }
   }, []);
 
   useEffect(() => {
-    loadHealth();
-    const t = setInterval(loadHealth, 20000);
+    loadHealth().catch(() => {});
+    const t = setInterval(() => loadHealth().catch(() => {}), 20000);
     return () => clearInterval(t);
   }, [loadHealth, route]);
+
+  useEffect(() => {
+    if (route === "signin" || route === "guide") return;
+    if (route === "main") {
+      setRoute("command");
+      return;
+    }
+    if (!ALL_PAGES.some((n) => n.id === route)) setRoute("command");
+  }, [route, setRoute]);
 
   useEffect(() => {
     const raw = window.location.hash.slice(1);
@@ -196,7 +204,9 @@ function Shell() {
         .then(() => {
           window.location.hash = raw.split("?")[0] || "command";
         })
-        .catch(() => {});
+        .catch((e) => {
+          toast.error(String(e.message || e || "Google sign-in failed"));
+        });
     }
     fetchMe()
       .then(setMe)
@@ -222,15 +232,53 @@ function Shell() {
   }, [setTheme]);
 
   const commands = useMemo(() => {
-    const nav = ALL_NAV.map((n) => ({
-      id: `nav-${n.id}`,
-      label: n.label,
-      group: "Go to",
-      Icon: n.Icon,
-      keywords: n.keywords,
-      hint: n.id === active.id ? "current" : "",
-      run: () => setRoute(n.id),
-    }));
+    const nav = [
+      ...ALL_NAV.map((n) => ({
+        id: `nav-${n.id}`,
+        label: n.label,
+        group: "Go to",
+        Icon: n.Icon,
+        keywords: n.keywords,
+        hint: n.id === active.id ? "current" : "",
+        run: () => setRoute(n.id),
+      })),
+      {
+        id: "nav-guide",
+        label: "User guide",
+        group: "Go to",
+        Icon: IconSpark,
+        keywords: "guide walkthrough journey onboarding",
+        run: () => setRoute("guide"),
+      },
+      {
+        id: "nav-insights",
+        label: "Insights (friction proxy)",
+        group: "Go to",
+        keywords: "csat product gap analytics",
+        run: () => goHash("warning?tab=insights"),
+      },
+      {
+        id: "nav-economics",
+        label: "Quality economics",
+        group: "Go to",
+        keywords: "copq dollar hotspot",
+        run: () => goHash("warning?tab=economics"),
+      },
+      {
+        id: "nav-lab",
+        label: "Feature lab",
+        group: "Go to",
+        keywords: "studio booking coach drain demo",
+        run: () => goHash("settings?tab=lab"),
+      },
+      {
+        id: "nav-builder",
+        label: "Pack builder",
+        group: "Go to",
+        keywords: "csv upload mapping lint",
+        run: () => goHash("settings?tab=builder"),
+      },
+    ];
 
     const actions = [
       {
@@ -245,7 +293,11 @@ function Shell() {
             const d = await simulateTraffic({ count: 15 });
             toast.success(
               `Simulated ${d.completed ?? d.count ?? 15} contacts` +
-                (d.opened_investigations != null ? ` · inv ${d.opened_investigations}` : ""),
+                (d.investigations_opened != null
+                  ? ` · inv ${d.investigations_opened}`
+                  : d.opened_investigations != null
+                    ? ` · inv ${d.opened_investigations}`
+                    : ""),
             );
             setRefreshKey((k) => k + 1);
             setRoute("command");
@@ -256,7 +308,7 @@ function Shell() {
       },
       {
         id: "act-p1-queue",
-        label: "Open P1 / Critical case queue",
+        label: "Open Critical case queue",
         group: "Ops power",
         keywords: "priority critical p1 fire queue",
         run: () => openCases({ severity: "Critical", status: "open" }),
@@ -284,10 +336,10 @@ function Shell() {
       },
       {
         id: "act-studio",
-        label: "Feature studio · analytics",
+        label: "Feature lab",
         group: "Ops power",
-        keywords: "forecast fairness booking",
-        run: () => goHash("studio"),
+        keywords: "forecast fairness booking studio",
+        run: () => goHash("settings?tab=lab"),
       },
       {
         id: "act-theme",
@@ -366,11 +418,15 @@ function Shell() {
       l: () => pendingG && (setRoute("console"), setPendingG(false)),
       q: () => pendingG && (setRoute("cases"), setPendingG(false)),
       w: () => pendingG && (setRoute("warning"), setPendingG(false)),
-      s: () => pendingG && (setRoute("studio"), setPendingG(false)),
+      s: () => pendingG && (setRoute("settings"), setPendingG(false)),
+      a: () => pendingG && (setRoute("audits"), setPendingG(false)),
+      p: () => pendingG && (setRoute("platform"), setPendingG(false)),
+      i: () => pendingG && (goHash("warning?tab=insights"), setPendingG(false)),
       escape: () => {
         setPaletteOpen(false);
         setShortcutsOpen(false);
         setMobileNavOpen(false);
+        window.dispatchEvent(new Event("frontline-escape"));
       },
     },
     [pendingG, cycleTheme, setCollapsed, setRoute],
@@ -435,7 +491,14 @@ function Shell() {
 
   return (
     <div className={`app${collapsed ? " collapsed" : ""}`}>
-      <a className="skip-link" href="#main">
+      <a
+        className="skip-link"
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById("main")?.focus();
+        }}
+      >
         Skip to main content
       </a>
 
@@ -448,8 +511,13 @@ function Shell() {
               </div>
             </div>
           </div>
-          <button type="button" className="rail-pack" title={health?.active_pack || "pack"}>
-            <span>{health?.active_pack || "automotive_nhtsa"}</span>
+          <button
+            type="button"
+            className="rail-pack"
+            title={health?.active_pack || "pack"}
+            onClick={() => setRoute("settings")}
+          >
+            <span>{packLabel(health?.active_pack || "automotive_nhtsa")}</span>
           </button>
           <button
             type="button"
@@ -474,7 +542,7 @@ function Shell() {
           >
             {collapsed ? "»" : "Collapse"}
           </button>
-          <AccountSignIn pack={health?.active_pack} authRequired={health?.auth_required} />
+          <AccountSignIn />
         </div>
       </aside>
 
@@ -491,12 +559,16 @@ function Shell() {
           </button>
 
           <div className="topbar-title">
-            <span className="topbar-crumb faint">
-              {NAV_GROUPS.find((g) => g.items.some((i) => i.id === active.id))?.label}
-            </span>
-            <span className="topbar-sep" aria-hidden="true">
-              /
-            </span>
+            {NAV_GROUPS.find((g) => g.items.some((i) => i.id === active.id)) ? (
+              <>
+                <span className="topbar-crumb faint">
+                  {NAV_GROUPS.find((g) => g.items.some((i) => i.id === active.id))?.label}
+                </span>
+                <span className="topbar-sep" aria-hidden="true">
+                  /
+                </span>
+              </>
+            ) : null}
             <span className="topbar-page">{active.label}</span>
           </div>
 
@@ -509,34 +581,23 @@ function Shell() {
               ) : (
                 <button
                   type="button"
-                  className="ghost"
+                  className="ghost topbar-signin"
                   onClick={() => setRoute("signin")}
                 >
                   Sign in
                 </button>
               )
             )}
-            <button
-              type="button"
-              className="ghost guide-topbar-btn"
-              onClick={() => setRoute("guide")}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                borderColor: route === "guide" ? "var(--ink)" : "var(--edge-strong)",
-                color: route === "guide" ? "var(--ink)" : "var(--accent)",
-                background: route === "guide" ? "var(--bg-panel)" : "transparent",
-                fontWeight: "500",
-                fontSize: "13px",
-                padding: "6px 12px",
-                borderRadius: "8px",
-              }}
-              title="Open User Journey & Product Guide (g then j)"
-            >
-              <IconSpark style={{ width: 14, height: 14 }} />
-              <span>User Guide</span>
-            </button>
+            {route !== "guide" && (
+              <button
+                type="button"
+                className="ghost guide-topbar-btn"
+                onClick={() => setRoute("guide")}
+                title="Open operator guide (g then j)"
+              >
+                Guide
+              </button>
+            )}
 
             <button
               type="button"
@@ -548,11 +609,18 @@ function Shell() {
               <kbd>⌘K</kbd>
             </button>
 
-            <div className={`health-chip tone-${statusTone}`} title="System health">
+            <button
+              type="button"
+              className={`health-chip tone-${statusTone}`}
+              title="Re-check system health"
+              onClick={() => loadHealth().catch((e) => toast.error(String(e.message || e || "Health check failed")))}
+            >
               <span className="health-dot" aria-hidden="true" />
               <span className="health-text">{statusText}</span>
-              {health?.active_pack && <span className="mono health-pack">{health.active_pack}</span>}
-            </div>
+              {health?.active_pack && (
+                <span className="health-pack">{packLabel(health.active_pack)}</span>
+              )}
+            </button>
 
             <button
               type="button"
@@ -577,19 +645,52 @@ function Shell() {
         </header>
 
         {mobileNavOpen && (
-          <nav className="mobile-nav" aria-label="Mobile navigation">
-            {navList}
-          </nav>
+          <div
+            className="mobile-nav-scrim"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setMobileNavOpen(false);
+            }}
+          >
+            <nav className="mobile-nav" aria-label="Mobile navigation">
+              {navList}
+              <div className="nav-group">
+                <div className="nav-group-label">More</div>
+                <button
+                  type="button"
+                  className={"nav-item" + (route === "guide" ? " active" : "")}
+                  onClick={() => setRoute("guide")}
+                >
+                  <span className="nav-text">Operator guide</span>
+                </button>
+                {!me?.signed_in && (
+                  <button type="button" className="nav-item" onClick={() => setRoute("signin")}>
+                    <span className="nav-text">Sign in</span>
+                  </button>
+                )}
+                <button type="button" className="nav-item" onClick={() => setPaletteOpen(true)}>
+                  <span className="nav-text">Search console</span>
+                </button>
+              </div>
+            </nav>
+          </div>
         )}
 
-        <main className="main page-enter" id="main" key={active.id}>
-          <ErrorBoundary key={`${active.id}-${refreshKey}`}>
-            <Page refreshKey={refreshKey} health={health} />
+        <main className="main page-enter" id="main" key={active.id} tabIndex={-1}>
+          <ErrorBoundary key={liveSessionRoute ? active.id : `${active.id}-${refreshKey}`}>
+            <Page refreshKey={refreshKey} health={health} hashQuery={hashQuery} />
           </ErrorBoundary>
         </main>
       </div>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={commands}
+        onOpenShortcuts={() => {
+          setPaletteOpen(false);
+          setShortcutsOpen(true);
+        }}
+      />
       <ShortcutSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );

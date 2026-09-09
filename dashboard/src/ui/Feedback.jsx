@@ -41,6 +41,30 @@ export function SkeletonRows({ rows = 5, cols = 4 }) {
   );
 }
 
+/** Classify mixed success/error strings so banners are not always green. */
+export function bannerTone(msg) {
+  return /failed|Error|HTTP\s*\d|not connected|not found|denied|invalid|422|401|403|404|500|Paste |could not/i.test(
+    String(msg || ""),
+  )
+    ? "error"
+    : "ok";
+}
+
+/** Status / error strip. Prefer this over ad-hoc banner-ok for failures. */
+export function Banner({ tone = "ok", children, onDismiss }) {
+  const err = tone === "error" || tone === "danger";
+  return (
+    <div className={"banner " + (err ? "banner-error" : "banner-ok")} role={err ? "alert" : "status"}>
+      {children}
+      {onDismiss ? (
+        <button type="button" className="ghost" onClick={onDismiss}>
+          Dismiss
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 /** Empty state that tells the operator what to do next, not just that it's empty. */
 export function EmptyState({ title, hint, action, icon = null }) {
   return (

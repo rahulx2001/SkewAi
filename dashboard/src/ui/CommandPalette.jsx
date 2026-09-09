@@ -25,7 +25,7 @@ function fuzzyScore(haystack, needle) {
   return score;
 }
 
-export default function CommandPalette({ open, onClose, commands }) {
+export default function CommandPalette({ open, onClose, commands, onOpenShortcuts }) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef(null);
@@ -78,6 +78,10 @@ export default function CommandPalette({ open, onClose, commands }) {
     } else if (e.key === "Enter") {
       e.preventDefault();
       run(results[cursor]);
+    } else if (e.key === "?" && !query) {
+      e.preventDefault();
+      onClose();
+      onOpenShortcuts?.();
     }
   };
 
@@ -146,9 +150,9 @@ export default function CommandPalette({ open, onClose, commands }) {
           <span>
             <kbd>↵</kbd> run
           </span>
-          <span>
+          <button type="button" className="ghost" onClick={() => { onClose(); onOpenShortcuts?.(); }}>
             <kbd>?</kbd> shortcuts
-          </span>
+          </button>
         </div>
       </div>
     </div>

@@ -278,6 +278,9 @@ def test_admin_session_allows_drain_and_pack_dry_run(hard_client, monkeypatch):
         r = hard_client.post("/api/frontline/ops/drain", headers=h)
         assert r.status_code == 200
         assert r.json().get("draining") is True
+        r_cancel = hard_client.post("/api/frontline/ops/drain/cancel", headers=h)
+        assert r_cancel.status_code == 200
+        assert r_cancel.json().get("draining") is False
         r2 = hard_client.post(
             "/api/frontline/packs/automotive_nhtsa/edit",
             headers=h,

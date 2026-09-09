@@ -12,11 +12,67 @@ export const SS = {
   caseSearch: "frontline:case_search_q",
 };
 
+export const INCLUDE_SIM_KEY = "fl.includeSimulated";
+
+/** Retired hashes → canonical route + tab. */
+export const HASH_ALIASES = {
+  insights: { id: "warning", tab: "insights" },
+  economics: { id: "warning", tab: "economics" },
+  trust: { id: "audits", tab: "reports" },
+  labels: { id: "audits", tab: "labels" },
+  builder: { id: "settings", tab: "builder" },
+  studio: { id: "settings", tab: "lab" },
+  enterprise: { id: "platform", tab: "ops" },
+};
+
+export function parseLocationHash() {
+  const raw = window.location.hash.slice(1) || "command";
+  const qIndex = raw.indexOf("?");
+  const path = (qIndex === -1 ? raw : raw.slice(0, qIndex)).replace(/^\/+/, "") || "command";
+  const qs = qIndex === -1 ? "" : raw.slice(qIndex + 1);
+  return { id: path, params: new URLSearchParams(qs) };
+}
+
+export function hashQueryObject() {
+  return Object.fromEntries(parseLocationHash().params.entries());
+}
+
+export function setHash(id, params = {}) {
+  const sp = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v != null && v !== "") sp.set(k, String(v));
+  });
+  const q = sp.toString();
+  window.location.hash = q ? `${id}?${q}` : id;
+}
+
 export function goHash(id) {
   window.location.hash = id;
 }
 
-export function openCases({ severity, status, caseId, q } = {}) {
+export function patchHashQuery(updates) {
+  const { id, params } = parseLocationHash();
+  Object.entries(updates).forEach(([k, v]) => {
+    if (v == null || v === "") params.delete(k);
+    else params.set(k, String(v));
+  });
+  const q = params.toString();
+  const dest = q ? `${id}?${q}` : id;
+  if (window.location.hash.slice(1) !== dest) window.location.hash = dest;
+}
+
+export function canonicalizeHash() {
+  const { id, params } = parseLocationHash();
+  const alias = HASH_ALIASES[id];
+  if (!alias) return id;
+  if (alias.tab && !params.get("tab")) params.set("tab", alias.tab);
+  const q = params.toString();
+  const dest = `${alias.id}${q ? `?${q}` : ""}`;
+  if (window.location.hash.slice(1) !== dest) window.location.hash = dest;
+  return alias.id;
+}
+
+export function openCases({ severity, status, caseId, q, clusterId } = {}) {
   try {
     if (severity) sessionStorage.setItem(SS.caseSev, severity);
     else sessionStorage.removeItem(SS.caseSev);
@@ -27,7 +83,13 @@ export function openCases({ severity, status, caseId, q } = {}) {
   } catch {
     /* ignore */
   }
-  goHash("cases");
+  setHash("cases", {
+    severity: severity || undefined,
+    status: status || undefined,
+    id: caseId || undefined,
+    q: q || undefined,
+    cluster: clusterId != null ? clusterId : undefined,
+  });
 }
 
 export function openConsole(interactionId) {
@@ -36,7 +98,15 @@ export function openConsole(interactionId) {
   } catch {
     /* ignore */
   }
-  goHash("console");
+  setHash("console", interactionId ? { id: interactionId } : {});
+}
+
+export function openWarning({ clusterId, packId, tab } = {}) {
+  setHash("warning", {
+    tab: tab || undefined,
+    cluster: clusterId != null ? clusterId : undefined,
+    pack: packId || undefined,
+  });
 }
 
 export function consumeSession(key) {
@@ -67,11 +137,30 @@ export async function simulateTraffic({ count = 15, speed = "instant" } = {}) {
 }
 
 export async function fetchOpenP1Cases(limit = 10) {
+  return fetchCriticalCases(limit);
+}
+
+export async function fetchCriticalCases(limit = 10) {
   const r = await fetch(
-    `/api/frontline/cases?severity=Critical&status=open&limit=${limit}`,
+    `/api/frontline/cases?severity=Critical&status=open&limit=${limit}&include_simulated=${includeSimQuery()}`,
     { headers: apiHeaders() },
   );
   if (!r.ok) return [];
   const d = await r.json();
   return d.cases || [];
+}
+
+export function readIncludeSimulated() {
+  try {
+    const raw = window.localStorage.getItem(INCLUDE_SIM_KEY);
+    if (raw == null || raw === "") return false;
+    const v = JSON.parse(raw);
+    return v === true || v === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function includeSimQuery() {
+  return readIncludeSimulated() ? "true" : "false";
 }

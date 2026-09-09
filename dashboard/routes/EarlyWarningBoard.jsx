@@ -1,11 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
 import WeekSpark from "../src/ui/WeekSpark.jsx";
+import { useFocusTrap, useLocalStorage } from "../src/ui/hooks.js";
+import { hashQueryObject, openCases, patchHashQuery } from "../src/ui/opsActions.js";
+import { packLabel } from "../src/ui/labels.js";
+import InsightsBoard from "./InsightsBoard.jsx";
+import QualityEconomics from "./QualityEconomics.jsx";
 
 
 
 export default function EarlyWarningBoard() {
-  const [tab, setTab] = useState("clusters");
+  const hashQ = hashQueryObject();
+  const boardTab = hashQ.tab === "insights" || hashQ.tab === "economics" ? hashQ.tab : "risk";
+  const focusCluster = hashQ.cluster;
+  const tab = ["clusters", "investigations", "fixes"].includes(hashQ.view) ? hashQ.view : "clusters";
   const [clusters, setClusters] = useState([]);
   const [funnel, setFunnel] = useState(null);
   const [investigations, setInvestigations] = useState([]);
@@ -17,13 +25,18 @@ export default function EarlyWarningBoard() {
   const [simResult, setSimResult] = useState(null);
   const [simRunning, setSimRunning] = useState(false);
   const [metrics, setMetrics] = useState(null);
-  const [includeSimulated, setIncludeSimulated] = useState(false);
+  const [includeSimulated, setIncludeSimulated] = useLocalStorage("fl.includeSimulated", false);
+  const simModalRef = useRef(null);
+  useFocusTrap(simModalRef, simModal, () => setSimModal(false));
 
-  async function loadMetrics() {
+  async function loadMetrics(include = includeSimulated) {
     try {
-      const r = await fetch("/api/frontline/metrics?window_days=7", {
-        headers: apiHeaders(),
-      });
+      const r = await fetch(
+        `/api/frontline/metrics?window_days=7&include_simulated=${include ? "true" : "false"}`,
+        {
+          headers: apiHeaders(),
+        }
+      );
       if (!r.ok) return;
       setMetrics(await r.json());
     } catch {
@@ -31,12 +44,12 @@ export default function EarlyWarningBoard() {
     }
   }
 
-  async function loadClusters() {
+  async function loadClusters(include = includeSimulated) {
     setLoading(true);
     setError(null);
     try {
       const r = await fetch(
-        `/api/frontline/early-warning?window_days=7&include_simulated=${includeSimulated ? "true" : "false"}`,
+        `/api/frontline/early-warning?window_days=7&include_simulated=${include ? "true" : "false"}`,
         {
           headers: apiHeaders(),
         }
@@ -80,6 +93,20 @@ export default function EarlyWarningBoard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, includeSimulated]);
 
+  useEffect(() => {
+    if (!simModal) return undefined;
+    const close = () => setSimModal(false);
+    window.addEventListener("frontline-escape", close);
+    const onKey = (e) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("frontline-escape", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [simModal]);
+
   // Composite risk: live_count × critical_count
   const sortedClusters = [...clusters].sort((a, b) => {
     const ra = (a.live_case_count || 0) * (a.critical_count || 0);
@@ -104,8 +131,9 @@ export default function EarlyWarningBoard() {
       const d = await r.json();
       setSimResult(d);
       setIncludeSimulated(true);
-      if (tab === "clusters") loadClusters();
-      else loadInvestigations();
+      if (tab === "clusters") loadClusters(true);
+      else if (tab === "investigations") loadInvestigations();
+      else loadMetrics(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -157,7 +185,13 @@ export default function EarlyWarningBoard() {
           </button>
           <button
             type="button"
-            onClick={tab === "clusters" ? loadClusters : loadInvestigations}
+            onClick={
+              tab === "clusters"
+                ? loadClusters
+                : tab === "investigations"
+                  ? loadInvestigations
+                  : loadMetrics
+            }
             disabled={loading}
           >
             {loading ? "Loading…" : "Refresh"}
@@ -174,13 +208,47 @@ export default function EarlyWarningBoard() {
         </div>
       )}
 
+      <div className="tabs" role="tablist" aria-label="Early warning desk">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={boardTab === "risk"}
+          className={"tab" + (boardTab === "risk" ? " active" : "")}
+          onClick={() => patchHashQuery({ tab: "risk" })}
+        >
+          Risk
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={boardTab === "insights"}
+          className={"tab" + (boardTab === "insights" ? " active" : "")}
+          onClick={() => patchHashQuery({ tab: "insights" })}
+        >
+          Insights
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={boardTab === "economics"}
+          className={"tab" + (boardTab === "economics" ? " active" : "")}
+          onClick={() => patchHashQuery({ tab: "economics" })}
+        >
+          Dollars
+        </button>
+      </div>
+
+      {boardTab === "insights" && <InsightsBoard embedded />}
+      {boardTab === "economics" && <QualityEconomics embedded />}
+      {boardTab === "risk" && (
+      <>
       <div className="tabs" role="tablist" aria-label="Early warning views">
         <button
           type="button"
           role="tab"
           aria-selected={tab === "clusters"}
           className={"tab" + (tab === "clusters" ? " active" : "")}
-          onClick={() => setTab("clusters")}
+          onClick={() => patchHashQuery({ view: "clusters" })}
         >
           Clusters
         </button>
@@ -189,7 +257,7 @@ export default function EarlyWarningBoard() {
           role="tab"
           aria-selected={tab === "investigations"}
           className={"tab" + (tab === "investigations" ? " active" : "")}
-          onClick={() => setTab("investigations")}
+          onClick={() => patchHashQuery({ view: "investigations" })}
         >
           Investigations
         </button>
@@ -198,7 +266,7 @@ export default function EarlyWarningBoard() {
           role="tab"
           aria-selected={tab === "fixes"}
           className={"tab" + (tab === "fixes" ? " active" : "")}
-          onClick={() => setTab("fixes")}
+          onClick={() => patchHashQuery({ view: "fixes" })}
         >
           Fix loop
         </button>
@@ -262,7 +330,7 @@ export default function EarlyWarningBoard() {
                   <div className="risk-card" key={`card-${c.pack_id}:${c.cluster_id}`}>
                     <div className="top">
                       <div>
-                        <div className="mono faint" style={{ fontSize: 11 }}>{c.pack_id}</div>
+                        <div className="faint" style={{ fontSize: 11 }}>{packLabel(c.pack_id)}</div>
                         <div style={{ fontWeight: 650, letterSpacing: "-0.02em", marginTop: 2 }}>
                           Cluster {c.cluster_id}
                         </div>
@@ -315,9 +383,23 @@ export default function EarlyWarningBoard() {
                 {sortedClusters.map((c) => {
                   const composite = (c.live_case_count || 0) * (c.critical_count || 0);
                   return (
-                    <tr key={`${c.pack_id}:${c.cluster_id}`}>
+                    <tr
+                      key={`${c.pack_id}:${c.cluster_id}`}
+                      className={String(focusCluster) === String(c.cluster_id) ? "selected" : ""}
+                      style={{ cursor: "pointer" }}
+                      tabIndex={0}
+                      onClick={() =>
+                        openCases({ status: "open", clusterId: c.cluster_id })
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openCases({ status: "open", clusterId: c.cluster_id });
+                        }
+                      }}
+                    >
                       <td><span className="chip teal">cluster {c.cluster_id}</span></td>
-                      <td className="mono">{c.pack_id}</td>
+                      <td>{packLabel(c.pack_id)}</td>
                       <td className="mono">{c.live_case_count ?? 0}</td>
                       <td>
                         {c.critical_count > 0 ? (
@@ -370,7 +452,7 @@ export default function EarlyWarningBoard() {
               {investigations.length === 0 && (
                 <tr>
                   <td colSpan={9}>
-                    <div className="empty">No open investigations.</div>
+                    <div className="empty">No investigations in this window.</div>
                   </td>
                 </tr>
               )}
@@ -387,9 +469,20 @@ export default function EarlyWarningBoard() {
                         .slice(-6)
                     : [];
                 return (
-                  <tr key={inv.investigation_id}>
+                  <tr
+                    key={inv.investigation_id}
+                    style={{ cursor: "pointer" }}
+                    tabIndex={0}
+                    onClick={() => openCases({ q: inv.investigation_id })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openCases({ q: inv.investigation_id });
+                      }
+                    }}
+                  >
                     <td className="mono">{inv.investigation_id}</td>
-                    <td className="mono">{inv.pack_id}</td>
+                    <td>{packLabel(inv.pack_id)}</td>
                     <td>
                       <span className="chip purple">cluster {inv.cluster_id}</span>
                     </td>
@@ -418,20 +511,41 @@ export default function EarlyWarningBoard() {
                         {inv.status}
                       </span>
                       <div className="row" style={{ marginTop: 4, gap: 4 }}>
-                        {inv.status !== "monitoring" && (
+                        {inv.status !== "open" && (
                           <button
+                            type="button"
                             className="ghost"
                             style={{ fontSize: 10, padding: "2px 6px" }}
-                            onClick={() => setInvStatus(inv, "monitoring")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInvStatus(inv, "open");
+                            }}
+                          >
+                            → open
+                          </button>
+                        )}
+                        {inv.status !== "monitoring" && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            style={{ fontSize: 10, padding: "2px 6px" }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInvStatus(inv, "monitoring");
+                            }}
                           >
                             → monitoring
                           </button>
                         )}
                         {inv.status !== "closed" && (
                           <button
+                            type="button"
                             className="ghost"
                             style={{ fontSize: 10, padding: "2px 6px" }}
-                            onClick={() => setInvStatus(inv, "closed")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setInvStatus(inv, "closed");
+                            }}
                           >
                             → closed
                           </button>
@@ -540,13 +654,16 @@ export default function EarlyWarningBoard() {
           )}
         </>
       )}
+      </>
+      )}
 
-      {/* ── Simulate modal ──────────────────────────────────────────── */}      {simModal && (
+      {/* ── Simulate modal ──────────────────────────────────────────── */}
+      {simModal && (
         <div
           className="modal-backdrop"
           onClick={(e) => e.target.className === "modal-backdrop" && setSimModal(false)}
         >
-          <div className="modal">
+          <div className="modal" ref={simModalRef} role="dialog" aria-modal="true" aria-label="Simulate traffic">
             <h3>Simulate traffic</h3>
             <p className="muted" style={{ marginTop: -8, fontSize: 12 }}>
               Replay corpus records as simulated interactions.
@@ -601,10 +718,10 @@ export default function EarlyWarningBoard() {
               </div>
             )}
             <div className="row" style={{ justifyContent: "flex-end", marginTop: 18, gap: 8 }}>
-              <button className="ghost" onClick={() => setSimModal(false)}>
+              <button type="button" className="ghost" onClick={() => setSimModal(false)}>
                 Close
               </button>
-              <button className="primary" onClick={runSimulate} disabled={simRunning}>
+              <button type="button" className="primary" onClick={runSimulate} disabled={simRunning}>
                 {simRunning ? "running…" : "Run"}
               </button>
             </div>

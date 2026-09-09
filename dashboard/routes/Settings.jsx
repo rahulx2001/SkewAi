@@ -5,8 +5,15 @@ import {
   notifyAuthChange,
   setApiKey as storeApiKey,
 } from "../src/apiAuth.js";
+import { hashQueryObject, patchHashQuery, simulateTraffic } from "../src/ui/opsActions.js";
+import { Banner, bannerTone } from "../src/ui/Feedback.jsx";
+import PackBuilder from "./PackBuilder.jsx";
+import FeatureStudio from "./FeatureStudio.jsx";
 
 export default function Settings() {
+  const panel = hashQueryObject().tab || "general";
+  const [simBusy, setSimBusy] = useState(false);
+  const [simMsg, setSimMsg] = useState(null);
   const [packs, setPacks] = useState([]);
   const [active, setActive] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -16,7 +23,7 @@ export default function Settings() {
   const [apiKey, setApiKey] = useState(() => getStoredApiKey());
   // Explicit opt-in persistence (item 20): memory-only by default, disk
   // only when the operator checks "Remember on this device".
-  const [rememberKey, setRememberKey] = useState(true);
+  const [rememberKey, setRememberKey] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
   const [deadLetters, setDeadLetters] = useState([]);
   const [dlLoading, setDlLoading] = useState(false);
@@ -195,6 +202,7 @@ export default function Settings() {
       }
       const d = await r.json();
       setActive(d.active);
+      await load();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -204,6 +212,19 @@ export default function Settings() {
 
   const activePack = packs.find((p) => p.id === active);
 
+  async function runDemoTraffic() {
+    setSimBusy(true);
+    setSimMsg(null);
+    try {
+      const d = await simulateTraffic({ count: 15 });
+      setSimMsg(`Seeded ${d.completed ?? 15} simulated contacts. They stay out of live metrics unless you check Include simulated on Early warning.`);
+    } catch (e) {
+      setSimMsg(String(e.message || e));
+    } finally {
+      setSimBusy(false);
+    }
+  }
+
   return (
     <div>
       <header className="page-header">
@@ -212,11 +233,50 @@ export default function Settings() {
           <p className="sub">Packs, pilot API key, connectors, and alert dead-letter replay.</p>
         </div>
         <div className="page-actions">
-          <button type="button" onClick={load} disabled={loading}>
-            {loading ? "Loading…" : "Refresh"}
-          </button>
+          {panel === "general" && (
+            <button
+              type="button"
+              onClick={() => {
+                load();
+                loadDeadLetters();
+                loadConnector();
+              }}
+              disabled={loading}
+            >
+              {loading ? "Loading…" : "Refresh"}
+            </button>
+          )}
         </div>
       </header>
+
+      <div className="tabs" role="tablist" aria-label="Settings panels">
+        {[
+          { id: "general", label: "General" },
+          { id: "builder", label: "Pack builder" },
+          { id: "lab", label: "Lab" },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={panel === t.id}
+            className={"tab" + (panel === t.id ? " active" : "")}
+            onClick={() => patchHashQuery({ tab: t.id })}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {panel === "builder" && <PackBuilder embedded />}
+      {panel === "lab" && <FeatureStudio embedded />}
+      {panel !== "general" ? null : (
+      <>
+      {simMsg && (
+        <Banner tone={bannerTone(simMsg)} onDismiss={() => setSimMsg(null)}>
+          {simMsg}
+        </Banner>
+      )}
 
       {error && (
         <div className="banner banner-error" role="alert">
@@ -256,7 +316,7 @@ export default function Settings() {
             Save
           </button>
         </div>
-        <label className="row" style={{ gap: 8, marginTop: 8, fontSize: 12 }}>
+        <label className="check-row" style={{ marginTop: 10 }}>
           <input
             type="checkbox"
             checked={rememberKey}
@@ -265,6 +325,16 @@ export default function Settings() {
           />
           Remember on this device (otherwise the key lives in memory only)
         </label>
+      </div>
+
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <h2>Demo traffic</h2>
+        <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+          Replay corpus rows as channel=simulated. They are excluded from live wallboard metrics unless Early warning has Include simulated on.
+        </p>
+        <button type="button" onClick={runDemoTraffic} disabled={simBusy}>
+          {simBusy ? "Seeding…" : "Seed 15 simulated contacts"}
+        </button>
       </div>
 
       <div className="panel" style={{ marginBottom: 16 }}>
@@ -364,7 +434,6 @@ export default function Settings() {
           <label>Alert webhook</label>
           <input
             value={alertWebhook}
-            onChange={(e) => setAlertWebhook(e.target.value)}
             readOnly
             style={{ width: "100%" }}
             placeholder="Configured on server"
@@ -396,9 +465,9 @@ export default function Settings() {
           stored payload to the original endpoint.
         </p>
         {dlMsg && (
-          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+          <Banner tone={bannerTone(dlMsg)} onDismiss={() => setDlMsg(null)}>
             {dlMsg}
-          </div>
+          </Banner>
         )}
         {deadLetters.length === 0 && !dlLoading && (
           <div className="empty">No pending dead-letters.</div>
@@ -528,9 +597,9 @@ export default function Settings() {
           )}
         </div>
         {connMsg && (
-          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+          <Banner tone={bannerTone(connMsg)} onDismiss={() => setConnMsg(null)}>
             {connMsg}
-          </div>
+          </Banner>
         )}
         <h3 style={{ fontSize: 13, margin: "12px 0 8px" }}>
           Pending deliveries
@@ -580,6 +649,8 @@ export default function Settings() {
           </table>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

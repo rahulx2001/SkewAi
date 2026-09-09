@@ -110,10 +110,14 @@ def live_risk(
     never returned for an unrelated cluster. ``as_of`` (ISO week or full
     timestamp) caps the series for reproducible historical reads.
     """
-    kind_sql = (
-        "1=1"
+    kind_sql = "COALESCE(c.case_kind, 'customer') = 'customer'"
+    sim_sql = (
+        ""
         if include_simulated
-        else "COALESCE(c.case_kind, 'customer') = 'customer'"
+        else (
+            " AND (c.interaction_id IS NULL OR c.interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated'))"
+        )
     )
     sql = f"""
     SELECT
@@ -126,6 +130,7 @@ def live_risk(
     WHERE c.cluster_match_id IS NOT NULL
       AND c.created_at >= now() - INTERVAL (? || ' days')
       AND ({kind_sql})
+      {sim_sql}
     GROUP BY c.cluster_match_id, c.pack_id
     ORDER BY live_case_count DESC
     """
@@ -285,11 +290,11 @@ def live_risk(
     return clusters
 
 
-def live_risk_by_dollar(window_days: int = 7) -> list[dict[str, Any]]:
+def live_risk_by_dollar(window_days: int = 7, *, include_simulated: bool = False) -> list[dict[str, Any]]:
     """Early-warning feed ranked by COPQ dollars, not volume."""
     from src.frontline.copq import load_cluster_costs, rank_by_dollar
 
-    clusters = live_risk(window_days)
+    clusters = live_risk(window_days, include_simulated=include_simulated)
     costs = {
         (c.get("pack_id"), int(c.get("cluster_id") or 0)): c
         for c in load_cluster_costs()
@@ -319,9 +324,18 @@ def live_risk_by_dollar(window_days: int = 7) -> list[dict[str, Any]]:
 
 # ── 4. case_funnel ───────────────────────────────────────────────────────────
 
-def case_funnel(window_days: int = 7) -> dict[str, Any]:
+def case_funnel(window_days: int = 7, *, include_simulated: bool = False) -> dict[str, Any]:
     """started → completed → cases → advisories notified → escalations → takeovers."""
-    sql = """
+    sim_ix = "" if include_simulated else " AND COALESCE(channel, '') <> 'simulated'"
+    sim_case = (
+        ""
+        if include_simulated
+        else (
+            " AND interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated')"
+        )
+    )
+    sql = f"""
     SELECT
         COUNT(*) AS started,
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
@@ -331,12 +345,14 @@ def case_funnel(window_days: int = 7) -> dict[str, Any]:
         SUM(CASE WHEN outcome = 'advisory_notified' THEN 1 ELSE 0 END) AS advisories_notified
     FROM interactions
     WHERE started_at >= now() - INTERVAL (? || ' days')
+    {sim_ix}
     """
-    cases_sql = """
+    cases_sql = f"""
     SELECT COUNT(*) AS case_count
     FROM cases
     WHERE created_at >= now() - INTERVAL (? || ' days')
       AND COALESCE(case_kind, 'customer') = 'customer'
+    {sim_case}
     """
     with ops_con(read_only=True) as con:
         funnel = _rows(con, sql, [str(window_days)])[0]

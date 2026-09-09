@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { apiHeaders, sendWsAuth } from "../src/apiAuth.js";
-import { SS, consumeSession } from "../src/ui/opsActions.js";
+import { SS, consumeSession, goHash, openCases, parseLocationHash, patchHashQuery } from "../src/ui/opsActions.js";
+import { bannerTone } from "../src/ui/Feedback.jsx";
 
 const AGENT_BADGE_CLASS = {
   intake: "intake",
@@ -28,9 +29,11 @@ export default function LiveContactConsole() {
   const [wsStatus, setWsStatus] = useState("connecting");
   const [shadow, setShadow] = useState(null);
   const [actionMsg, setActionMsg] = useState(null);
+  const [polled, setPolled] = useState(false);
 
   const wsRef = useRef(null);
   const pollRef = useRef(null);
+  const skipHashWrite = useRef(true);
 
   const selected = interactions.find((i) => i.interaction_id === selectedId);
 
@@ -61,9 +64,18 @@ export default function LiveContactConsole() {
 
   // Deep-link: Command Center can pre-select a live contact.
   useEffect(() => {
-    const pick = consumeSession(SS.consoleSelect);
+    const pick = parseLocationHash().params.get("id") || consumeSession(SS.consoleSelect);
     if (pick) setSelectedId(pick);
+    skipHashWrite.current = true;
   }, []);
+
+  useEffect(() => {
+    if (skipHashWrite.current) {
+      skipHashWrite.current = false;
+      return;
+    }
+    patchHashQuery({ id: selectedId || null });
+  }, [selectedId]);
 
   // ── Poll active interactions every 2s ────────────────────────────────
   useEffect(() => {
@@ -78,11 +90,18 @@ export default function LiveContactConsole() {
         const data = await r.json();
         if (!mounted) return;
         const list = data.interactions || [];
+        setPolled(true);
         setInteractions(list);
-        // Keep deep-linked selection if still active.
+        setTakenOver((prev) => {
+          const next = { ...prev };
+          for (const it of list) {
+            if (it.supervised) next[it.interaction_id] = true;
+          }
+          return next;
+        });
         setSelectedId((cur) => {
-          if (cur && list.some((i) => i.interaction_id === cur)) return cur;
-          return cur;
+          if (cur) return cur;
+          return list[0]?.interaction_id || null;
         });
       } catch {
         /* network blip — try again next tick */
@@ -144,8 +163,11 @@ export default function LiveContactConsole() {
       } else if (msg.type === "frustration_update") {
         const iid = msg.interaction_id;
         setFrustration((prev) => ({ ...prev, [iid]: msg.value }));
+      } else if (msg.type === "interaction_ended") {
+        const iid = msg.interaction_id;
+        setInteractions((prev) => prev.filter((i) => i.interaction_id !== iid));
       } else if (msg.type === "error") {
-        console.warn("console ws error:", msg.detail);
+        setActionMsg(String(msg.detail || "console error"));
       }
     }
 
@@ -218,24 +240,65 @@ export default function LiveContactConsole() {
     if (!selectedId && sorted.length) setSelectedId(sorted[0].interaction_id);
   }, [sorted, selectedId]);
 
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/interactions/${encodeURIComponent(selectedId)}`, {
+          headers: apiHeaders(),
+        });
+        if (!r.ok || cancelled) return;
+        const d = await r.json();
+        const history = Array.isArray(d.turns) ? d.turns : [];
+        if (!history.length) return;
+        setTurns((prev) => {
+          if ((prev[selectedId] || []).length > 0) return prev;
+          return {
+            ...prev,
+            [selectedId]: history.map((t) => ({
+              speaker: t.speaker,
+              text: t.text,
+              ts: t.ts,
+              turn_id: t.turn_id,
+            })),
+          };
+        });
+      } catch {
+        /* keep WS-only transcript */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
+
   // ── Takeover / release ─────────────────────────────────────────────
   async function takeover(iid) {
-    const r = await fetch(`/api/interactions/${iid}/takeover`, {
-      method: "POST",
-      headers: apiHeaders(),
-    });
-    if (r.ok) {
+    try {
+      const r = await fetch(`/api/interactions/${iid}/takeover`, {
+        method: "POST",
+        headers: apiHeaders(),
+      });
+      if (!r.ok) throw new Error(`takeover failed (${r.status})`);
       setTakenOver((t) => ({ ...t, [iid]: true }));
+      setActionMsg(null);
+    } catch (e) {
+      setActionMsg(String(e.message || e));
     }
   }
   async function release(iid) {
-    const r = await fetch(`/api/interactions/${iid}/release`, {
-      method: "POST",
-      headers: apiHeaders(),
-    });
-    if (r.ok) {
+    try {
+      const r = await fetch(`/api/interactions/${iid}/release`, {
+        method: "POST",
+        headers: apiHeaders(),
+      });
+      if (!r.ok) throw new Error(`release failed (${r.status})`);
       setTakenOver((t) => ({ ...t, [iid]: false }));
       setReply("");
+      setActionMsg(null);
+    } catch (e) {
+      setActionMsg(String(e.message || e));
     }
   }
 
@@ -252,7 +315,10 @@ export default function LiveContactConsole() {
         })
       );
       setReply("");
+      setActionMsg(null);
+      return;
     }
+    setActionMsg("Live socket is not connected — cannot send.");
   }
 
   function packLabeledSlots(iid) {
@@ -292,7 +358,10 @@ export default function LiveContactConsole() {
     ? frustration[selectedId] ?? selected?.last_frustration ?? selected?.peak_frustration ?? 0
     : 0;
   const isFlagged = selFrustration > FRUSTRATION_THRESHOLD;
-  const isTakenOver = selectedId ? !!takenOver[selectedId] : false;
+  const isTakenOver = selectedId
+    ? !!(takenOver[selectedId] || selected?.supervised)
+    : false;
+  const contactEnded = polled && Boolean(selectedId && !selected);
 
   return (
     <div className="page-enter">
@@ -304,14 +373,23 @@ export default function LiveContactConsole() {
           </p>
         </div>
         <div className="page-actions">
-          <button type="button" className="ghost" onClick={() => (window.location.hash = "call")}>
-            Open voice agent
-          </button>
-          <button type="button" className="primary" onClick={() => (window.location.hash = "warning")}>
-            Simulate traffic
-          </button>
+          {sorted.length > 0 && (
+            <button type="button" className="ghost" onClick={() => goHash("call")}>
+              Open voice agent
+            </button>
+          )}
         </div>
       </header>
+
+      {actionMsg && (
+        <div
+          className={"banner " + (bannerTone(actionMsg) === "error" ? "banner-error" : "banner-ok")}
+          role={bannerTone(actionMsg) === "error" ? "alert" : "status"}
+          style={{ marginBottom: 12 }}
+        >
+          {actionMsg}
+        </div>
+      )}
 
       <div className="ops-ribbon" aria-live="polite">
         <span
@@ -364,14 +442,10 @@ export default function LiveContactConsole() {
           <h3>No live contacts</h3>
           <p>
             When a call is active it appears here with transcript, slots, and agent activity.
-            Start a contact from Voice agent, or simulate traffic from Early warning.
           </p>
           <div className="row">
-            <button type="button" className="primary" onClick={() => (window.location.hash = "call")}>
+            <button type="button" className="primary" onClick={() => goHash("call")}>
               Start voice contact
-            </button>
-            <button type="button" className="ghost" onClick={() => (window.location.hash = "warning")}>
-              Simulate traffic
             </button>
           </div>
         </div>
@@ -436,7 +510,20 @@ export default function LiveContactConsole() {
         </div>
       )}
 
-      {!selected ? (
+      {contactEnded ? (
+        <div className="hero-empty">
+          <h3>This contact ended</h3>
+          <p>It is no longer live. Open the case queue or start a new voice contact.</p>
+          <div className="row">
+            <button type="button" className="primary" onClick={() => openCases({ status: "open" })}>
+              Open case queue
+            </button>
+            <button type="button" className="ghost" onClick={() => goHash("call")}>
+              Voice agent
+            </button>
+          </div>
+        </div>
+      ) : !selected ? (
         sorted.length > 0 && (
           <div className="hero-empty">
             <h3>Select a contact</h3>
@@ -575,6 +662,8 @@ export default function LiveContactConsole() {
                     {shadow.shadow?.status ? ` · ${shadow.shadow.status}` : ""}
                   </span>
                 </div>
+                <details style={{ marginTop: 8 }}>
+                  <summary className="muted" style={{ cursor: "pointer", fontSize: 12 }}>Flag quality</summary>
                 <div className="row" style={{ marginTop: 8, gap: 8 }}>
                   <button
                     type="button"
@@ -621,6 +710,7 @@ export default function LiveContactConsole() {
                     Mark sentiment wrong
                   </button>
                 </div>
+                </details>
                 {actionMsg && (
                   <p className="sub" style={{ marginTop: 8 }}>{actionMsg}</p>
                 )}

@@ -347,7 +347,7 @@ button.account-foot:hover {
   opacity: 1;
 }
 
-/* Light mode — warm paper, not teal daylight */
+/* Light mode — stone paper, not cream */
 :root[data-theme="light"] .sidebar,
 :root[data-theme="light"] .main,
 :root[data-theme="light"] .topbar {
@@ -378,16 +378,32 @@ button.account-foot:hover {
   border: none !important;
   color: var(--ink);
 }
-:root[data-theme="light"] button:not(.primary):not(.danger) {
-  background: var(--bg-hover);
+:root[data-theme="light"] button:not(.primary):not(.danger):not(.nav-item):not(.account-foot):not(.collapse-btn):not(.tab):not(.filter-chip):not(.stat-card-btn):not(.icon-btn):not(.live-row-btn):not(.risk-row) {
+  background: var(--bg-panel);
   color: var(--ink);
   border-color: var(--edge);
 }
-:root[data-theme="light"] button:not(.primary):not(.danger):hover:not(:disabled) {
+:root[data-theme="light"] button:not(.primary):not(.danger):not(.nav-item):not(.account-foot):not(.collapse-btn):hover:not(:disabled) {
   background: color-mix(in srgb, var(--bg-hover) 80%, var(--ink) 8%);
 }
 :root[data-theme="light"] button.ghost {
   background: transparent;
+}
+:root[data-theme="light"] .nav-item {
+  background: transparent !important;
+  color: var(--ink-soft);
+}
+:root[data-theme="light"] .nav-item:hover {
+  background: var(--bg-hover) !important;
+  color: var(--ink);
+}
+:root[data-theme="light"] .nav-item.active {
+  background: var(--bg-hover) !important;
+  color: var(--ink);
+}
+:root[data-theme="light"] .account-foot,
+:root[data-theme="light"] .collapse-btn {
+  background: transparent !important;
 }
 :root[data-theme="light"] button.primary,
 :root[data-theme="light"] button.voice-cta.primary {
@@ -406,15 +422,6 @@ button.account-foot:hover {
   background: var(--bg-panel);
   border-color: var(--edge);
   color: var(--ink);
-}
-:root[data-theme="light"] .nav-item {
-  color: var(--ink-soft);
-}
-:root[data-theme="light"] .nav-item:hover,
-:root[data-theme="light"] .nav-item.active {
-  background: var(--bg-hover) !important;
-  color: var(--ink);
-  box-shadow: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

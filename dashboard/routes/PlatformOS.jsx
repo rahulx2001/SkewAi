@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
+import { hashQueryObject, patchHashQuery } from "../src/ui/opsActions.js";
+import { bannerTone } from "../src/ui/Feedback.jsx";
 import {
+  displayCopy,
   proposalDetailParts,
   proposalTitle,
   statusLabel,
@@ -12,8 +15,9 @@ import {
  * continuous learning, experiments, governance.
  * Deterministic / offline-honest — not multi-provider LLM SaaS.
  */
-export default function PlatformOS() {
-  const [tab, setTab] = useState("learning");
+export default function PlatformOS({ embedded }) {
+  const tabFromHash = hashQueryObject().view;
+  const tab = ["learning", "experiments", "governance"].includes(tabFromHash) ? tabFromHash : "learning";
   const [msg, setMsg] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -152,8 +156,30 @@ export default function PlatformOS() {
     }
   }
 
+  async function completeExperiment(id) {
+    setLoading(true);
+    setMsg(null);
+    try {
+      const r = await fetch(`/api/v3/experiments/${encodeURIComponent(id)}/complete`, {
+        method: "POST",
+        headers: apiHeaders(),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      setExpReport(await r.json());
+      await loadExperiments();
+      setMsg("Experiment completed.");
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function loadStamp() {
-    if (!stampId.trim()) return;
+    if (!stampId.trim()) {
+      setMsg("Paste an interaction id");
+      return;
+    }
     setLoading(true);
     try {
       const r = await fetch(
@@ -185,17 +211,22 @@ export default function PlatformOS() {
 
   return (
     <div>
-      <header className="page-header">
-        <div>
-          <h1>Platform OS</h1>
-          <p className="sub">
-            Learning proposals, experiments, and deployment governance — deterministic, offline-honest.
-          </p>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="page-header">
+          <div>
+            <h1>Platform OS</h1>
+            <p className="sub">
+              Learning proposals, experiments, and deployment governance — deterministic, offline-honest.
+            </p>
+          </div>
+        </header>
+      )}
 
       {msg && (
-        <div className="banner banner-ok" role="status">
+        <div
+          className={"banner " + (bannerTone(msg) === "error" ? "banner-error" : "banner-ok")}
+          role={bannerTone(msg) === "error" ? "alert" : "status"}
+        >
           {msg}{" "}
           <button type="button" className="ghost" onClick={() => setMsg(null)}>
             Dismiss
@@ -211,7 +242,7 @@ export default function PlatformOS() {
             role="tab"
             aria-selected={tab === t.id}
             className={"tab" + (tab === t.id ? " active" : "")}
-            onClick={() => setTab(t.id)}
+            onClick={() => patchHashQuery({ view: t.id })}
           >
             {t.label}
           </button>
@@ -274,23 +305,23 @@ export default function PlatformOS() {
               ) : detailParts.raw ? (
                 <p className="muted" style={{ fontSize: 12 }}>{detailParts.raw}</p>
               ) : null}
-              <p style={{ fontSize: 13 }}><strong>Suggested:</strong> {p.suggested_change}</p>
+              <p style={{ fontSize: 13 }}><strong>Suggested:</strong> {displayCopy(p.suggested_change)}</p>
               <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <span className="muted" style={{ fontSize: 12 }}>
                   Impact {p.impact_score ?? "—"} · {weaknessLabel(p.weakness_class)}
                 </span>
                 {p.status === "proposed" && (
                   <>
-                    <button className="primary" onClick={() => reviewProposal(p.proposal_id, "approved")}>
+                    <button className="primary" disabled={loading} onClick={() => reviewProposal(p.proposal_id, "approved")}>
                       Approve
                     </button>
-                    <button className="ghost" onClick={() => reviewProposal(p.proposal_id, "rejected")}>
+                    <button className="danger" disabled={loading} onClick={() => reviewProposal(p.proposal_id, "rejected")}>
                       Reject
                     </button>
                   </>
                 )}
                 {p.status === "approved" && (
-                  <button className="primary" onClick={() => reviewProposal(p.proposal_id, "deployed")}>
+                  <button className="primary" disabled={loading} onClick={() => reviewProposal(p.proposal_id, "deployed")}>
                     Mark deployed
                   </button>
                 )}
@@ -338,12 +369,26 @@ export default function PlatformOS() {
             </div>
           )}
           <h3 style={{ fontSize: 13 }}>Experiments</h3>
+          {experiments.length === 0 && (
+            <div className="empty" style={{ marginBottom: 12 }}>No experiments yet.</div>
+          )}
           {experiments.map((e) => (
             <div key={e.experiment_id} className="panel" style={{ marginBottom: 8 }}>
               <strong>{e.name}</strong>{" "}
               <span className="chip">{e.status}</span>{" "}
               <span className="chip teal">{e.mode}</span>
               <div className="mono muted" style={{ fontSize: 11 }}>{e.experiment_id}</div>
+              {e.status !== "completed" && (
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ marginTop: 8 }}
+                  disabled={loading}
+                  onClick={() => completeExperiment(e.experiment_id)}
+                >
+                  Complete
+                </button>
+              )}
             </div>
           ))}
           {expReport && (

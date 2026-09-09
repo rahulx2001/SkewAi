@@ -18,7 +18,7 @@ ID ?=
 
 .PHONY: help frontline-db seed-domains pack-lint pack-init contact simulate eval-frontline \
         audit ask digest test clean ingest-scale ingest-nhtsa backtest verify-chain ci \
-        dashboard-build compileall run-hardened security-test
+        dashboard-build compileall run run-hardened security-test
 
 help:
 	@echo "Frontline v2 — common targets:"
@@ -44,7 +44,7 @@ help:
 	@echo "  make clean                    Drop DuckDB files and generated fixtures"
 
 # ── Hardened local run (SOC 2 engineering baseline) ─────────────────────────
-run-hardened:
+run-hardened: dashboard-build
 	@test -n "$$FRONTLINE_API_KEY" || (echo "Set FRONTLINE_API_KEY"; exit 1)
 	@test -n "$$SESSION_SECRET" || (echo "Set SESSION_SECRET"; exit 1)
 	PILOT_HARDENED=1 FRONTLINE_AUTH_REQUIRED=1 FRONTLINE_OPEN_MODE=0 \
@@ -158,6 +158,10 @@ compileall:
 
 dashboard-build:
 	cd dashboard && npm run build && test -f dist/index.html
+
+# Rebuild UI then serve the one-box console (refuses a missing dist/index.html).
+run: dashboard-build
+	$(PY) -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 
 # Full local mirror of .github/workflows/frontline.yml core jobs.
 # Does NOT call frontline-db (that wipes pilot data); pack-lint is file-based.

@@ -19,8 +19,20 @@ def _count(sql: str, params: list[Any] | None = None) -> int:
 
 
 def _open_cases() -> dict[str, Any]:
-    n = _count("SELECT COUNT(*) FROM cases WHERE status IN ('open', 'pending_followup')")
-    return {"value": n, "unit": "cases", "source_table": "cases", "filter": "status open|pending_followup"}
+    n = _count(
+        """
+        SELECT COUNT(*) FROM cases
+        WHERE status IN ('open', 'pending_followup')
+          AND (interaction_id IS NULL OR interaction_id NOT IN
+               (SELECT interaction_id FROM interactions WHERE channel = 'simulated'))
+        """
+    )
+    return {
+        "value": n,
+        "unit": "cases",
+        "source_table": "cases",
+        "filter": "status open|pending_followup, exclude simulated",
+    }
 
 
 def _open_investigations() -> dict[str, Any]:
@@ -29,8 +41,15 @@ def _open_investigations() -> dict[str, Any]:
 
 
 def _contacts_started() -> dict[str, Any]:
-    n = _count("SELECT COUNT(*) FROM interactions")
-    return {"value": n, "unit": "contacts", "source_table": "interactions", "filter": "all"}
+    n = _count(
+        "SELECT COUNT(*) FROM interactions WHERE COALESCE(channel, '') <> 'simulated'"
+    )
+    return {
+        "value": n,
+        "unit": "contacts",
+        "source_table": "interactions",
+        "filter": "exclude simulated",
+    }
 
 
 def _trusted_records() -> dict[str, Any]:

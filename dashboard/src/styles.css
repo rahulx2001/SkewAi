@@ -935,7 +935,7 @@ ul.plain li {
   font-size: 11.5px;
   font-weight: 600;
   color: var(--ink-soft);
-  border-bottom: 1px solid var(--edge-strong);
+  border-bottom: none;
   padding: 2px 0;
   margin-right: 8px;
   border-radius: 0;
@@ -1419,6 +1419,13 @@ ul.plain li {
   border: 1px solid var(--edge);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
+}
+button.risk-row {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .risk-rank {
   font-family: var(--mono);
@@ -1935,6 +1942,14 @@ ul.plain li {
   gap: 8px;
   margin-bottom: 16px;
 }
+@media (max-width: 640px) {
+  .funnel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .snapshot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .funnel-step {
   padding: 12px;
   border: 1px solid var(--edge);
@@ -2119,6 +2134,89 @@ ul.plain li {
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
+}
+@media (max-width: 640px) {
+  .risk-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.case-card-list {
+  display: none;
+}
+.case-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: inherit;
+  font: inherit;
+}
+.case-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+.case-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+.case-card-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.case-card-cat {
+  font-weight: 600;
+  font-size: 14px;
+}
+.case-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+@media (max-width: 860px) {
+  .case-table-desktop {
+    display: none;
+  }
+  .case-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+  }
+}
+
+mark {
+  background: var(--accent-muted);
+  color: inherit;
+  padding: 0 0.12em;
+  border-radius: 2px;
+  box-decoration-break: clone;
+}
+
+.lab-triple {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+.lab-triple > .panel {
+  margin: 0;
+  min-height: 140px;
+}
+@media (max-width: 900px) {
+  .lab-triple {
+    grid-template-columns: 1fr;
+  }
 }
 .risk-card {
   padding: 16px;

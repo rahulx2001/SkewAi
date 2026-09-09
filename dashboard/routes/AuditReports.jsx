@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
+import { hashQueryObject, patchHashQuery } from "../src/ui/opsActions.js";
 
 // ── Minimal markdown renderer (basic #, ##, ###, lists, tables, code) ──
 // Returns an array of React nodes. Intentionally simple — no library.
@@ -164,6 +165,10 @@ function splitRow(line) {
 // SECURITY: hrefs are allowlisted to http/https/relative only — javascript:,
 // data:, vbscript: etc. render as plain text to block stored-XSS via audit
 // markdown (which embeds customer/case text).
+function isTestAudit(id) {
+  return /int_test_|_test_/i.test(String(id || ""));
+}
+
 function safeHref(raw) {
   const href = String(raw || "").trim();
   if (!href) return null;
@@ -219,7 +224,7 @@ function renderInline(text) {
   return <>{tokens}</>;
 }
 
-export default function AuditReports() {
+export default function AuditReports({ embedded }) {
   const [audits, setAudits] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
@@ -230,22 +235,33 @@ export default function AuditReports() {
   const [exportStart, setExportStart] = useState("");
   const [exportEnd, setExportEnd] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [showTest, setShowTest] = useState(false);
 
-  async function loadAudits() {
+  async function loadAudits({ append = false, offset = 0 } = {}) {
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch("/api/frontline/audits?limit=100", {
+      const r = await fetch(`/api/frontline/audits?limit=100&offset=${offset}`, {
         headers: apiHeaders(),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       const list = d.audits || [];
-      setAudits(list);
-      setSelectedId((cur) => {
-        if (cur && list.some((a) => a.interaction_id === cur)) return cur;
-        return list[0]?.interaction_id || null;
-      });
+      setAudits((prev) => (append ? [...prev, ...list] : list));
+      const pag = d.pagination || {};
+      setHasMore(Boolean(pag.has_more));
+      setNextOffset(pag.next_offset != null ? pag.next_offset : offset + list.length);
+      if (!append) {
+        setSelectedId((cur) => {
+          if (cur && list.some((a) => a.interaction_id === cur)) return cur;
+          const pre = hashQueryObject().id;
+          if (pre) return pre;
+          const vis = list.filter((a) => !isTestAudit(a.interaction_id));
+          return vis[0]?.interaction_id || null;
+        });
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -291,14 +307,23 @@ export default function AuditReports() {
 
   useEffect(() => {
     loadAudits();
-    // If navigated from CaseQueue with a preselected audit id, open it.
-    const preselect = sessionStorage.getItem("frontline:audit_interaction_id");
+    const preselect =
+      sessionStorage.getItem("frontline:audit_interaction_id") || hashQueryObject().id;
     if (preselect) {
       sessionStorage.removeItem("frontline:audit_interaction_id");
       openAudit(preselect);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (selectedId) patchHashQuery({ id: selectedId });
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (selectedId) openAudit(selectedId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   async function openAudit(interactionId) {
     setSelectedId(interactionId);
@@ -322,9 +347,13 @@ export default function AuditReports() {
   // Filter for mismatch verdict: we don't have a verdict column in the audits
   // list response, so we filter client-side by checking the loaded report
   // for "MISMATCH". For unloaded rows we keep them (so user can click to reveal).
-  const visibleAudits = mismatchOnly
-    ? audits.filter((a) => a._hasMismatch)
-    : audits;
+  // Keep unopened rows (no verdict yet). Hide only confirmed non-mismatches.
+  const testHidden = audits.filter((a) => isTestAudit(a.interaction_id)).length;
+  const visibleAudits = audits.filter((a) => {
+    if (!showTest && isTestAudit(a.interaction_id)) return false;
+    if (mismatchOnly && a._hasMismatch === false) return false;
+    return true;
+  });
 
   // If we just loaded a report and mismatchOnly is on, mark whether it has a mismatch.
   useEffect(() => {
@@ -343,9 +372,11 @@ export default function AuditReports() {
     <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, minHeight: "70vh" }}>
       {/* ── List ─────────────────────────────────────────────────────── */}
       <div className="panel" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div className="page-header" style={{ padding: 16, margin: 0 }}>
-          <h1 style={{ fontSize: 16 }}>Audit Reports</h1>
-        </div>
+        {!embedded && (
+          <div className="page-header" style={{ padding: 16, margin: 0 }}>
+            <h1 style={{ fontSize: 16 }}>Audit Reports</h1>
+          </div>
+        )}
         <div style={{ padding: "0 16px 12px" }}>
           <label className="check-row" style={{ fontSize: 12 }}>
             <input
@@ -354,8 +385,19 @@ export default function AuditReports() {
               onChange={(e) => setMismatchOnly(e.target.checked)}
               aria-label="Show only MISMATCH verdicts"
             />
-            <span className="muted">show only MISMATCH verdicts</span>
+            <span className="muted">Mismatches only</span>
           </label>
+          {testHidden > 0 && (
+            <label className="check-row" style={{ fontSize: 12, marginTop: 8 }}>
+              <input
+                type="checkbox"
+                checked={showTest}
+                onChange={(e) => setShowTest(e.target.checked)}
+                aria-label="Show test reports"
+              />
+              <span className="muted">Show {testHidden} test reports</span>
+            </label>
+          )}
           <div style={{ marginTop: 10, fontSize: 11 }}>
             <div className="muted" style={{ marginBottom: 4 }}>
               Pilot export (JSON / CSV + SHA256 manifest)
@@ -400,14 +442,24 @@ export default function AuditReports() {
         <div className="scroll-y" style={{ flex: 1 }}>
           {loading && <div className="empty">loading…</div>}
           {!loading && visibleAudits.length === 0 && (
-            <div className="empty">No audit reports.</div>
+            <div className="empty">
+              {testHidden > 0 && !showTest ? "Test contacts are hidden." : "No audit reports."}
+            </div>
           )}
           {visibleAudits.map((a) => (
             <div
               key={a.interaction_id}
+              role="button"
+              tabIndex={0}
               className={"interaction-card" + (a.interaction_id === selectedId ? " selected" : "")}
               style={{ margin: "0 12px 8px" }}
               onClick={() => openAudit(a.interaction_id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openAudit(a.interaction_id);
+                }
+              }}
             >
               <div className="top">
                 <span className="mono" style={{ fontSize: 11 }}>
@@ -415,18 +467,41 @@ export default function AuditReports() {
                 </span>
                 {a._hasMismatch && <span className="chip red">MISMATCH</span>}
               </div>
-              <div className="meta" style={{ fontSize: 11, color: "var(--text-faint)" }}>
-                {a.report_name || (a.interaction_id ? `${a.interaction_id}.md` : "")}
+              <div className="meta" style={{ fontSize: 11, color: "var(--ink-faint)" }}>
+                {isTestAudit(a.interaction_id) ? "Test contact" : "Contact audit"}
               </div>
             </div>
           ))}
+          {hasMore && (showTest || visibleAudits.length > 0) && (
+            <div style={{ padding: "8px 12px" }}>
+              <button
+                type="button"
+                className="ghost"
+                disabled={loading}
+                onClick={() => loadAudits({ append: true, offset: nextOffset })}
+              >
+                {loading ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
       {/* ── Report viewer ─────────────────────────────────────────────── */}
       <div className="panel" style={{ overflow: "auto", maxHeight: "78vh" }}>
-        {!selectedId && <div className="empty">Select a report from the left.</div>}
+        {!selectedId && (
+          <div className="empty">
+            {visibleAudits.length === 0
+              ? showTest
+                ? "No audit reports."
+                : "No operator reports yet. Test contacts are hidden."
+              : "Pick a report from the list."}
+          </div>
+        )}
         {selectedId && reportLoading && <div className="empty">loading report…</div>}
+        {selectedId && !reportLoading && report === null && error && (
+          <div className="empty err-text">{error}</div>
+        )}
         {selectedId && !reportLoading && report !== null && (
           <>
             <div className="row" style={{ marginBottom: 14, justifyContent: "space-between" }}>

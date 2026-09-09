@@ -13,13 +13,12 @@ const NAV = [
   { hash: "call", label: /Voice agent/i },
   { hash: "console", label: /Live console/i },
   { hash: "cases", label: /Case queue/i },
-  { hash: "insights", label: /Insights/i },
   { hash: "warning", label: /Early warning/i },
-  { hash: "studio", label: /Feature studio/i },
-  { hash: "enterprise", label: /Enterprise ops/i },
-  { hash: "audits", label: /Audit reports/i },
-  { hash: "platform", label: /Platform OS/i },
+  { hash: "audits", label: /Trust/i },
+  { hash: "platform", label: /Platform/i },
   { hash: "settings", label: /Settings/i },
+  { hash: "insights", label: /Early warning/i },
+  { hash: "studio", label: /Settings/i },
 ];
 
 async function seedApiKey(page) {

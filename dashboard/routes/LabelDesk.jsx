@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
+import { humanizeKey } from "../src/ui/labels.js";
 
 const DEFAULT_CLASSES = [
   "paraphrase_positive",
@@ -14,8 +15,8 @@ const DEFAULT_CLASSES = [
   "cross_entity_same_symptom",
 ];
 
-export default function LabelDesk() {
-  const [annotator, setAnnotator] = useState("human-");
+export default function LabelDesk({ embedded }) {
+  const [annotator, setAnnotator] = useState("human-operator");
   const [item, setItem] = useState(null);
   const [classes, setClasses] = useState(DEFAULT_CLASSES);
   const [chosen, setChosen] = useState("");
@@ -27,7 +28,7 @@ export default function LabelDesk() {
 
   // Adjudication state
   const [adjEvalId, setAdjEvalId] = useState("");
-  const [adjAnnotator, setAdjAnnotator] = useState("adjudicator-lead");
+  const [adjAnnotator, setAdjAnnotator] = useState("human-adjudicator");
   const [adjLabel, setAdjLabel] = useState("paraphrase_positive");
   const [adjNotes, setAdjNotes] = useState("");
   const [adjStatus, setAdjStatus] = useState("");
@@ -58,7 +59,11 @@ export default function LabelDesk() {
       { headers: apiHeaders() }
     );
     if (!r.ok) {
-      setStatus("Could not load an item.");
+      setStatus(
+        r.status === 422
+          ? "Annotator id must be at least 7 characters (e.g. human-you)."
+          : "Could not load an item.",
+      );
       return;
     }
     const data = await r.json();
@@ -69,6 +74,11 @@ export default function LabelDesk() {
     setChosen("");
     if (!data.item) setStatus("Queue empty.");
   }, [annotator]);
+
+  useEffect(() => {
+    loadNext();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function submit(e) {
     e.preventDefault();
@@ -108,7 +118,7 @@ export default function LabelDesk() {
         }),
       });
       if (!r.ok) {
-        setAdjStatus("Adjudication failed. Ensure eval_id exists and adjudicator_id is set.");
+        setAdjStatus("Adjudication failed. Adjudicator id must start with human- and eval_id must exist.");
         return;
       }
       setAdjStatus("Adjudication recorded successfully.");
@@ -126,12 +136,14 @@ export default function LabelDesk() {
 
   return (
     <div className="page">
-      <header className="page-head">
-        <h1>Eval Labels & Quality Gates</h1>
-        <p className="faint">
-          Blind human annotation and Cohen's Kappa agreement gates. Annotators evaluate query-candidate pairs without model hints.
-        </p>
-      </header>
+      {!embedded && (
+        <header className="page-head">
+          <h1>Eval Labels & Quality Gates</h1>
+          <p className="faint">
+            Blind human annotation and Cohen's Kappa agreement gates. Annotators evaluate query-candidate pairs without model hints.
+          </p>
+        </header>
+      )}
 
       {/* Agreement & Acceptance Gate Summary */}
       <div className="panel" style={{ maxWidth: 880, marginBottom: 24 }}>
@@ -200,7 +212,7 @@ export default function LabelDesk() {
                 <tbody>
                   {Object.entries(agr.per_class).map(([cls, stat]) => (
                     <tr key={cls} style={{ borderTop: "1px solid var(--edge)" }}>
-                      <td style={{ padding: "6px 10px", fontFamily: "monospace" }}>{cls}</td>
+                      <td style={{ padding: "6px 10px" }}>{humanizeKey(cls)}</td>
                       <td style={{ padding: "6px 10px" }}>{stat.n_paired}</td>
                       <td style={{ padding: "6px 10px" }}>
                         {stat.cohens_kappa !== null && stat.cohens_kappa !== undefined ? Number(stat.cohens_kappa).toFixed(3) : "—"}
@@ -234,7 +246,13 @@ export default function LabelDesk() {
             aria-label="Annotator id"
           />
         </div>
-        <button type="button" className="primary" onClick={loadNext} style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          className="primary"
+          onClick={loadNext}
+          style={{ marginTop: 12 }}
+          disabled={annotator.trim().length < 7}
+        >
           Next unlabeled pair
         </button>
         {item && (
@@ -267,9 +285,9 @@ export default function LabelDesk() {
                     value={c}
                     checked={chosen === c}
                     onChange={() => setChosen(c)}
-                    aria-label={`Label class ${c}`}
+                    aria-label={`Label class ${humanizeKey(c)}`}
                   />{" "}
-                  {c}
+                  {humanizeKey(c)}
                 </label>
               ))}
             </fieldset>
@@ -278,7 +296,11 @@ export default function LabelDesk() {
             </button>
           </form>
         )}
-        {status && <p className="faint" style={{ marginTop: 12 }}>{status}</p>}
+        {status && (
+          <p className={/fail|could not|must/i.test(status) ? "err-text" : "faint"} style={{ marginTop: 12 }}>
+            {status}
+          </p>
+        )}
       </div>
 
       {/* Senior Adjudication Form */}
@@ -307,7 +329,7 @@ export default function LabelDesk() {
               id="adj-annotator"
               value={adjAnnotator}
               onChange={(e) => setAdjAnnotator(e.target.value)}
-              placeholder="adjudicator-lead"
+              placeholder="human-adjudicator"
               aria-label="Adjudicator identity"
               required
             />
@@ -330,7 +352,7 @@ export default function LabelDesk() {
             >
               {classes.map((c) => (
                 <option key={c} value={c}>
-                  {c}
+                  {humanizeKey(c)}
                 </option>
               ))}
             </select>

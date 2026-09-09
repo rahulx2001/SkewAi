@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { apiHeaders, sendWsAuth } from "../src/apiAuth.js";
+import { openCases } from "../src/ui/opsActions.js";
 import { IconHangup, IconMic, IconSpeaker } from "../src/icons.jsx";
 import {
   BARGE_IN_GRACE_MS,
@@ -654,7 +655,7 @@ export default function CallWidget() {
 
   const inCall = state !== CALL_STATE.IDLE && state !== CALL_STATE.ENDED;
   const canStart = state === CALL_STATE.IDLE || state === CALL_STATE.ENDED;
-  const showCompose = inCall || state === CALL_STATE.CONNECTING;
+  const showCompose = true;
 
   return (
     <div className="voice-page page-enter">
@@ -674,17 +675,7 @@ export default function CallWidget() {
           </p>
         </div>
         <div className="page-actions">
-          {canStart ? (
-            <button
-              type="button"
-              className="primary voice-cta"
-              onClick={startCall}
-              disabled={state === CALL_STATE.CONNECTING}
-            >
-              <IconMic />
-              Start voice call
-            </button>
-          ) : (
+          {!canStart && (
             <button type="button" className="danger voice-cta" onClick={endCall}>
               <IconHangup />
               End call
@@ -848,19 +839,24 @@ export default function CallWidget() {
               <input
                 aria-label="Type a customer turn"
                 placeholder={
-                  hasSR
-                    ? "Type a reply (or speak) — Enter to send"
-                    : "Type your reply — Enter to send"
+                  canStart
+                    ? hasSR
+                      ? "Start a call, then type or speak"
+                      : "Start a text contact, then type here"
+                    : hasSR
+                      ? "Type a reply (or speak) — Enter to send"
+                      : "Type your reply — Enter to send"
                 }
                 value={textFallback}
                 onChange={(e) => setTextFallback(e.target.value)}
-                disabled={state === CALL_STATE.ENDED || state === CALL_STATE.CONNECTING}
+                disabled={state === CALL_STATE.ENDED || state === CALL_STATE.CONNECTING || canStart}
                 autoComplete="off"
               />
               <button
                 type="submit"
-                className="primary"
+                className={inCall && textFallback.trim() ? "primary" : "ghost"}
                 disabled={
+                  !inCall ||
                   state === CALL_STATE.ENDED ||
                   state === CALL_STATE.CONNECTING ||
                   !textFallback.trim()
@@ -901,9 +897,7 @@ export default function CallWidget() {
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() => {
-                      window.location.hash = "cases";
-                    }}
+                    onClick={() => openCases({ caseId: ended.case_id, status: "open" })}
                   >
                     Open case queue
                   </button>
@@ -932,9 +926,9 @@ export default function CallWidget() {
             )}
           </div>
 
-          <div className="panel">
-            <h2>Capabilities</h2>
-            <div className="kvs">
+          <details className="panel">
+            <summary style={{ cursor: "pointer", fontWeight: 600 }}>This browser</summary>
+            <div className="kvs" style={{ marginTop: 12 }}>
               <span className="k">{capabilityLabel("stt")}</span>
               <span className="v">
                 {caps.sttOk ? (
@@ -974,20 +968,15 @@ export default function CallWidget() {
             </div>
             <p className="muted small" style={{ marginTop: 12 }}>
               While the agent speaks, recognition is paused so TTS is not captured as a customer
-              turn. Interrupt by speaking (barge-in) or typing.
+              turn. Interrupt by speaking or typing.
             </p>
-          </div>
+          </details>
 
           <div className="panel">
             <h2>Related</h2>
-            <div className="row">
-              <button type="button" className="ghost" onClick={() => (window.location.hash = "console")}>
-                Live console
-              </button>
-              <button type="button" className="ghost" onClick={() => (window.location.hash = "cases")}>
-                Case queue
-              </button>
-            </div>
+            <button type="button" className="ghost" onClick={() => (window.location.hash = "console")}>
+              Live console
+            </button>
           </div>
         </aside>
       </div>

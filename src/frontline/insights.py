@@ -20,16 +20,31 @@ def _cutoff_days(window_days: int):
     return utc_now() - timedelta(days=max(1, int(window_days)))
 
 
-def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> dict[str, Any]:
+def build_csat_themes(
+    *,
+    window_days: int = 7,
+    pack_id: str | None = None,
+    include_simulated: bool = False,
+) -> dict[str, Any]:
     """Satisfaction-and-themes surface from interactions + cases."""
     cutoff = _cutoff_days(window_days)
+    sim_ix = "" if include_simulated else " AND COALESCE(channel, '') <> 'simulated'"
+    sim_case = (
+        ""
+        if include_simulated
+        else (
+            " AND interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated')"
+        )
+    )
     with ops_con(read_only=True) as con:
         # Interactions in window
-        sql_ix = """
+        sql_ix = f"""
             SELECT interaction_id, pack_id, category, outcome, status,
                    peak_frustration, last_frustration, started_at
             FROM interactions
             WHERE started_at >= ?
+            {sim_ix}
         """
         params: list[Any] = [cutoff]
         if pack_id:
@@ -64,7 +79,7 @@ def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> di
             outcomes[str(i.get("outcome") or i.get("status") or "unknown")] += 1
 
         # Themes from categories (cases preferred, then interactions)
-        sql_cat = """
+        sql_cat = f"""
             SELECT category, COUNT(*) AS n,
                    AVG(CASE severity
                          WHEN 'Critical' THEN 3
@@ -73,6 +88,7 @@ def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> di
             FROM cases
             WHERE created_at >= ?
               AND category IS NOT NULL AND category != ''
+              {sim_case}
         """
         p2: list[Any] = [cutoff]
         if pack_id:
@@ -97,7 +113,7 @@ def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> di
                 for k, v in sorted(cat_counts.items(), key=lambda x: -x[1])[:10]
             ]
 
-        safety_n = con.execute(
+        safety_sql = (
             """
             SELECT COUNT(*) FROM cases
             WHERE created_at >= ?
@@ -105,7 +121,11 @@ def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> di
               AND safety_flags != '{}'
               AND safety_flags != 'null'
             """
-            + (" AND pack_id = ?" if pack_id else ""),
+            + sim_case
+            + (" AND pack_id = ?" if pack_id else "")
+        )
+        safety_n = con.execute(
+            safety_sql,
             ([cutoff, pack_id] if pack_id else [cutoff]),
         ).fetchone()[0]
 
@@ -113,6 +133,7 @@ def build_csat_themes(*, window_days: int = 7, pack_id: str | None = None) -> di
         "label": "friction_proxy_not_survey_nps",
         "window_days": window_days,
         "pack_id": pack_id,
+        "include_simulated": bool(include_simulated),
         "contact_count": n,
         "satisfaction_proxy": round(satisfaction_proxy, 3),
         "avg_peak_frustration": round(avg_frust, 3),
@@ -129,15 +150,24 @@ def build_product_gap_board(
     window_days: int = 14,
     pack_id: str | None = None,
     limit: int = 8,
+    include_simulated: bool = False,
 ) -> dict[str, Any]:
     """Top product issues + severity mix + drift (recent vs prior half-window)."""
     window_days = max(2, int(window_days))
     now = utc_now()
     cutoff = now - timedelta(days=window_days)
     mid = now - timedelta(days=window_days // 2)
+    sim_case = (
+        ""
+        if include_simulated
+        else (
+            " AND interaction_id NOT IN "
+            "(SELECT interaction_id FROM interactions WHERE channel = 'simulated')"
+        )
+    )
 
     with ops_con(read_only=True) as con:
-        sql = """
+        sql = f"""
             SELECT
               COALESCE(CAST(cluster_match_id AS VARCHAR), category, 'uncategorized') AS issue_key,
               cluster_match_id,
@@ -152,6 +182,7 @@ def build_product_gap_board(
               SUM(CASE WHEN created_at < ? AND severity = 'Critical' THEN 1 ELSE 0 END) AS prior_crit
             FROM cases
             WHERE created_at >= ?
+            {sim_case}
         """
         params: list[Any] = [mid, mid, mid, mid, cutoff]
         if pack_id:
@@ -207,6 +238,7 @@ def build_product_gap_board(
     return {
         "window_days": window_days,
         "pack_id": pack_id,
+        "include_simulated": bool(include_simulated),
         "top_issues": issues,
         "rising_issues": rising,
         "ts": utc_now().isoformat() + "Z",

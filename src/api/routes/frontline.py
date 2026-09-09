@@ -56,12 +56,12 @@ router = APIRouter(
 
 
 @router.get("/early-warning")
-async def early_warning(window_days: int = 7, include_simulated: bool = True) -> dict[str, Any]:
+async def early_warning(window_days: int = 7, include_simulated: bool = False) -> dict[str, Any]:
     """Clusters re-scored with live-contact counts joined to backtest lead-time stats."""
 
     def _load() -> dict[str, Any]:
         risk = live_risk(window_days=window_days, include_simulated=include_simulated)
-        funnel = case_funnel(window_days=window_days)
+        funnel = case_funnel(window_days=window_days, include_simulated=include_simulated)
         if not include_simulated:
             with ops_con(read_only=True) as con:
                 row = con.execute(
@@ -167,8 +167,10 @@ async def export_cases(
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
+    cluster: str | None = None,
     limit: int = Query(default=500, ge=1, le=2000),
     scrub_pii: bool = Query(default=True),
+    include_simulated: bool = Query(default=False),
     _role: str = Depends(get_role),
     _actor: str = Depends(get_actor),
 ):
@@ -196,7 +198,13 @@ async def export_cases(
                 headers={"Retry-After": str(retry_after)},
             )
     csv_text, count = build_cases_csv(
-        status=status, severity=severity, q=q, limit=limit, scrub_pii=scrub
+        status=status,
+        severity=severity,
+        q=q,
+        cluster=cluster,
+        limit=limit,
+        scrub_pii=scrub,
+        include_simulated=include_simulated,
     )
     if not scrub:
         log_dsr_export_audit(
@@ -226,6 +234,7 @@ async def list_cases(
     status: str | None = None,
     severity: str | None = None,
     q: str | None = None,
+    cluster: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = None,
@@ -275,6 +284,9 @@ async def list_cases(
             "OR c.description_summary ILIKE ? OR c.investigation_id ILIKE ?)"
         )
         params.extend([like, like, like, like, like])
+    if cluster and str(cluster).strip():
+        clauses.append("CAST(c.cluster_match_id AS VARCHAR) = ?")
+        params.append(str(cluster).strip())
     if not include_simulated:
         clauses.append("(i.channel IS NULL OR i.channel != 'simulated')")
     if clauses:
@@ -745,10 +757,6 @@ async def list_audits(
         out = []
         for f in slice_files:
             iid = f.stem
-            with ops_con(read_only=True) as con:
-                con.execute(
-                    "SELECT outcome FROM interactions WHERE interaction_id = ?", [iid]
-                ).fetchone()
             out.append({
                 "interaction_id": iid,
                 "report_name": f"{iid}.md",
@@ -873,11 +881,16 @@ async def wallboard(
 async def insights_csat(
     window_days: int = 7,
     pack_id: str | None = None,
+    include_simulated: bool = False,
 ) -> dict[str, Any]:
     """Satisfaction proxy + top themes from real contacts (not survey NPS)."""
     from src.frontline.insights import build_csat_themes
 
-    return build_csat_themes(window_days=window_days, pack_id=pack_id)
+    return build_csat_themes(
+        window_days=window_days,
+        pack_id=pack_id,
+        include_simulated=include_simulated,
+    )
 
 
 @router.get("/insights/product-gap")
@@ -885,12 +898,16 @@ async def insights_product_gap(
     window_days: int = 14,
     pack_id: str | None = None,
     limit: int = 8,
+    include_simulated: bool = False,
 ) -> dict[str, Any]:
     """Top product issues + severity mix + getting-worse drift."""
     from src.frontline.insights import build_product_gap_board
 
     return build_product_gap_board(
-        window_days=window_days, pack_id=pack_id, limit=limit
+        window_days=window_days,
+        pack_id=pack_id,
+        limit=limit,
+        include_simulated=include_simulated,
     )
 
 

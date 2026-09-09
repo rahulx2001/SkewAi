@@ -19,6 +19,51 @@ def client(reset_ops_db, seed_automotive_pack, monkeypatch):
         yield c
 
 
+def test_early_warning_defaults_exclude_simulated(client):
+    r = client.get("/api/frontline/early-warning")
+    assert r.status_code == 200
+    funnel = r.json()["funnel"]
+    assert funnel.get("include_simulated") is False
+
+
+def test_include_simulated_funnel_and_cases_contract(client):
+    off = client.get("/api/frontline/early-warning?include_simulated=false")
+    on = client.get("/api/frontline/early-warning?include_simulated=true")
+    assert off.status_code == 200
+    assert on.status_code == 200
+    assert off.json()["funnel"]["include_simulated"] is False
+    assert on.json()["funnel"]["include_simulated"] is True
+    cases_off = client.get("/api/frontline/cases?limit=5")
+    cases_on = client.get("/api/frontline/cases?limit=5&include_simulated=true")
+    assert cases_off.status_code == 200
+    assert cases_on.status_code == 200
+    assert "pagination" in cases_off.json()
+
+
+def test_wallboard_field_contract(client):
+    r = client.get("/api/frontline/wallboard")
+    assert r.status_code == 200
+    body = r.json()
+    for key in (
+        "active_contacts",
+        "open_cases",
+        "p1_open",
+        "critical_open",
+        "top_risk_clusters",
+        "live_contacts",
+    ):
+        assert key in body, key
+    assert isinstance(body["live_contacts"], list)
+    assert isinstance(body["top_risk_clusters"], list)
+
+
+def test_ui_index_serves_html_body(client):
+    r = client.get("/ui/")
+    assert r.status_code == 200
+    assert len(r.content) > 200
+    assert b"root" in r.content
+
+
 def test_health_reports_db_and_pack(client):
     r = client.get("/health")
     assert r.status_code == 200

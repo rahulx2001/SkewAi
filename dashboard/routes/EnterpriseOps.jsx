@@ -1,14 +1,29 @@
 import { useEffect, useState } from "react";
 import { apiHeaders } from "../src/apiAuth.js";
 import { formatDetailValue, humanizeKey } from "../src/ui/labels.js";
+import { hashQueryObject, patchHashQuery } from "../src/ui/opsActions.js";
+import { bannerTone } from "../src/ui/Feedback.jsx";
 
 /**
  * Enterprise ops surface: timeline, root-cause, copilot, risk, graph, memory,
  * scenarios, decision flow. Deterministic warehouse-backed (not generative LLM).
  */
-export default function EnterpriseOps() {
-  const [tab, setTab] = useState("timeline");
+export default function EnterpriseOps({ embedded }) {
+  const tabFromHash = hashQueryObject().view;
+  const tab = [
+    "timeline",
+    "root",
+    "copilot",
+    "risk",
+    "graph",
+    "memory",
+    "scenarios",
+    "decision",
+  ].includes(tabFromHash)
+    ? tabFromHash
+    : "timeline";
   const [msg, setMsg] = useState(null);
+  const [graphTried, setGraphTried] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // Shared interaction id for timeline / decision / root-cause
@@ -106,6 +121,7 @@ export default function EnterpriseOps() {
   }
 
   async function loadGraph() {
+    setGraphTried(false);
     try {
       const r = await fetch("/api/frontline/enterprise/graph?limit_cases=30", {
         headers: apiHeaders(),
@@ -113,7 +129,10 @@ export default function EnterpriseOps() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setGraph(await r.json());
     } catch (e) {
+      setGraph(null);
       setMsg(String(e));
+    } finally {
+      setGraphTried(true);
     }
   }
 
@@ -155,6 +174,11 @@ export default function EnterpriseOps() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
+  useEffect(() => {
+    if (tab === "risk") loadRisks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskPersist]);
+
   async function fetchTimeline() {
     if (!ixId.trim()) return;
     setLoading(true);
@@ -176,12 +200,14 @@ export default function EnterpriseOps() {
     }
   }
 
-  async function fetchRootOne() {
-    if (!ixId.trim()) return;
+  async function fetchRootOne(id) {
+    const iid = String(id || ixId || "").trim();
+    if (!iid) return;
     setLoading(true);
+    setMsg(null);
     try {
       const r = await fetch(
-        `/api/frontline/enterprise/root-cause/${encodeURIComponent(ixId.trim())}`,
+        `/api/frontline/enterprise/root-cause/${encodeURIComponent(iid)}`,
         { headers: apiHeaders() }
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -341,17 +367,22 @@ export default function EnterpriseOps() {
 
   return (
     <div>
-      <header className="page-header">
-        <div>
-          <h1>Enterprise ops</h1>
-          <p className="sub">
-            Timeline, root cause, risk, memory, and scenarios from the warehouse — not a CRM.
-          </p>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="page-header">
+          <div>
+            <h1>Enterprise ops</h1>
+            <p className="sub">
+              Timeline, root cause, risk, memory, and scenarios from the warehouse — not a CRM.
+            </p>
+          </div>
+        </header>
+      )}
 
       {msg && (
-        <div className="banner banner-ok" role="status">
+        <div
+          className={"banner " + (bannerTone(msg) === "error" ? "banner-error" : "banner-ok")}
+          role={bannerTone(msg) === "error" ? "alert" : "status"}
+        >
           {msg}{" "}
           <button type="button" className="ghost" onClick={() => setMsg(null)}>
             Dismiss
@@ -367,7 +398,7 @@ export default function EnterpriseOps() {
             role="tab"
             aria-selected={tab === t.id}
             className={"tab" + (tab === t.id ? " active" : "")}
-            onClick={() => setTab(t.id)}
+            onClick={() => patchHashQuery({ view: t.id })}
           >
             {t.label}
           </button>
@@ -401,7 +432,7 @@ export default function EnterpriseOps() {
               aria-label="Interaction id"
               style={{ flex: 1, minWidth: 180 }}
             />
-            <button className="ghost" onClick={loadRecentInteractions} disabled={loading}>
+            <button className="ghost" onClick={loadRecentInteractions} disabled={loading} aria-label="Refresh recent interactions">
               ⟳
             </button>
             {tab === "timeline" && (
@@ -543,7 +574,7 @@ export default function EnterpriseOps() {
                       style={{ cursor: "pointer" }}
                       onClick={() => {
                         setIxId(p.interaction_id);
-                        setRootCause(null);
+                        fetchRootOne(p.interaction_id);
                       }}
                     >
                       <td className="mono" style={{ fontSize: 11 }}>{p.interaction_id}</td>
@@ -648,7 +679,7 @@ export default function EnterpriseOps() {
                 />
                 persist snapshots
               </label>
-              <button className="ghost" onClick={loadRisks}>⟳</button>
+              <button className="ghost" onClick={loadRisks} aria-label="Refresh risk scores">⟳</button>
             </div>
           </div>
           {risks.length === 0 && (
@@ -740,9 +771,10 @@ export default function EnterpriseOps() {
         <div className="panel">
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
             <h2 style={{ margin: 0 }}>Ops knowledge graph</h2>
-            <button className="ghost" onClick={loadGraph}>⟳</button>
+            <button className="ghost" onClick={loadGraph} aria-label="Refresh graph">⟳</button>
           </div>
-          {!graph && <div className="empty">loading…</div>}
+          {!graphTried && <div className="empty">loading…</div>}
+          {graphTried && !graph && <div className="empty">Could not load graph.</div>}
           {graph && (
             <>
               <div className="row" style={{ gap: 10, marginBottom: 12 }}>
@@ -785,7 +817,10 @@ export default function EnterpriseOps() {
             <div className="result-card" style={{ marginBottom: 12 }}>
               <div className="result-card-title">Lookup result</div>
               <div className="kvs">
-                {Object.entries(memLookup)
+                {Object.entries({
+                  ...memLookup,
+                  ...(memLookup.memory && typeof memLookup.memory === "object" ? memLookup.memory : {}),
+                })
                   .filter(([, v]) => v !== null && typeof v !== "object")
                   .map(([k, v]) => (
                     <div key={k} style={{ display: "contents" }}>
