@@ -30,6 +30,7 @@ export default function CommandCenter({ refreshKey }) {
   const [loading, setLoading] = useState(true);
   const [simBusy, setSimBusy] = useState(false);
   const [tick, setTick] = useState(() => new Date());
+  const fetchOpenP1Cases = useCallback((limit = 8) => fetchCriticalCases(limit), []);
 
   const load = useCallback(async () => {
     setErr("");
@@ -42,7 +43,7 @@ export default function CommandCenter({ refreshKey }) {
         fetch(`/api/frontline/metrics?include_simulated=${includeSimQuery()}`, { headers: h }),
         fetch("/api/frontline/usage", { headers: h }),
         fetch("/api/frontline/ops/drain", { headers: h }),
-        fetchCriticalCases(8),
+        fetchOpenP1Cases(8),
       ]);
       if (!a.ok) throw new Error(`health ${a.status}`);
       setHealth(await a.json());
@@ -412,12 +413,14 @@ export default function CommandCenter({ refreshKey }) {
               <span className="v mono">{usage.tenant_id}</span>
               <span className="k">month</span>
               <span className="v mono">{usage.month}</span>
-              {Object.entries(usage.metrics || {}).map(([k, v]) => (
+              {Object.entries(usage.metrics || {})
+                .filter(([k]) => k !== "ts")
+                .map(([k, v]) => (
                 <div key={k} style={{ display: "contents" }}>
                   <span className="k">{k}</span>
                   <span className="v mono">{v}</span>
                 </div>
-              ))}
+                ))}
             </div>
           ) : (
             <div className="empty">No usage rows yet — contacts still count from interactions.</div>

@@ -3,12 +3,18 @@ import CallWidget from "../routes/CallWidget.jsx";
 import LiveContactConsole from "../routes/LiveContactConsole.jsx";
 import CaseQueue from "../routes/CaseQueue.jsx";
 import EarlyWarningBoard from "../routes/EarlyWarningBoard.jsx";
+import InsightsBoard from "../routes/InsightsBoard.jsx";
+import FeatureStudio from "../routes/FeatureStudio.jsx";
 import Settings from "../routes/Settings.jsx";
 import CommandCenter from "../routes/CommandCenter.jsx";
 import SignIn from "../routes/SignIn.jsx";
 import UserJourneyGuide from "../routes/UserJourneyGuide.jsx";
 import TrustDesk from "../routes/TrustDesk.jsx";
-import PlatformDesk from "../routes/PlatformDesk.jsx";
+import TrustPipeline from "../routes/TrustPipeline.jsx";
+import EnterpriseOps from "../routes/EnterpriseOps.jsx";
+import QualityEconomics from "../routes/QualityEconomics.jsx";
+import PackBuilder from "../routes/PackBuilder.jsx";
+import PlatformOS from "../routes/PlatformOS.jsx";
 import CommandPalette from "./ui/CommandPalette.jsx";
 import { ToastProvider, useToast } from "./ui/Toast.jsx";
 import { ErrorBoundary } from "./ui/Feedback.jsx";
@@ -43,13 +49,19 @@ const NAV_GROUPS = [
     label: "Intelligence",
     items: [
       { id: "warning", label: "Early warning", Icon: IconAlert, route: EarlyWarningBoard, keywords: "clusters risk investigations insights csat dollars copq" },
+      { id: "insights", label: "Insights", Icon: IconSpark, route: InsightsBoard, keywords: "insights trends categories sentiment" },
+      { id: "studio", label: "Feature studio", Icon: IconSpark, route: FeatureStudio, keywords: "feature studio forecast planning experiments" },
+      { id: "economics", label: "Quality economics", Icon: IconSpark, route: QualityEconomics, keywords: "cost quality economics copq roi" },
     ],
   },
   {
     label: "Trust & platform",
     items: [
+      { id: "trust", label: "Trust pipeline", Icon: IconShield, route: TrustPipeline, keywords: "pipeline quality trust scorecards" },
+      { id: "enterprise", label: "Enterprise ops", Icon: IconLayers, route: EnterpriseOps, keywords: "enterprise graph memory scenarios copilot" },
       { id: "audits", label: "Trust", Icon: IconShield, route: TrustDesk, keywords: "audit groundedness labels lineage provenance eval" },
-      { id: "platform", label: "Platform", Icon: IconLayers, route: PlatformDesk, keywords: "governance deployments proposals v3 enterprise copilot" },
+      { id: "platform", label: "Platform", Icon: IconLayers, route: PlatformOS, keywords: "governance deployments proposals v3 enterprise copilot" },
+      { id: "builder", label: "Pack builder", Icon: IconFolder, route: PackBuilder, keywords: "pack builder csv mapping profile" },
       { id: "settings", label: "Settings", Icon: IconGear, route: Settings, keywords: "api key pack switch webhook theme lab builder" },
     ],
   },

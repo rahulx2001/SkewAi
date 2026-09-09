@@ -191,11 +191,22 @@ if (!distCssFiles.length) {
   } else {
     ok("dist retains dark charcoal --bg");
   }
-  // light bg present (warm paper, not old teal daylight)
-  if (!/#f3f1eb|#faf8f3|#fffcf6|#e8e4db/i.test(distCss)) {
-    fail("dist CSS missing expected light surface hexes");
+  const distLight = distCss.match(/:root\[data-theme="?light"?\]\{([^}]+)\}/i);
+  const distLightBlock = distLight?.[1] || "";
+  const distLightBg = distLightBlock.match(/--bg:\s*([^;]+);/i)?.[1]?.trim();
+  const distLightPanel = distLightBlock.match(/--bg-panel:\s*([^;]+);/i)?.[1]?.trim();
+  if (!distLightBg || !distLightPanel) {
+    fail("dist CSS missing light theme surface tokens");
   } else {
-    ok("dist CSS includes light surface colors");
+    const bgLum = hexLum(distLightBg);
+    const panelLum = hexLum(distLightPanel);
+    if (bgLum == null || panelLum == null || bgLum < 0.68 || panelLum < 0.72) {
+      fail(
+        `dist CSS light surfaces are too dark (--bg ${distLightBg}, --bg-panel ${distLightPanel})`,
+      );
+    } else {
+      ok(`dist CSS light surfaces valid (--bg ${distLightBg}, --bg-panel ${distLightPanel})`);
+    }
   }
   ok(`dist CSS checked: ${distCssFiles.join(", ")}`);
 }

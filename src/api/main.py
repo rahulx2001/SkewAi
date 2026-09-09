@@ -15,7 +15,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -803,3 +803,24 @@ class _StreamedStaticFiles(StaticFiles):
 
 if _DASH_DIST.is_dir():
     app.mount("/ui", _StreamedStaticFiles(directory=str(_DASH_DIST), html=True), name="dashboard")
+else:
+    _UI_FALLBACK_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skew AI Dashboard</title>
+  </head>
+  <body>
+    <main id="root">
+      Dashboard assets are not built in this runtime yet.
+      Run <code>npm run build</code> in <code>dashboard/</code> to serve production UI at /ui/.
+    </main>
+  </body>
+</html>
+"""
+
+    @app.get("/ui", include_in_schema=False)
+    @app.get("/ui/", include_in_schema=False)
+    async def _ui_fallback() -> HTMLResponse:
+        return HTMLResponse(content=_UI_FALLBACK_HTML, status_code=200)
