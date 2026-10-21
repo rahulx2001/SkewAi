@@ -162,29 +162,68 @@ def erase_interaction(con, interaction_id: str) -> dict[str, int]:
     result is identical to the pre-AI-layer behaviour.
     """
     deleted: dict[str, int] = {}
+    case_ids = []
+    if _relation_exists(con, "cases"):
+        case_ids = [r[0] for r in con.execute("SELECT case_id FROM cases WHERE interaction_id = ?", [interaction_id]).fetchall()]
+
     if _relation_exists(con, "case_evidence"):
-        rows = con.execute(
-            "SELECT storage_path FROM case_evidence WHERE interaction_id = ?", [interaction_id]
-        ).fetchall()
+        where = "interaction_id = ?"
+        params = [interaction_id]
+        if case_ids:
+            where += f" OR case_id IN ({','.join('?' * len(case_ids))})"
+            params.extend(case_ids)
+        rows = con.execute(f"SELECT evidence_id, storage_path FROM case_evidence WHERE {where}", params).fetchall()
         from pathlib import Path
 
-        for (path,) in rows:
+        failed_ev_ids = set()
+        unlinked_count = 0
+        for ev_id, path in rows:
             try:
-                Path(path).unlink(missing_ok=True)
+                if path:
+                    Path(path).unlink(missing_ok=True)
+                unlinked_count += 1
             except OSError:
-                pass
-        con.execute("DELETE FROM case_evidence WHERE interaction_id = ?", [interaction_id])
-        deleted["case_evidence"] = len(rows)
+                failed_ev_ids.add(ev_id)
+        for ev_id, _ in rows:
+            if ev_id not in failed_ev_ids:
+                con.execute("DELETE FROM case_evidence WHERE evidence_id = ?", [ev_id])
+        deleted["case_evidence"] = -1 if failed_ev_ids else unlinked_count
+
     if _relation_exists(con, "ai_layer_events"):
         n = con.execute(
             "SELECT COUNT(*) FROM ai_layer_events WHERE interaction_id = ?", [interaction_id]
         ).fetchone()[0]
         con.execute("DELETE FROM ai_layer_events WHERE interaction_id = ?", [interaction_id])
         deleted["ai_layer_events"] = int(n)
+
+    if _relation_exists(con, "ai_fault_codes"):
+        where = "interaction_id = ?"
+        params = [interaction_id]
+        if case_ids:
+            where += f" OR case_id IN ({','.join('?' * len(case_ids))})"
+            params.extend(case_ids)
+        n = con.execute(f"SELECT COUNT(*) FROM ai_fault_codes WHERE {where}", params).fetchone()[0]
+        con.execute(f"DELETE FROM ai_fault_codes WHERE {where}", params)
+        deleted["ai_fault_codes"] = int(n)
+
+    if _relation_exists(con, "ai_raise_reviews"):
+        n = con.execute(
+            "SELECT COUNT(*) FROM ai_raise_reviews WHERE interaction_id = ?", [interaction_id]
+        ).fetchone()[0]
+        con.execute("DELETE FROM ai_raise_reviews WHERE interaction_id = ?", [interaction_id])
+        deleted["ai_raise_reviews"] = int(n)
+
     from src.ai_layer.video_evidence import erase_for_interaction as _erase_video
 
     if _relation_exists(con, "case_video_evidence"):
-        deleted["case_video_evidence"] = _erase_video(con, interaction_id)
+        deleted["case_video_evidence"] = _erase_video(con, interaction_id, case_ids=case_ids)
+
+    try:
+        from src.ai_layer.whatsapp_mock import erase_for_interaction as _erase_wm
+        _erase_wm(interaction_id)
+    except Exception:
+        pass
+
     return deleted
 
 

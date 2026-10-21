@@ -225,21 +225,39 @@ def attach_to_case(case_id: str, value: Any) -> dict[str, Any]:
     if invalid:
         return {"error": "invalid", "invalid": invalid, "format": DTC_RE.pattern}
     with ops_con() as con:
-        row = con.execute("SELECT interaction_id, category, severity, pack_id FROM cases WHERE case_id = ?", [case_id]).fetchone()
+        row = con.execute("SELECT interaction_id, category, severity, pack_id, priority FROM cases WHERE case_id = ?", [case_id]).fetchone()
     if row is None:
         return {"error": "not_found"}
-    iid, cat, sev, pack_id = row
+    iid, cat, sev, pack_id, current_prio = row
     a = store(valid, case_id=case_id, complaint_category=cat, source="api_case")
     final = raise_only(sev, a["floor"], _allowed(pack_id))
     raised = bool(final and final != sev)
     if raised:
         prio = _priority(pack_id, final)
-        with ops_con() as con:
-            # raise-only guard in SQL too: only rows still below the floor are touched
-            lower = [k for k, v in ORDER.items() if v < ORDER[final]]
-            con.execute(f"UPDATE cases SET severity = ?, priority = COALESCE(?, priority) WHERE case_id = ? "
-                        f"AND severity IN ({','.join('?' * len(lower))})", [final, prio, case_id, *lower])
-        _ledger(iid, sev, final, a["floor_reason"])
+        effective_prio = prio
+        if current_prio is not None and prio is not None:
+            effective_prio = min(int(current_prio), int(prio))
+        elif current_prio is not None:
+            effective_prio = current_prio
+        try:
+            _ledger(iid, sev, final, a["floor_reason"])
+            with ops_con() as con:
+                # raise-only guard in SQL too: only rows still below the floor are touched
+                lower = [k for k, v in ORDER.items() if v < ORDER[final]]
+                cur = con.execute(
+                    f"UPDATE cases SET severity = ?, "
+                    f"priority = CASE WHEN ? IS NULL THEN priority "
+                    f"WHEN priority IS NOT NULL AND priority < ? THEN priority "
+                    f"ELSE ? END "
+                    f"WHERE case_id = ? AND severity IN ({','.join('?' * len(lower))})",
+                    [final, effective_prio, effective_prio, effective_prio, case_id, *lower],
+                )
+                if hasattr(cur, "rowcount") and cur.rowcount == 0:
+                    raised = False
+                    final = sev
+        except Exception:
+            raised = False
+            final = sev
     _event(iid, case_id, sev, final, a)
     out = for_case(case_id)
     out.update({"severity_before": sev, "severity_after": final if raised else sev, "raised": raised})
@@ -249,17 +267,14 @@ def attach_to_case(case_id: str, value: Any) -> dict[str, Any]:
 def _ledger(iid: str | None, rule: str | None, final: str, why: str | None) -> None:
     if not iid:
         return
-    try:
-        from src.ledger import record_action
-        from src.ledger.writer import AgentAction
+    from src.ledger import record_action
+    from src.ledger.writer import AgentAction
 
-        record_action(AgentAction(
-            interaction_id=iid, agent="ai_layer", action_type="severity_scored",
-            input_summary=f"severity={rule}; fault-code floor={SAFETY_FLOOR}",
-            output_summary=f"severity raised {rule}->{final} (max(rule, fault-code floor)); reason={str(why)[:160]}",
-        ))
-    except Exception:
-        pass
+    record_action(AgentAction(
+        interaction_id=iid, agent="ai_layer", action_type="severity_scored",
+        input_summary=f"severity={rule}; fault-code floor={SAFETY_FLOOR}",
+        output_summary=f"severity raised {rule}->{final} (max(rule, fault-code floor)); reason={str(why)[:160]}",
+    ))
 
 
 def _event(iid, case_id, before, after, a) -> None:
@@ -308,9 +323,11 @@ async def maybe_raise_severity_dtc(ctx, tres: dict[str, Any]) -> dict[str, Any]:
             return new
         from src.agents.triage import _priority_from_matrix
 
-        ctx.severity = final
-        ctx.priority = _priority_from_matrix(final, ctx)
+        new_prio = _priority_from_matrix(final, ctx)
+        preserved_prio = min(int(ctx.priority), int(new_prio)) if getattr(ctx, "priority", None) is not None else new_prio
         _ledger(ctx.interaction_id, rule, final, a["floor_reason"])
+        ctx.severity = final
+        ctx.priority = preserved_prio
         new.update({"severity": final, "priority": ctx.priority})
         new["fault_codes"]["raised"] = {"from": rule, "to": final, "reason": a["floor_reason"]}
         return new

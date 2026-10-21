@@ -166,7 +166,7 @@ MODELS = {
 
 _CLAUSE_SPLIT = re.compile(r"[,.;!?।|]+|\s(?:लेकिन|मगर|परंतु|पर|और|फिर|but|lekin|magar|aur|and|phir|par)\s")
 _NEG_AFTER = re.compile(rf"{_L}(?:नहीं|नही|ना|न|मत|nahi|nahin|nhi|nai|na|mat|not|no){_R}")
-_NEG_BEFORE = re.compile(rf"(?:{_L}(?:बिना|bina|without|koi|कोई|no){_R})\s*(?:[\w{_DEV}]+\s+){{0,1}}$")
+_NEG_BEFORE = re.compile(rf"(?:{_L}(?:बिना|bina|without|no|nahi|nahin|नहीं|नही){_R})\s*(?:[\w{_DEV}]+\s+){{0,1}}$")
 _HEDGE = re.compile(rf"{_L}(?:शायद|shayad|sayad|maybe|perhaps){_R}")
 
 
@@ -193,7 +193,9 @@ def analyse(text: str) -> dict[str, Any]:
         for pat, gloss in INTRINSIC:
             m = re.search(pat, rest)
             if m:
-                hazards.append({"gloss": gloss, "match": m.group(0)})
+                item = {"gloss": gloss, "match": m.group(0)}
+                is_hedged_or_outer_neg = bool(_HEDGE.search(clause)) or bool(_NEG_BEFORE.search(clause[:m.start()]))
+                (suppressed if is_hedged_or_outer_neg else hazards).append(item)
                 rest = rest[:m.start()] + " " * (m.end() - m.start()) + rest[m.end():]
         for pat, gloss in HAZARDS:
             for m in re.finditer(pat, rest):
@@ -259,11 +261,21 @@ async def maybe_apply_hindi_intake(ctx, text: str, ires: dict[str, Any]) -> dict
         from src.ai_layer.language import detect
 
         lang = detect(text)["lang"]
-        if lang not in ("hi", "hinglish"):
+        info = analyse(text)
+        has_hazard = bool(info["gloss"])
+        if lang not in ("hi", "hinglish") and not has_hazard:
             return ires
+
+        target_lang = lang if lang in ("hi", "hinglish") else "hinglish"
+        # F01: Run hazard check before special keys/readback gates
+        if has_hazard and not (getattr(ctx, "safety_flags", None) or {}).get("escalation"):
+            res = _apply_hazard(ctx, text, ires, target_lang, info)
+            if res is not None:
+                return res
+
         if any(ires.get(k) for k in _SPECIAL_KEYS) or (getattr(ctx, "safety_flags", None) or {}).get("escalation"):
             return ires
-        return _apply(ctx, text, ires, lang)
+        return _apply_slots(ctx, text, ires, target_lang, info)
     except Exception as e:  # never break the live call
         try:
             from src.ai_layer.store import record_event
@@ -275,14 +287,13 @@ async def maybe_apply_hindi_intake(ctx, text: str, ires: dict[str, Any]) -> dict
         return ires
 
 
-def _apply(ctx, text: str, ires: dict[str, Any], lang: str) -> dict[str, Any]:
-    from src.agents.intake import IntakeAgent, _check_kill_switch
+def _apply_hazard(ctx, text: str, ires: dict[str, Any], lang: str, info: dict[str, Any]) -> dict[str, Any] | None:
+    from src.agents.intake import _check_kill_switch
     from src.ai_layer.store import record_event
     from src.ledger import record_action
     from src.ledger.writer import AgentAction
 
-    iid = ctx.interaction_id
-    info = analyse(text)
+    iid = getattr(ctx, "interaction_id", None)
     _remember(iid, info)
     gloss_text = ". ".join(info["gloss"])
     term = _check_kill_switch(gloss_text, ctx) if gloss_text else None
@@ -301,11 +312,21 @@ def _apply(ctx, text: str, ires: dict[str, Any], lang: str) -> dict[str, Any]:
         out.update({
             "question": ctx.pack.manifest.safety.escalation_script,
             "kill_switch": term, "fast_path": True,
+            "readback": False,
             "slots_filled_now": bool(ires.get("extracted")),
             "ai_layer": {"safety_raised": term, "language": lang, "source": "hindi_safety"},
         })
         return out
+    return None
 
+
+def _apply_slots(ctx, text: str, ires: dict[str, Any], lang: str, info: dict[str, Any]) -> dict[str, Any]:
+    from src.agents.intake import IntakeAgent
+    from src.ledger import record_action
+    from src.ledger.writer import AgentAction
+
+    iid = getattr(ctx, "interaction_id", None)
+    _remember(iid, info)
     filled: dict[str, str] = {}
     intake = IntakeAgent(ctx)
 
@@ -372,14 +393,16 @@ async def maybe_raise_severity_hi(ctx, tres: dict[str, Any]) -> dict[str, Any]:
         from src.ledger import record_action
         from src.ledger.writer import AgentAction
 
-        ctx.severity = final
-        ctx.priority = _priority_from_matrix(final, ctx)
+        new_prio = _priority_from_matrix(final, ctx)
+        preserved_prio = min(int(ctx.priority), int(new_prio)) if getattr(ctx, "priority", None) is not None else new_prio
         why = f"Hindi/Hinglish safety vocabulary: {', '.join(sig.get('gloss') or []) or 'safety-critical component'}"
         record_action(AgentAction(
             interaction_id=ctx.interaction_id, agent="ai_layer", action_type="severity_scored",
             input_summary=f"rule severity={rule}; hindi_safety floor={floor}",
             output_summary=f"severity raised {rule}->{final} (max(rule, floor)); reason={why[:160]}",
         ))
+        ctx.severity = final
+        ctx.priority = preserved_prio
         record_event(kind="hindi_severity", interaction_id=ctx.interaction_id, mode="deterministic",
                      deterministic={"severity": rule}, accepted={"severity": final}, reason="raised_by_floor")
         new = dict(tres)

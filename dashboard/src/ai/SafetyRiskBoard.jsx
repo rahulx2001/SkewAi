@@ -38,7 +38,12 @@ export default function SafetyRiskBoard({ limit = 12 }) {
     <section className="ai-safety-board card" data-testid="safety-board" style={{ marginBottom: 14, padding: 12 }}>
       <h3 className="analytics-h">Safety-first queue <span className="muted small">(brakes, steering, air bags, fuel/fire first)</span></h3>
       <BacktestHero h={d.backtest_headline} />
-      {rows.length === 0 && <div className="muted small">No open investigations yet.</div>}
+      {d.error && (
+        <div className="banner banner-warn small" role="alert" style={{ marginBottom: 10 }}>
+          Could not load safety-first queue. Please check permissions or connection.
+        </div>
+      )}
+      {!d.error && rows.length === 0 && <div className="muted small">No open investigations yet.</div>}
       {rows.length > 0 && (
         <table className="table small">
           <thead><tr><th>Risk</th><th>Investigation</th><th>Slice</th><th>Cases</th><th>Crash / fire / injury mentions</th></tr></thead>

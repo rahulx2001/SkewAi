@@ -223,11 +223,15 @@ def submit_review(*, event_id: str, verdict: str, note: str | None, reviewer: st
             [rid, event_id, raise_row["interaction_id"], v, clean_note, reviewer[:80], reviewer_role,
              raise_row["rule_severity"], raise_row["ai_severity"], utc_now()],
         )
-        aid = _audit(con, action="review_recorded", actor=reviewer[:80], actor_role=reviewer_role,
-                     event_id=event_id, review_id=rid,
-                     detail={"verdict": v, "note_present": bool(clean_note),
-                             "rule_severity": raise_row["rule_severity"], "ai_severity": raise_row["ai_severity"],
-                             "severity_changed": False})
+        try:
+            aid = _audit(con, action="review_recorded", actor=reviewer[:80], actor_role=reviewer_role,
+                         event_id=event_id, review_id=rid,
+                         detail={"verdict": v, "note_present": bool(clean_note),
+                                 "rule_severity": raise_row["rule_severity"], "ai_severity": raise_row["ai_severity"],
+                                 "severity_changed": False})
+        except Exception:
+            con.execute("DELETE FROM ai_raise_reviews WHERE review_id = ?", [rid])
+            raise
         case = _case_for(con, raise_row["interaction_id"])
     return {"review_id": rid, "audit_id": aid, "event_id": event_id, "verdict": v, "note": clean_note,
             "case_severity_unchanged": True, "case": case}
@@ -256,7 +260,10 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
 
 def stats(min_n: int = MIN_REVIEWS_FOR_RATE) -> dict[str, Any]:
     with ops_con() as con:
-        raises = len(_raise_rows(con, limit=1000))
+        raises = 0
+        if _relation_exists(con, "ai_layer_events"):
+            row = con.execute("SELECT COUNT(*) FROM ai_layer_events WHERE kind = 'severity' AND reason = 'raised'").fetchone()
+            raises = int(row[0]) if row else 0
         acc = rej = 0
         if _relation_exists(con, "ai_raise_reviews"):
             for verdict, n in con.execute("SELECT verdict, COUNT(*) FROM ai_raise_reviews GROUP BY verdict").fetchall():

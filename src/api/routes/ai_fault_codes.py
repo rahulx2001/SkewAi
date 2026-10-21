@@ -55,6 +55,15 @@ async def attach_interaction_codes(
     _role: str = Depends(require_perm_dep("contact:write", open_mode_ok=True)),
 ) -> dict[str, Any]:
     from src.ai_layer.fault_codes import store
+    from src.data.warehouse import ops_con
+    from src.frontline.dsr import is_interaction_erased
+
+    with ops_con() as con:
+        row = con.execute("SELECT 1 FROM interactions WHERE interaction_id = ?", [interaction_id]).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="interaction not found")
+        if is_interaction_erased(interaction_id, con=con):
+            raise HTTPException(status_code=404, detail="interaction erased")
 
     codes = _validate(body)
     out = await ops_in_thread(lambda: store(codes, interaction_id=interaction_id, source="api_intake"))

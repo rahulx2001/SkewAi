@@ -49,6 +49,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import os
 import subprocess
 import sys
 import time
@@ -305,6 +306,26 @@ def check_test_allowed(test_path: Path, force: bool) -> None:
     if test_path.exists() and not force:
         raise Refused(f"test results already exist at {test_path}; the out-of-sample test runs once "
                       "(pass --force-retest to override, which is logged)")
+    marker = test_path.parent / ".test_run_marker"
+    if marker.exists() and not force:
+        raise Refused(f"test evaluation already started or incomplete at {marker}; "
+                      "the out-of-sample test runs once (pass --force-retest to override, which is logged)")
+
+
+def reserve_test_run(test_path: Path, force: bool) -> None:
+    marker = test_path.parent / ".test_run_marker"
+    if force and marker.exists():
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"started at {datetime.now(timezone.utc).isoformat()}\n")
+    except FileExistsError:
+        if not force:
+            raise Refused(f"concurrent or prior incomplete test evaluation detected at {marker}; refusing repeat run")
 
 
 def _zip_fingerprint(p: Path | None) -> dict[str, Any] | None:
@@ -435,13 +456,19 @@ def run_test(args) -> dict[str, Any]:
     frozen = load_frozen(out / "oos_config.json")
     test_path = out / "oos_test_results.json"
     check_test_allowed(test_path, args.force_retest)
+    reserve_test_run(test_path, args.force_retest)
     cfg = frozen["body"]["thresholds"]
     ws, we = frozen["body"]["test_window"]
+    frozen_pack = frozen["body"].get("pack")
+    if frozen_pack and frozen_pack != args.pack:
+        raise Refused(f"mismatched pack: frozen config expects '{frozen_pack}', got '{args.pack}'")
     log_run(out, {"phase": "test_start", "forced": bool(args.force_retest), "config_sha256": frozen["sha256"],
                   "config_id": cfg_id(cfg)})
     ev = evaluate(args.pack, ws, we, [cfg], workers=args.workers, progress=True)
     makes = {m.strip().upper() for m in args.makes.split(",") if m.strip()}
     res = full_metrics(ev, cfg, Path(args.zip) if args.zip else None, makes, args.year_min, args.year_max)
+    if res.get("regate_mismatches_vs_scorer", 0) > 0:
+        raise Refused(f"re-gate mismatch: {res['regate_mismatches_vs_scorer']} rows differed from scorer; test invalid")
     res.update({"config_sha256": frozen["sha256"], "test_window": [ws, we], "elapsed_s": ev["elapsed_s"],
                 "note": "single evaluation of the frozen config; no thresholds were changed after this run"})
     test_path.write_text(json.dumps(res, indent=2, default=str))

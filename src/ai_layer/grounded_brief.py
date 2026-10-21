@@ -185,7 +185,8 @@ def verify_claim(claim: dict[str, Any], *, brief: dict[str, Any], allowed_ids: s
         _fmt_nums(records_by_id.get(rid, {}).get("text"), local_numbers)
         _fmt_nums(rid, local_numbers)
     for num in _NUM.findall(text):
-        if num not in local_numbers and num.rstrip("0").rstrip(".") not in local_numbers:
+        norm_decimal = num.rstrip("0").rstrip(".") if "." in num else num
+        if num not in local_numbers and norm_decimal not in local_numbers:
             return False, f"unsupported_number:{num}"
     lead = (brief.get("recall") or {}).get("lead_time_weeks") if isinstance(brief.get("recall"), dict) else None
     viol = narration_violations(text, {"evidence_ids": sorted(allowed_ids), "lead_time_weeks": lead})

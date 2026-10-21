@@ -89,16 +89,19 @@ def _query(pack_id: str, make: str, model: str, year: str) -> dict[str, Any]:
     with domain_con(pack_id, read_only=True) as con:
         rows = con.execute(
             "SELECT upper(category), count(*) FROM records WHERE upper(entity_2)=upper(?) AND upper(entity_3)=upper(?) "
-            "AND entity_1=? AND category IS NOT NULL GROUP BY 1",
+            "AND entity_1=? AND category IS NOT NULL "
+            "AND (provenance IS NULL OR provenance NOT IN ('inferred', 'fixture')) GROUP BY 1",
             [make, model, str(year)],
         ).fetchall()
         peer = con.execute(
-            "SELECT upper(category), count(*) FROM records WHERE entity_1=? AND category IS NOT NULL GROUP BY 1",
+            "SELECT upper(category), count(*) FROM records WHERE entity_1=? AND category IS NOT NULL "
+            "AND (provenance IS NULL OR provenance NOT IN ('inferred', 'fixture')) GROUP BY 1",
             [str(year)],
         ).fetchall()
         texts = con.execute(
             "SELECT upper(category), text FROM records WHERE upper(entity_2)=upper(?) AND upper(entity_3)=upper(?) "
-            "AND entity_1=? AND category IS NOT NULL ORDER BY received_at DESC LIMIT 3000",
+            "AND entity_1=? AND category IS NOT NULL "
+            "AND (provenance IS NULL OR provenance NOT IN ('inferred', 'fixture')) ORDER BY received_at DESC LIMIT 3000",
             [make, model, str(year)],
         ).fetchall()
         recalls = con.execute(

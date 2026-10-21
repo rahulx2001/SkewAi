@@ -95,7 +95,7 @@ def service_queue(limit: int = 50, include_simulated: bool = True) -> dict[str, 
                    c.investigation_id, c.status, c.case_kind, i.entity_1, i.entity_2, i.entity_3, i.channel
             FROM cases c LEFT JOIN interactions i ON i.interaction_id = c.interaction_id
             WHERE c.status IN ('open', 'pending_followup') AND c.case_kind IN ({','.join('?' * len(kinds))})
-            ORDER BY c.created_at DESC LIMIT 2000
+            ORDER BY CASE WHEN lower(COALESCE(c.severity, '')) = 'critical' THEN 1 WHEN lower(COALESCE(c.severity, '')) = 'medium' THEN 2 ELSE 3 END, c.created_at DESC
             """,
             list(kinds),
         )

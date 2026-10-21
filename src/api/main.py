@@ -280,6 +280,67 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Frontline-Session", "X-Frontline-Role"],
 )
+class StreamingBodyLimitASGI:
+    """Enforce request body size limits at ASGI ingress before multipart body spooling."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("method") == "POST":
+            path = scope.get("path") or ""
+            limit = None
+            if "/evidence" in path:
+                from src.ai_layer.config import evidence_max_bytes
+
+                limit = evidence_max_bytes() + 65536
+            elif "/video" in path:
+                from src.ai_layer.video_evidence import max_bytes
+
+                limit = max_bytes() + 65536
+
+            if limit is not None:
+                for header_name, header_val in scope.get("headers") or []:
+                    if header_name.lower() == b"content-length":
+                        try:
+                            if int(header_val) > limit:
+                                response = JSONResponse(
+                                    status_code=413,
+                                    content={"detail": f"request body too large (max {limit} bytes)"},
+                                )
+                                await response(scope, receive, send)
+                                return
+                        except (ValueError, TypeError):
+                            pass
+
+                total_bytes = 0
+
+                async def limited_receive():
+                    nonlocal total_bytes
+                    msg = await receive()
+                    if msg.get("type") == "http.request":
+                        total_bytes += len(msg.get("body", b""))
+                        if total_bytes > limit:
+                            response = JSONResponse(
+                                status_code=413,
+                                content={"detail": f"request body too large (max {limit} bytes)"},
+                            )
+                            await response(scope, receive, send)
+                            raise RuntimeError("streaming_body_limit_exceeded")
+                    return msg
+
+                try:
+                    await self.app(scope, limited_receive, send)
+                except RuntimeError as e:
+                    if str(e) == "streaming_body_limit_exceeded":
+                        return
+                    raise
+                return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(StreamingBodyLimitASGI)  # type: ignore[arg-type]
 # Pure ASGI (not BaseHTTPMiddleware) so /ws/* is gated too.
 app.add_middleware(FrontlineEnabledASGI)  # type: ignore[arg-type]
 from src.api.identifier_guard import IdentifierGuardASGI

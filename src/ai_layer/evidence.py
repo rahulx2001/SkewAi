@@ -183,6 +183,44 @@ def _interaction_pack(con, interaction_id: str) -> str | None:
 # ── Store ──────────────────────────────────────────────────────────────────
 
 
+def strip_metadata(data: bytes, mime: str) -> bytes:
+    """Strip EXIF and other device metadata from images before saving and serving."""
+    try:
+        has_metadata = False
+        if mime == "image/jpeg":
+            if b"\xff\xe1" in data or b"\xff\xed" in data or b"\xff\xfe" in data:
+                has_metadata = True
+        elif mime == "image/png":
+            for chunk in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
+                if chunk in data:
+                    has_metadata = True
+                    break
+        elif mime == "image/webp":
+            if b"EXIF" in data or b"XMP " in data:
+                has_metadata = True
+        else:
+            return data
+
+        if not has_metadata:
+            return data
+
+        import io
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data))
+        fmt = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}.get(mime)
+        if not fmt:
+            return data
+        out = io.BytesIO()
+        if img.mode in ("RGBA", "P") and fmt == "JPEG":
+            img = img.convert("RGB")
+        img.save(out, format=fmt)
+        stripped = out.getvalue()
+        return stripped if stripped else data
+    except Exception:
+        return data
+
+
 def store_evidence(*, data: bytes, filename: str | None, declared_mime: str | None,
                    case_id: str | None = None, interaction_id: str | None = None) -> dict[str, Any]:
     from src.security.identifiers import safe_token_id
@@ -190,6 +228,7 @@ def store_evidence(*, data: bytes, filename: str | None, declared_mime: str | No
     if not case_id and not interaction_id:
         raise EvidenceError(400, "case_id or interaction_id required")
     meta = validate_image(data, declared_mime)
+    data = strip_metadata(data, meta["mime"])
     with ops_con() as con:
         ensure_tables(con)
         case = None

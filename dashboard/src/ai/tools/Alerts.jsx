@@ -15,11 +15,27 @@ export default function Alerts() {
     catch (e) { setMsg(e.message); } finally { setBusy(false); }
   }
   async function ack(id) { try { await aiPostJson(`/api/ai/alerts/${id}/ack`, {}); await load(); } catch (e) { setMsg(e.message); } }
+  async function downloadFeed(e) {
+    e.preventDefault();
+    try {
+      const { apiHeaders } = await import("../../apiAuth.js");
+      const r = await fetch("/api/ai/alerts/feed.json", { headers: apiHeaders(), credentials: "same-origin" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const b = await r.blob();
+      const u = URL.createObjectURL(b);
+      const a = document.createElement("a");
+      a.href = u; a.download = "alerts-feed.json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 1000);
+    } catch (err) {
+      setMsg(`Feed download failed: ${err.message}`);
+    }
+  }
   return (
     <div data-testid="alerts">
       <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <button className="primary" onClick={scan} disabled={busy}>{busy ? "Scanning…" : "Scan investigations for high-risk clusters"}</button>
-        <a className="small" href="/api/ai/alerts/feed.json" target="_blank" rel="noreferrer">JSON feed</a>
+        <a className="small" href="#download-feed" onClick={downloadFeed}>JSON feed</a>
         {d && <span className="muted small">Thresholds: high-risk ≥ {d.thresholds.high_min_cases} cases, elevated ≥ {d.thresholds.elevated_min_cases} cases · {d.delivery}</span>}
       </div>
       {msg && <div className="muted small" style={{ marginTop: 6 }}>{msg}</div>}

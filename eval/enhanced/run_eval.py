@@ -32,9 +32,9 @@ SLOT_LABEL = {"entity_2": "make", "entity_3": "model", "entity_1": "year", "cate
 
 def _isolate() -> None:
     root = tempfile.mkdtemp(prefix="skewai-enh-eval-")
-    os.environ.setdefault("FRONTLINE_DB_PATH", str(Path(root) / "frontline.duckdb"))
-    os.environ.setdefault("DOMAIN_DB_PATH", str(Path(root) / "domains"))
-    os.environ.setdefault("AI_EVIDENCE_DIR", str(Path(root) / "evidence"))
+    os.environ["FRONTLINE_DB_PATH"] = str(Path(root) / "frontline.duckdb")
+    os.environ["DOMAIN_DB_PATH"] = str(Path(root) / "domains")
+    os.environ["AI_EVIDENCE_DIR"] = str(Path(root) / "evidence")
 
 
 def load_calls(path: Path) -> list[dict[str, Any]]:

@@ -12,7 +12,8 @@ from typing import Any
 
 
 def _where(make, model, component, year_min, year_max):
-    w, p = ["region IS NOT NULL", "received_at IS NOT NULL"], []
+    w = ["region IS NOT NULL", "received_at IS NOT NULL", "(provenance IS NULL OR provenance NOT IN ('inferred', 'fixture'))"]
+    p = []
     if make:
         w.append("upper(entity_2) = ?"); p.append(make.strip().upper())
     if model:

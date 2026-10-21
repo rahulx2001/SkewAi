@@ -55,11 +55,31 @@ KEY_FILE=data/hackathon/operator_api_key
 chmod 600 "$KEY_FILE"
 export FRONTLINE_API_KEY="$(cat "$KEY_FILE")" FRONTLINE_AUTH_REQUIRED=1
 
+SESSION_FILE=data/hackathon/session_secret
+[ -f "$SESSION_FILE" ] || .venv/bin/python -c "import secrets; print(secrets.token_hex(32))" > "$SESSION_FILE"
+chmod 600 "$SESSION_FILE"
+export SESSION_SECRET="$(cat "$SESSION_FILE")"
+
+SUPERVISOR_FILE=data/hackathon/supervisor_token
+if [ ! -f "$SUPERVISOR_FILE" ]; then
+  .venv/bin/python -c "
+import os
+from src.api.rbac import issue_session
+tok = issue_session(subject='judge_supervisor', role='supervisor', issuer_role='admin', ttl_s=86400*7)
+print(tok['token'])
+" > "$SUPERVISOR_FILE"
+  chmod 600 "$SUPERVISOR_FILE"
+fi
+export SUPERVISOR_TOKEN="$(cat "$SUPERVISOR_FILE")"
+
 echo
 echo "AI layer: $(.venv/bin/python -c 'from src.ai_layer.config import ai_mode; print(ai_mode())')"
 echo "Seeded India case: $(.venv/bin/python -c "import json;d=json.load(open('data/hackathon/india_seed.json'));print(d['case_id'], d['severity'], d['investigation_id'])")"
 echo "Operator API key (local only, paste on the Sign in page → 'Have an operator API key?'):"
 echo "   $FRONTLINE_API_KEY"
+echo "Supervisor session token (for supervisor actions like raise review):"
+echo "   $SUPERVISOR_TOKEN"
+echo "   (Send via X-Frontline-Session: $SUPERVISOR_TOKEN)"
 echo "Demo path: http://127.0.0.1:8000/ui/#demo"
 [ "$SERVE" = "1" ] || exit 0
 echo "→ [5/5] Serving on http://127.0.0.1:8000 (Ctrl-C to stop)"

@@ -175,7 +175,9 @@ def validate_video(data: bytes, declared_mime: str | None = None) -> dict[str, A
     if mime is None:
         raise VideoError(415, "unsupported video type (allowed: mp4, mov, webm)")
     dur = webm_duration(data) if mime == "video/webm" else mp4_duration(data)
-    if dur is None:
+    import math
+
+    if dur is None or not math.isfinite(dur):
         raise VideoError(422, "could not read the clip duration from the file; please upload an mp4/mov/webm with duration metadata")
     if dur > max_seconds():
         raise VideoError(422, f"clip is {dur:.1f}s; maximum is {max_seconds():.0f}s (aim for 5–10s)")
@@ -305,17 +307,30 @@ def analyze_video(video_id: str) -> dict[str, Any]:
     return get_video(video_id)
 
 
-def erase_for_interaction(con, interaction_id: str) -> int:
+def erase_for_interaction(con, interaction_id: str, case_ids: list[str] | None = None) -> int:
     if not _exists(con):
         return 0
-    rows = con.execute("SELECT storage_path FROM case_video_evidence WHERE interaction_id = ?", [interaction_id]).fetchall()
-    for (p,) in rows:
+    params = [interaction_id]
+    where = "interaction_id = ?"
+    if case_ids:
+        where += f" OR case_id IN ({','.join('?' * len(case_ids))})"
+        params.extend(case_ids)
+    rows = con.execute(f"SELECT video_id, storage_path FROM case_video_evidence WHERE {where}", params).fetchall()
+    failed = set()
+    unlinked = 0
+    for vid, p in rows:
         try:
-            Path(p).unlink(missing_ok=True)
+            if p:
+                Path(p).unlink(missing_ok=True)
+            unlinked += 1
         except OSError:
-            pass
-    con.execute("DELETE FROM case_video_evidence WHERE interaction_id = ?", [interaction_id])
-    return len(rows)
+            failed.add(vid)
+    for vid, _ in rows:
+        if vid not in failed:
+            con.execute("DELETE FROM case_video_evidence WHERE video_id = ?", [vid])
+    if failed:
+        return -1
+    return unlinked
 
 
 __all__ = ["UNVERIFIED_NOTE", "VideoError", "analyze_video", "erase_for_interaction", "get_video", "list_for_case",

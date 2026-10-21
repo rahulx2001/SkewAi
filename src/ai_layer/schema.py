@@ -27,6 +27,11 @@ _TYPES: dict[str, tuple[type, ...]] = {
 def _type_ok(value: Any, typ: str) -> bool:
     if typ in ("integer", "number") and isinstance(value, bool):
         return False
+    if typ in ("integer", "number") and isinstance(value, float):
+        import math
+
+        if not math.isfinite(value):
+            return False
     if typ == "integer" and isinstance(value, float):
         return value.is_integer()
     return isinstance(value, _TYPES.get(typ, (object,)))
@@ -43,10 +48,15 @@ def validate(value: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path}: {value!r} not in enum")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path}: {value} < minimum {schema['minimum']}")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path}: {value} > maximum {schema['maximum']}")
+        import math
+
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{path}: non-finite number {value}")
+        else:
+            if "minimum" in schema and value < schema["minimum"]:
+                errors.append(f"{path}: {value} < minimum {schema['minimum']}")
+            if "maximum" in schema and value > schema["maximum"]:
+                errors.append(f"{path}: {value} > maximum {schema['maximum']}")
     if isinstance(value, str):
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path}: shorter than {schema['minLength']}")

@@ -8,10 +8,12 @@
 Skew AI was already a working deterministic pilot (voice/text intake, safety
 kill-switch, triage, NHTSA clustering, early-warning board, Qubot auditor, audit
 ledger). For the hackathon we added an **optional** Meta AI layer on branch
-`hackathon/ai-layer`. With no key the product behaves exactly as before. With
-a key, Meta models make it **hear Hindi/Hinglish, see the broken part, and
-write a grounded brief**, and the existing deterministic safety rules still have
-the final say.
+`hackathon/ai-layer`. With no Meta key, existing deterministic rules run alongside
+a deterministic Hindi/Hinglish emergency lexicon (`hindi_safety.py`), ensuring critical
+safety words (fire, brake failure, injury) trigger emergency stops locally without network
+access. With a Meta key, Meta models make it **hear Hindi/Hinglish conversationally,
+see the broken part via SAM 3.1, and write a grounded brief**, while deterministic
+safety floors continue to govern every output.
 
 - Demo storyboard: [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)
 - One-command judge setup: `bash scripts/judge_setup.sh` → `http://127.0.0.1:8000/ui/#demo`
@@ -116,10 +118,11 @@ Caveats:
 
 Memory note: the existing `recall_lead_report` caches every as-of series and ran the box out of RAM at this scale. `scripts/ai_safety_backtest.py` therefore calls the same building blocks but keeps only one series in memory per worker. A test asserts that its output is identical to `recall_lead_report` on a fixture.
 
-### 4.2 Hindi/Hinglish intake eval (`eval/enhanced/REPORT.md`)
+### 4.2 Hindi/Hinglish intake eval (`reports/intake_eval/REPORT.md`, `eval/enhanced/REPORT.md`)
 
 There are 60 SYNTHETIC labelled calls (20 English, 20 Hindi, 20 Hinglish; 12 should trip the kill-switch).
-Results for the deterministic path, which is the unchanged product:
+Raw evaluation outputs are archived under `reports/intake_eval/results.json` and `eval/enhanced/results.json`.
+Results for the pure baseline deterministic path (without the newly added Hindi safety lexicon):
 
 | Language | Make | Component | Kill-switch recall | False alarms |
 |---|---|---|---|---|

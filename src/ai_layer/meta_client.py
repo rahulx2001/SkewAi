@@ -30,6 +30,7 @@ Safety properties:
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -62,10 +63,19 @@ class HttpResponse:
 Transport = Callable[[str, bytes, dict[str, str], float], HttpResponse]
 
 
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Disallow following redirects for API POST requests containing Authorization tokens
+        return None
+
+
+_opener = urllib.request.build_opener(SafeRedirectHandler)
+
+
 def _urllib_transport(url: str, body: bytes, headers: dict[str, str], timeout: float) -> HttpResponse:
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - guarded URL
+        with _opener.open(req, timeout=timeout) as resp:  # noqa: S310 - guarded URL
             return HttpResponse(
                 status=int(getattr(resp, "status", 200) or 200),
                 body=resp.read(),
@@ -88,7 +98,7 @@ def set_transport(fn: Transport | None) -> None:
     _transport = fn or _urllib_transport
 
 
-# ── Daily call cap (process-local) ─────────────────────────────────────────
+# ── Daily call cap (persistent + process-local) ───────────────────────────
 _cap_lock = threading.Lock()
 _cap_state: dict[str, int] = {}
 
@@ -100,6 +110,27 @@ def _reserve_call() -> None:
             if key != day:
                 _cap_state.pop(key, None)
         used = _cap_state.get(day, 0)
+        try:
+            from src.data.warehouse import ops_con
+
+            with ops_con() as con:
+                con.execute("CREATE TABLE IF NOT EXISTS ai_call_cap (day TEXT PRIMARY KEY, attempts INTEGER)")
+                row = con.execute("SELECT attempts FROM ai_call_cap WHERE day = ?", [day]).fetchone()
+                db_used = int(row[0]) if row else 0
+                used = max(used, db_used)
+                if used >= config.daily_call_cap():
+                    raise MetaError("daily_call_cap")
+                used += 1
+                con.execute(
+                    "INSERT INTO ai_call_cap (day, attempts) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET attempts = ?",
+                    [day, used, used],
+                )
+                _cap_state[day] = used
+                return
+        except MetaError:
+            raise
+        except Exception:
+            pass
         if used >= config.daily_call_cap():
             raise MetaError("daily_call_cap")
         _cap_state[day] = used + 1
@@ -108,12 +139,29 @@ def _reserve_call() -> None:
 def reset_call_cap() -> None:
     with _cap_lock:
         _cap_state.clear()
+        try:
+            from src.data.warehouse import ops_con
+
+            with ops_con() as con:
+                con.execute("DELETE FROM ai_call_cap")
+        except Exception:
+            pass
 
 
 def calls_today() -> int:
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _cap_lock:
-        return _cap_state.get(day, 0)
+        val = _cap_state.get(day, 0)
+        try:
+            from src.data.warehouse import ops_con
+
+            with ops_con() as con:
+                row = con.execute("SELECT attempts FROM ai_call_cap WHERE day = ?", [day]).fetchone()
+                if row:
+                    val = max(val, int(row[0]))
+        except Exception:
+            pass
+        return val
 
 
 # ── URL guard ──────────────────────────────────────────────────────────────
@@ -141,7 +189,6 @@ def _post(url: str, payload: dict[str, Any], *, timeout: float, accept: str | No
         raise MetaError("meta_disabled")
     key = config.meta_api_key()
     guard_url(url)
-    _reserve_call()
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {key}",
@@ -152,6 +199,7 @@ def _post(url: str, payload: dict[str, Any], *, timeout: float, accept: str | No
     attempts = 1 + config.retries()
     last = "meta_unknown_error"
     for i in range(attempts):
+        _reserve_call()
         try:
             resp = _transport(url, body, headers, timeout)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -183,8 +231,8 @@ def _redact(text: str) -> str:
         from src.security.pii import redact_pii
 
         return redact_pii(text or "")
-    except Exception:
-        return text or ""
+    except Exception as e:
+        raise MetaError("pii_redaction_failed") from e
 
 
 def chat_json(
@@ -247,8 +295,11 @@ def parse_sam_output(text: str) -> list[dict[str, Any]]:
             if "=" in part:
                 k, v = part.split("=", 1)
                 try:
-                    fields[k.strip()] = int(float(v.strip()))
-                except ValueError:
+                    val = float(v.strip())
+                    if not math.isfinite(val):
+                        continue
+                    fields[k.strip()] = int(val)
+                except (ValueError, OverflowError):
                     continue
         if not all(k in fields for k in ("x1", "y1", "x2", "y2")):
             continue
@@ -288,7 +339,7 @@ def _sse_text(body: str) -> str:
             event = json.loads(data)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "response.output_text.delta" and event.get("delta"):
+        if isinstance(event, dict) and event.get("type") == "response.output_text.delta" and event.get("delta"):
             chunks.append(str(event["delta"]))
     return "".join(chunks)
 
@@ -324,15 +375,20 @@ def sam_segment(*, concept: str, image_data_url: str, timeout: float | None = No
         "stream": True,
     }
     resp = _post(config.sam_url(), payload, timeout=timeout or config.timeout_s(), accept="text/event-stream")
-    raw = resp.body.decode("utf-8", errors="replace")
-    if "event-stream" in resp.content_type or raw.lstrip().startswith(("data:", "event:")):
-        text = _sse_text(raw)
-    else:
-        try:
-            text = _responses_text(json.loads(raw))
-        except (json.JSONDecodeError, AttributeError) as e:
-            raise MetaError("sam_bad_envelope") from e
-    return parse_sam_output(text)
+    try:
+        raw = resp.body.decode("utf-8", errors="replace")
+        if "event-stream" in resp.content_type or raw.lstrip().startswith(("data:", "event:")):
+            text = _sse_text(raw)
+        else:
+            try:
+                text = _responses_text(json.loads(raw))
+            except (json.JSONDecodeError, AttributeError) as e:
+                raise MetaError("sam_bad_envelope") from e
+        return parse_sam_output(text)
+    except MetaError:
+        raise
+    except Exception as e:
+        raise MetaError(f"sam_parse_error:{type(e).__name__}") from e
 
 
 def image_generate(*, prompt: str, size: str = "1024x1024", timeout: float | None = None) -> dict[str, Any]:

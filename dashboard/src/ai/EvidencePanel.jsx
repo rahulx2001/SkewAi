@@ -97,18 +97,29 @@ export default function EvidencePanel({ caseId, interactionId, investigationId, 
   const [enabled, setEnabled] = useState(false);
   const fileRef = useRef(null);
   const path = listPath({ caseId, interactionId, investigationId });
+  const reqGenRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!path) return;
+    const currentGen = ++reqGenRef.current;
     try {
       const d = await aiGet(path);
-      setRows(d.evidence || []);
+      if (currentGen === reqGenRef.current) {
+        setRows(d.evidence || []);
+      }
     } catch (e) {
-      setErr(`Could not load evidence (${e.message})`);
+      if (currentGen === reqGenRef.current) {
+        setErr(`Could not load evidence (${e.message})`);
+      }
     }
   }, [path]);
 
-  useEffect(() => { load(); aiStatus().then((s) => setEnabled(s.mode === "enhanced")); }, [load]);
+  useEffect(() => {
+    setRows([]);
+    setErr("");
+    load();
+    aiStatus().then((s) => setEnabled(s.mode === "enhanced"));
+  }, [load]);
   useEffect(() => {
     if (!rows.some((r) => r.analysis_status === "pending")) return undefined;
     const t = setTimeout(load, 2500);
@@ -144,9 +155,26 @@ export default function EvidencePanel({ caseId, interactionId, investigationId, 
         {title} <span className="muted small">({rows.length})</span>
       </h3>
       {!readOnly && !investigationId && (
-        <label className="ghost" style={{ display: "inline-block", cursor: "pointer" }}>
-          <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={onFile} disabled={busy}
-            style={{ display: "none" }} aria-label="Upload photo evidence" />
+        <label
+          className="ghost"
+          style={{ display: "inline-block", cursor: "pointer" }}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              fileRef.current?.click();
+            }
+          }}
+        >
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={onFile}
+            disabled={busy}
+            style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", border: 0 }}
+            aria-label="Upload photo evidence"
+          />
           <span className="chip">{busy ? "Uploading…" : "+ Add photo (JPEG/PNG/WebP, ≤ 8 MB)"}</span>
         </label>
       )}

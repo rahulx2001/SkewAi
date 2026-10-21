@@ -17,8 +17,23 @@ export default function FaultCodesPanel({ caseId, readOnly = false }) {
   const [text, setText] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState("");
   const path = `/api/ai/cases/${encodeURIComponent(caseId)}/fault-codes`;
-  const load = useCallback(() => { aiGet(path).then(setData).catch(() => setData(null)); }, [path]);
+  const load = useCallback(() => {
+    setLoading(true);
+    setFetchError("");
+    aiGet(path)
+      .then((d) => {
+        setData(d);
+        setFetchError("");
+      })
+      .catch((err) => {
+        setData(null);
+        setFetchError(err.message || "Failed to load fault codes");
+      })
+      .finally(() => setLoading(false));
+  }, [path]);
   useEffect(() => { load(); }, [load]);
 
   async function add(e) {
@@ -39,8 +54,15 @@ export default function FaultCodesPanel({ caseId, readOnly = false }) {
   return (
     <div className="ai-fault-codes" data-testid="fault-codes-panel" style={{ marginTop: 12 }}>
       <h4 className="analytics-h">Fault codes (OBD-II) <span className="muted small">({codes.length})</span></h4>
-      {codes.length === 0 && <div className="muted small">No fault codes attached.</div>}
-      {codes.length > 0 && (
+      {loading && <div className="muted small">Loading fault codes…</div>}
+      {!loading && fetchError && (
+        <div className="banner banner-warn small" role="alert" style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+          <span>Error loading fault codes: {fetchError}</span>
+          <button type="button" className="ghost small" onClick={load} style={{ padding: "2px 6px" }}>Retry</button>
+        </div>
+      )}
+      {!loading && !fetchError && codes.length === 0 && <div className="muted small">No fault codes attached.</div>}
+      {!loading && !fetchError && codes.length > 0 && (
         <table className="table small">
           <thead><tr><th>Code</th><th>Generic meaning</th><th>Component</th><th>Safety</th><th>Check</th></tr></thead>
           <tbody>

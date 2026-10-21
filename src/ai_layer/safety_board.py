@@ -21,7 +21,7 @@ from src.ai_layer.safety import TIER_ORDER, slice_safety
 BACKTEST_JSON = Path(__file__).resolve().parents[2] / "reports" / "nhtsa" / "backtest_safety.json"
 
 
-def _investigations(limit: int) -> list[dict[str, Any]]:
+def _investigations(candidate_limit: int = 2000) -> list[dict[str, Any]]:
     from src.data.warehouse import ops_con
 
     with ops_con(read_only=True) as con:
@@ -32,7 +32,7 @@ def _investigations(limit: int) -> list[dict[str, Any]]:
             FROM investigations WHERE status IN ('open', 'monitoring')
             ORDER BY case_count DESC, opened_at DESC LIMIT ?
             """,
-            [int(limit)],
+            [candidate_limit],
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -48,7 +48,7 @@ def backtest_headline() -> dict[str, Any] | None:
 
 def safety_board(limit: int = 50) -> dict[str, Any]:
     try:
-        invs = _investigations(limit)
+        invs = _investigations()
     except Exception:
         invs = []
     rows = []
@@ -60,10 +60,12 @@ def safety_board(limit: int = 50) -> dict[str, Any]:
             "safety_risk": risk,
         })
     rows.sort(key=lambda r: (TIER_ORDER.get(r["safety_risk"]["level"], 9), -int(r.get("case_count") or 0)))
+    total_counts_by_level = {lvl: sum(1 for r in rows if r["safety_risk"]["level"] == lvl) for lvl in TIER_ORDER}
+    capped_rows = rows[:max(1, limit)]
     return {
-        "investigations": rows,
-        "count": len(rows),
-        "counts_by_level": {lvl: sum(1 for r in rows if r["safety_risk"]["level"] == lvl) for lvl in TIER_ORDER},
+        "investigations": capped_rows,
+        "count": len(capped_rows),
+        "counts_by_level": total_counts_by_level,
         "backtest_headline": backtest_headline(),
         "method": "component tier + keyword scan of real complaint narratives; ordering heuristic, not a crash prediction",
     }

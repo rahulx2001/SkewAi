@@ -377,6 +377,15 @@ def delete_interaction(interaction_id: str, *, mode: str = "erase") -> dict[str,
         ]
         if _relation_exists(con, "contact_issues"):
             tables.append(("contact_issues", "interaction_id"))
+        # [AI-LAYER] erase optional AI-layer rows + evidence files; returns {}
+        # (no change to the result) when the AI layer never created its tables.
+        try:
+            from src.ai_layer.store import erase_interaction
+
+            deleted.update(erase_interaction(con, iid))
+        except Exception:
+            deleted["ai_layer"] = -1
+
         for table, col in tables:
             try:
                 t = safe_table(table)
@@ -388,14 +397,6 @@ def delete_interaction(interaction_id: str, *, mode: str = "erase") -> dict[str,
                 deleted[table] = int(before)
             except Exception:
                 deleted[table] = -1
-        # [AI-LAYER] erase optional AI-layer rows + evidence files; returns {}
-        # (no change to the result) when the AI layer never created its tables.
-        try:
-            from src.ai_layer.store import erase_interaction
-
-            deleted.update(erase_interaction(con, iid))
-        except Exception:
-            pass
     return {"interaction_id": iid, "deleted": deleted, "ok": erasure_succeeded(deleted)}
 
 
@@ -563,6 +564,14 @@ def tombstone_interaction(interaction_id: str) -> dict[str, Any]:
                 out["contact_issues.description_tombstoned"] = -1
         else:
             out["contact_issues.description_tombstoned"] = 0
+        try:
+            from src.ai_layer.store import erase_interaction
+
+            ai_del = erase_interaction(con, iid)
+            if ai_del:
+                out.update({f"ai.{k}": v for k, v in ai_del.items()})
+        except Exception:
+            out["ai_layer"] = -1
         out["leftovers"] = _plaintext_leftovers(con, iid, stamp)
     ok = erasure_succeeded(out)
     try:

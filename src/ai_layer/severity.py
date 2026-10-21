@@ -113,14 +113,16 @@ async def _raise(ctx, tres: dict[str, Any]) -> dict[str, Any]:
                  ai_proposal=out, accepted={"severity": final}, reason=reason)
     if final == rule:
         return tres
-    ctx.severity = final
-    ctx.priority = _priority_from_matrix(final, ctx)
+    new_prio = _priority_from_matrix(final, ctx)
+    preserved_prio = min(int(ctx.priority), int(new_prio)) if getattr(ctx, "priority", None) is not None else new_prio
     line = str(out.get("reason") or "")[:200]
     record_action(AgentAction(
         interaction_id=ctx.interaction_id, agent="ai_layer", action_type="severity_scored",
         input_summary=f"rule severity={rule}; ai severity={ai} conf={conf:.2f}",
         output_summary=f"severity raised {rule}->{final} (max(rule, ai)); reason={line}",
     ))
+    ctx.severity = final
+    ctx.priority = preserved_prio
     new = dict(tres)
     new.update({"severity": final, "priority": ctx.priority, "ai_layer": {"rule": rule, "ai": ai, "reason": line}})
     return new

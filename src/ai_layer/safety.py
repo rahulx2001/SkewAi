@@ -115,7 +115,7 @@ def slice_safety(pack_id: str, category: str | None, entity_2: str | None, entit
                  *, limit: int = 2000) -> dict[str, Any]:
     from src.data.warehouse import domain_con
 
-    where = ["1=1"]
+    where = ["1=1", "(provenance IS NULL OR provenance NOT IN ('inferred', 'fixture'))"]
     args: list[Any] = []
     for col, val in (("category", category), ("entity_2", entity_2), ("entity_3", entity_3)):
         if val:

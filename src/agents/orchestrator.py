@@ -158,7 +158,7 @@ class Orchestrator:
             interaction_id=interaction_id,
             pack=pack,
             channel=channel,
-            case_kind="simulated" if channel == "simulated" else "customer",
+            case_kind="simulated" if channel in ("simulated", "whatsapp_mock") else "customer",
         )
         self.hooks = hooks or OrchestratorHooks()
         self._pre_supervised_state: str | None = None

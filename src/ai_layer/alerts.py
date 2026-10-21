@@ -130,6 +130,13 @@ def scan_alerts(limit: int = 200) -> dict[str, Any]:
                "title": inv.get("title"), "payload": payload}
         with ops_con(read_only=False) as con:
             con.execute(_DDL)
+            current = con.execute(
+                "SELECT level FROM ai_alerts WHERE investigation_id = ? ORDER BY created_at DESC LIMIT 1",
+                [inv["investigation_id"]],
+            ).fetchone()
+            curr_level = current[0] if current else None
+            if curr_level and _RANK.get(level, 0) <= _RANK.get(curr_level, 0):
+                continue
             con.execute("INSERT INTO ai_alerts (alert_id, investigation_id, pack_id, created_at, level, case_count, title, payload) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         [row["alert_id"], row["investigation_id"], row["pack_id"], row["created_at"], level, cases,

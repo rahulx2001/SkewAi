@@ -23,6 +23,7 @@ services:
       API_PORT: "8000"
       FRONTLINE_AUTH_REQUIRED: "1"
       FRONTLINE_API_KEY: ${FRONTLINE_API_KEY:?Set FRONTLINE_API_KEY (32+ random chars) for the demo container}
+      SESSION_SECRET: ${SESSION_SECRET:-hackathon_demo_session_secret_32_bytes_min_super_secret}
       AI_DEMO_ENABLED: "1"
       SIM_COUNT: ${SIM_COUNT:-15}
       META_API_KEY: ${META_API_KEY:-}

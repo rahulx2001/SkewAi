@@ -7205,10 +7205,22 @@ paths:
           title: X-Frontline-Session
       responses:
         '200':
-          description: Successful Response
+          description: Successful Response (video stream)
           content:
-            application/json:
-              schema: {}
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            video/webm:
+              schema:
+                type: string
+                format: binary
+            video/quicktime:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Video not found
         '422':
           description: Validation Error
           content:
@@ -7558,13 +7570,19 @@ paths:
               $ref: '#/components/schemas/ReviewBody'
       responses:
         '200':
-          description: Successful Response
+          description: Review recorded
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
                 title: Response Review Raise Api Ai Raises  Event Id  Review Post
+        '403':
+          description: Forbidden - supervisor role required
+        '404':
+          description: Raise event not found
+        '409':
+          description: Conflict - raise already has a verdict
         '422':
           description: Validation Error
           content:
@@ -8664,10 +8682,22 @@ paths:
           title: X-Frontline-Session
       responses:
         '200':
-          description: Successful Response
+          description: Successful Response (image stream)
           content:
-            application/json:
-              schema: {}
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Evidence not found
         '422':
           description: Validation Error
           content:

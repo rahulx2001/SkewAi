@@ -139,6 +139,9 @@ def test_routes_validate_and_show(reset_ops_db, monkeypatch):
     assert r.status_code == 201 and r.json()["severity_after"] == "Medium" and r.json()["needs_review"] is True
     g = c.get("/api/ai/cases/case_r/fault-codes").json()
     assert [x["code"] for x in g["codes"]] == ["C0035", "P0300"]
+    assert c.post("/api/ai/interactions/int_x/fault-codes", json={"fault_codes": "U0121"}).status_code == 404
+    with ops_con() as con:
+        con.execute("INSERT INTO interactions (interaction_id, pack_id, pack_version, started_at, channel, status) VALUES ('int_x', 'automotive_nhtsa', '1.0.0', current_timestamp, 'web_text', 'active')")
     r = c.post("/api/ai/interactions/int_x/fault-codes", json={"fault_codes": "U0121"})
     assert r.status_code == 201 and fc.codes_for_interaction("int_x") == ["U0121"]
 
